@@ -1,0 +1,482 @@
+openapi: 3.1.0
+info:
+  title: Sales Management — Policies (Director list)
+  version: 1.0.0
+  description: |
+    API danh sách tất cả chính sách cho giao diện Director (tab "Tất cả chính sách"
+    tại /director/nhan-vien). Lọc, phân trang và sắp xếp đều thực hiện dưới database.
+
+    Dự án chưa cài `@nestjs/swagger` nên spec này được duy trì thủ công — import trực tiếp
+    vào Swagger UI / Postman / orval. Chi tiết: POLICY-ADMIN-LIST-API.md
+
+servers:
+  - url: http://localhost:3010
+    description: production (pm2 sales-be)
+  - url: http://localhost:3011
+    description: development
+
+tags:
+  - name: policies
+    description: Chính sách
+
+security:
+  - bearerAuth: []
+
+paths:
+  /policies/all:
+    get:
+      tags: [policies]
+      operationId: getPoliciesPaginated
+      summary: Danh sách chính sách phân trang cho tab "Tất cả chính sách"
+      description: |
+        Contract FE chốt cho tab "Tất cả chính sách" của Giám đốc.
+
+        Khác `/policies/admin/all`:
+        - `limit` mặc định **12**, wrapper `pagination` (không có hasNextPage/hasPreviousPage)
+        - Field dùng tiền tố: `policyId` / `policyStatus` / `policyCreatedAt`
+        - Sắp xếp cố định `policy.createdAt DESC, policy.id DESC` (không nhận sortBy/sortOrder)
+        - `page` / `limit` được **clamp** thay vì trả 400:
+          `page = max(trunc(Number(page) || 1), 1)`,
+          `limit = min(max(Number(limit) || 12, 1), 100)`
+        - Tham số lạ bị bỏ qua (không 400)
+
+        Phạm vi dữ liệu suy ra từ access token, giống `/policies/admin/all`.
+        Các join đều many-to-one nên một chính sách chỉ xuất hiện một lần, không cần DISTINCT.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: Giá trị ngoài khoảng sẽ được ép về khoảng hợp lệ, không trả lỗi
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          required: false
+          description: Giá trị ngoài khoảng sẽ được ép về khoảng hợp lệ, không trả lỗi
+          schema: { type: integer, minimum: 1, maximum: 100, default: 12 }
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PolicyStatus'
+        - name: schoolId
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: subjectId
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: schoolYear
+          in: query
+          required: false
+          description: '"2026-2027" hoặc "Hè 2026-2027"'
+          schema:
+            type: string
+            pattern: '^(Hè\s)?\d{4}-\d{4}$'
+        - name: employeeId
+          in: query
+          required: false
+          description: Nhân viên phụ trách trường (schools.employee_id) — chỉ là bộ lọc, không mở rộng phạm vi
+          schema: { type: integer, minimum: 1 }
+        - name: fromDate
+          in: query
+          required: false
+          description: Lọc theo ngày tạo chính sách, từ 00:00:00.000 (giờ hệ thống)
+          schema: { type: string, format: date, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        - name: toDate
+          in: query
+          required: false
+          description: Lọc theo ngày tạo chính sách, đến hết 23:59:59.999 (giờ hệ thống)
+          schema: { type: string, format: date, pattern: '^\d{4}-\d{2}-\d{2}$' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyPageResponse'
+              examples:
+                coDuLieu:
+                  summary: Có dữ liệu
+                  value:
+                    data:
+                      - policyId: 1055
+                        policyStatus: DRAFT
+                        policyCreatedAt: '2026-08-04T03:33:58.051Z'
+                        schoolId: 529
+                        schoolName: Trường TEST
+                        subjectId: 795
+                        subjectName: TEST
+                        schoolYear: Hè 2026-2027
+                        employeeId: 28
+                        employeeName: USER TEST
+                    pagination:
+                      page: 1
+                      limit: 12
+                      total: 518
+                      totalPages: 44
+                rong:
+                  summary: Không có dữ liệu
+                  value:
+                    data: []
+                    pagination:
+                      page: 1
+                      limit: 12
+                      total: 0
+                      totalPages: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /policies/admin/all:
+    get:
+      tags: [policies]
+      operationId: getAllPolicies
+      summary: Danh sách chính sách có filter, phân trang, sắp xếp
+      description: |
+        Phạm vi dữ liệu suy ra từ access token, không từ query:
+        - `director`, `saleadmin`, `troly_gd`, `ketoan_truong`: toàn bộ
+        - `director_la`, `salesadmin_la`: chỉ tỉnh 7
+        - `sales`: chỉ trường mình phụ trách (`schools.employee_id`)
+        - role khác: 403
+
+        `employeeId` chỉ là bộ lọc, được AND thêm vào điều kiện phạm vi.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PolicyStatus'
+        - name: schoolId
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: subjectId
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: schoolYear
+          in: query
+          required: false
+          description: '"2026-2027" hoặc "Hè 2026-2027"'
+          schema:
+            type: string
+            pattern: '^(Hè\s)?\d{4}-\d{4}$'
+          example: 'Hè 2026-2027'
+        - name: employeeId
+          in: query
+          required: false
+          description: Nhân viên phụ trách trường (schools.employee_id)
+          schema: { type: integer, minimum: 1 }
+        - name: fromDate
+          in: query
+          required: false
+          description: Lọc theo createdAt >= fromDate 00:00:00.000 (giờ hệ thống, Asia/Ho_Chi_Minh)
+          schema: { type: string, format: date, pattern: '^\d{4}-\d{2}-\d{2}$' }
+          example: '2026-01-01'
+        - name: toDate
+          in: query
+          required: false
+          description: Lọc theo createdAt <= toDate 23:59:59.999 (giờ hệ thống, Asia/Ho_Chi_Minh)
+          schema: { type: string, format: date, pattern: '^\d{4}-\d{2}-\d{2}$' }
+          example: '2026-12-31'
+        - name: search
+          in: query
+          required: false
+          description: Không phân biệt hoa thường — tên trường, tên môn, tên nhân viên, mã hợp đồng
+          schema: { type: string, maxLength: 100 }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: sortBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, schoolName, employeeName]
+            default: createdAt
+        - name: sortOrder
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyListResponse'
+              example:
+                data:
+                  - policyId: 1055
+                    status: DRAFT
+                    createdAt: '2026-08-04T03:33:58.051Z'
+                    updatedAt: '2026-08-04T03:33:58.051Z'
+                    employeeId: 28
+                    employeeName: USER TEST
+                    schoolId: 529
+                    schoolName: Trường TEST
+                    subjectId: 795
+                    subjectName: TEST
+                    schoolYear: Hè 2026-2027
+                    contractNumber: T795|2026
+                    studentCount: 30
+                    totalLessons: 30
+                    policyData:
+                      fee: 600000
+                      durationMonths: 9
+                      studentPerClass: 36
+                      companyProfit: -358666.3
+                      companyProfitPerHS: -39851.81111111111
+                    currentHistoryId: 1146
+                meta:
+                  page: 1
+                  limit: 20
+                  total: 518
+                  totalPages: 26
+                  hasNextPage: true
+                  hasPreviousPage: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /policies/filter-options:
+    get:
+      tags: [policies]
+      operationId: getPolicyFilterOptions
+      summary: Tùy chọn cho bộ lọc, giới hạn theo phạm vi user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyFilterOptions'
+              example:
+                statuses:
+                  - { value: PENDING, label: Chờ duyệt }
+                  - { value: SALE_ADMIN_APPROVED, label: Sale admin đã duyệt }
+                  - { value: DIRECTOR_APPROVED, label: Giám đốc đã duyệt }
+                  - { value: REJECTED, label: Từ chối }
+                  - { value: DRAFT, label: Nháp }
+                schools:
+                  - { id: 529, name: Trường TEST }
+                subjects:
+                  - { id: 795, name: Kỹ năng sống }
+                schoolYears: ['2026-2027', 'Hè 2026-2027', '2025-2026', 'Hè 2025-2026', '2024-2025']
+                employees:
+                  - { id: 17, name: Bùi Huy Hoàng }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Query không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: ['fromDate phải có dạng YYYY-MM-DD và là ngày hợp lệ']
+            error: Bad Request
+            statusCode: 400
+    Unauthorized:
+      description: Thiếu hoặc sai token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Unauthorized
+            statusCode: 401
+    Forbidden:
+      description: Role không có quyền xem danh sách chính sách
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Forbidden resource
+            error: Forbidden
+            statusCode: 403
+
+  schemas:
+    PolicyStatus:
+      type: string
+      enum: [DRAFT, PENDING, SALE_ADMIN_APPROVED, DIRECTOR_APPROVED, REJECTED]
+
+    PolicyListItem:
+      type: object
+      required:
+        - policyId
+        - status
+        - createdAt
+        - updatedAt
+        - employeeId
+        - employeeName
+        - schoolId
+        - schoolName
+        - subjectId
+        - subjectName
+        - schoolYear
+        - contractNumber
+        - studentCount
+        - totalLessons
+        - policyData
+        - currentHistoryId
+      properties:
+        policyId: { type: integer }
+        status: { $ref: '#/components/schemas/PolicyStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        employeeId:
+          type: [integer, 'null']
+          description: null khi trường chưa gán nhân viên phụ trách
+        employeeName: { type: [string, 'null'] }
+        schoolId: { type: integer }
+        schoolName: { type: string }
+        subjectId: { type: integer }
+        subjectName: { type: string }
+        schoolYear: { type: [string, 'null'] }
+        contractNumber: { type: [string, 'null'] }
+        studentCount: { type: [integer, 'null'] }
+        totalLessons: { type: [integer, 'null'] }
+        policyData:
+          type: [object, 'null']
+          additionalProperties: true
+          description: |
+            Nguyên vẹn cột policy.data. Gồm sẵn fee, durationMonths, studentPerClass,
+            companyProfit, companyProfitPerHS và các mảng ttcs / httienmat / htthietbi.
+        currentHistoryId: { type: [integer, 'null'] }
+
+    PolicyPageItem:
+      type: object
+      required:
+        - policyId
+        - policyStatus
+        - policyCreatedAt
+        - schoolId
+        - schoolName
+        - subjectId
+        - subjectName
+        - schoolYear
+        - employeeId
+        - employeeName
+      properties:
+        policyId: { type: integer }
+        policyStatus: { $ref: '#/components/schemas/PolicyStatus' }
+        policyCreatedAt: { type: string, format: date-time }
+        schoolId: { type: integer }
+        schoolName: { type: string }
+        subjectId: { type: integer }
+        subjectName: { type: string }
+        schoolYear: { type: [string, 'null'] }
+        employeeId:
+          type: [integer, 'null']
+          description: null khi trường chưa gán nhân viên phụ trách
+        employeeName: { type: [string, 'null'] }
+
+    PolicyPagination:
+      type: object
+      required: [page, limit, total, totalPages]
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer, description: 'Math.ceil(total / limit); 0 khi total = 0' }
+
+    PolicyPageResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyPageItem' }
+        pagination: { $ref: '#/components/schemas/PolicyPagination' }
+
+    PaginationMeta:
+      type: object
+      required: [page, limit, total, totalPages, hasNextPage, hasPreviousPage]
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer, description: 0 khi total = 0 }
+        hasNextPage: { type: boolean }
+        hasPreviousPage: { type: boolean }
+
+    PolicyListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyListItem' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    PolicyFilterOptions:
+      type: object
+      required: [statuses, schools, subjects, schoolYears, employees]
+      properties:
+        statuses:
+          type: array
+          items:
+            type: object
+            required: [value, label]
+            properties:
+              value: { $ref: '#/components/schemas/PolicyStatus' }
+              label: { type: string }
+        schools:
+          type: array
+          items: { $ref: '#/components/schemas/IdName' }
+        subjects:
+          type: array
+          items: { $ref: '#/components/schemas/IdName' }
+        schoolYears:
+          type: array
+          items: { type: string }
+          description: Năm mới nhất trước; cùng năm thì năm học chính trước "Hè"
+        employees:
+          type: array
+          items: { $ref: '#/components/schemas/IdName' }
+
+    IdName:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: [string, 'null'] }
+
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+        error: { type: string }
+        statusCode: { type: integer }

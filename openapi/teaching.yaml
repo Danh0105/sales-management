@@ -1,0 +1,1218 @@
+openapi: 3.1.0
+info:
+  title: Sales Management — Module giảng dạy (Nhân sự & Giáo viên)
+  version: 1.0.0
+  description: |
+    Quản lý giáo viên, lịch dạy (mẫu lặp theo tuần) và chấm công theo từng buổi.
+
+    Role: `nhansu` toàn quyền; `director`/`director_la`/`troly_gd`/`ketoan_truong` chỉ xem;
+    `giaovien` chỉ xem dữ liệu của chính mình. Phạm vi luôn suy ra từ access token.
+
+    Dự án chưa cài `@nestjs/swagger` nên spec này được duy trì thủ công.
+    Chi tiết: TEACHING-MODULE-API.md
+
+servers:
+  - url: http://localhost:3010
+    description: production (pm2 sales-be)
+  - url: http://localhost:3011
+    description: development
+
+tags:
+  - name: school-classes
+    description: Lớp học của trường — xếp lịch dạy theo lớp
+  - name: teachers
+    description: Hồ sơ giáo viên
+  - name: teaching-schedules
+    description: Lịch dạy — mẫu lặp theo tuần
+  - name: teaching-sessions
+    description: Buổi dạy cụ thể & chấm công
+
+security:
+  - bearerAuth: []
+
+paths:
+  /school-classes:
+    get:
+      tags: [school-classes]
+      operationId: listSchoolClasses
+      summary: Danh sách lớp học
+      description: Role `giaovien` đọc được để hiển thị tên lớp, nhưng không ghi.
+      parameters:
+        - { name: schoolId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: schoolYear, in: query, schema: { type: string, maxLength: 20 } }
+        - { name: gradeLevel, in: query, schema: { type: integer, minimum: 1, maximum: 12 } }
+        - name: catalogId
+          in: query
+          description: >-
+            Môn trong danh mục dùng chung. Có tham số này thì mỗi lớp được trả kèm
+            subjectStatus / subjectId / subjectName / subjectReason — môn tương ứng
+            của trường, để xem trước lớp nào áp được môn.
+          schema: { type: integer, minimum: 1 }
+        - { name: isActive, in: query, schema: { type: boolean } }
+        - name: search
+          in: query
+          description: Theo tên lớp hoặc GVCN, không phân biệt hoa/thường
+          schema: { type: string, maxLength: 100 }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: OK — sắp xếp sẵn theo khối rồi tên lớp
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/SchoolClass' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [school-classes]
+      operationId: createSchoolClass
+      summary: Tạo lớp học cho một trường (nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSchoolClass' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SchoolClass' }
+        '400':
+          description: Thiếu tên lớp/năm học, hoặc trường không tồn tại
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Trùng tên lớp trong cùng trường + năm học
+
+  /school-classes/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      tags: [school-classes]
+      operationId: getSchoolClass
+      summary: Chi tiết lớp học
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SchoolClass' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Lớp học không tồn tại }
+    patch:
+      tags: [school-classes]
+      operationId: updateSchoolClass
+      summary: Sửa lớp học (nhansu)
+      description: '`schoolId` bị bỏ qua — không đổi được trường của lớp.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSchoolClass' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SchoolClass' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Lớp học không tồn tại }
+        '409': { description: Trùng tên lớp trong cùng trường + năm học }
+    delete:
+      tags: [school-classes]
+      operationId: deleteSchoolClass
+      summary: Xoá lớp học (nhansu)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  id: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Lớp học không tồn tại }
+        '409':
+          description: Lớp đã có lịch/buổi dạy — hãy đặt isActive = false
+
+  /teachers:
+    get:
+      tags: [teachers]
+      operationId: listTeachers
+      summary: Danh sách giáo viên
+      parameters:
+        - { name: search, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: isActive, in: query, schema: { type: boolean } }
+        - name: schoolId
+          in: query
+          description: Chỉ giáo viên đang có mẫu lịch còn hiệu lực tại trường này
+          schema: { type: integer, minimum: 1 }
+        - name: teacherRole
+          in: query
+          description: Lọc loại giáo viên trên cùng danh sách tổng hợp
+          schema:
+            type: string
+            enum: [giaovien_congty, giaovien_ctv]
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/TeacherListItem' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [teachers]
+      operationId: createTeacher
+      summary: Tạo hồ sơ giáo viên (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeacher' }
+            examples:
+              thueNgoai:
+                summary: Giáo viên thuê ngoài (không tài khoản)
+                value: { name: 'Cô Nguyễn Thị Lan', phone: '0911222333' }
+              coHuu:
+                summary: Giáo viên cơ hữu có tài khoản đăng nhập
+                value: { name: 'Giáo viên A', employeeId: 141 }
+      responses:
+        '201': { description: Đã tạo }
+        '400':
+          description: Tài khoản không tồn tại hoặc chưa có role `giaovien`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Trùng số điện thoại hoặc tài khoản đã gắn giáo viên khác
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /teachers/me:
+    get:
+      tags: [teachers]
+      operationId: getMyTeacherProfile
+      summary: Hồ sơ giáo viên của tài khoản đang đăng nhập
+      responses:
+        '200': { description: OK }
+        '404': { description: Tài khoản chưa gắn hồ sơ giáo viên nào }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /teachers/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [teachers]
+      operationId: getTeacher
+      summary: Chi tiết giáo viên
+      responses:
+        '200': { description: OK }
+        '404': { description: Không tồn tại }
+    patch:
+      tags: [teachers]
+      operationId: updateTeacher
+      summary: Sửa hồ sơ giáo viên (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeacher' }
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [teachers]
+      operationId: deleteTeacher
+      summary: Xoá giáo viên (role nhansu)
+      description: Chỉ xoá được khi giáo viên chưa có buổi dạy nào.
+      responses:
+        '200': { description: 'Đã xoá: { "deleted": true }' }
+        '409':
+          description: Đã có buổi dạy — dùng isActive = false thay vì xoá
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /teaching-schedules:
+    get:
+      tags: [teaching-schedules]
+      operationId: listTeachingSchedules
+      summary: Danh sách mẫu lịch lặp
+      parameters:
+        - { name: teacherId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: schoolId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: classId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: subjectId, in: query, schema: { type: integer, minimum: 1 } }
+        - name: dayOfWeek
+          in: query
+          description: 2 = Thứ Hai … 7 = Thứ Bảy, 8 = Chủ Nhật
+          schema: { type: integer, minimum: 2, maximum: 8 }
+        - { name: isActive, in: query, schema: { type: boolean } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/TeachingSchedule' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+    post:
+      tags: [teaching-schedules]
+      operationId: createTeachingSchedule
+      summary: Tạo mẫu lịch lặp theo tuần (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeachingSchedule' }
+            example:
+              teacherId: 1
+              schoolId: 494
+              subjectId: 794
+              dayOfWeek: 3
+              startTime: '07:30'
+              endTime: '09:00'
+              effectiveFrom: '2026-08-01'
+              effectiveTo: '2026-08-31'
+      responses:
+        '201': { description: Đã tạo }
+        '400':
+          description: Giờ/ngày không hợp lệ, môn không thuộc trường, giáo viên ngừng hoạt động
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Giáo viên đã có lịch trùng thứ + giao giờ + giao khoảng hiệu lực
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                message: Giáo viên đã có lịch Thứ Ba 07:30–09:00 tại TIỂU HỌC THẮNG NHÌ trong khoảng thời gian này
+                error: Conflict
+                statusCode: 409
+
+  /teaching-schedules/bulk:
+    post:
+      tags: [teaching-schedules]
+      operationId: bulkCreateTeachingSchedules
+      summary: Áp một môn cho nhiều lớp của nhiều trường (nhansu)
+      description: |
+        Nhân sự chọn môn **một lần trong danh mục** (`catalogId`), backend tra ra
+        môn tương ứng của từng trường theo (trường của lớp, catalogId, năm học).
+
+        Giá trị ở cấp lô là mặc định, mỗi lớp trong `items` override được riêng.
+
+        Trả **200** kèm kết quả từng lớp: lỗi nghiệp vụ của một lớp (trường chưa
+        khai môn, trùng giờ…) chỉ làm lớp đó `SKIPPED`, phần còn lại vẫn tạo.
+        Lỗi phía client (thiếu field, giờ ngược, classId lặp) trả **400 trước khi
+        ghi bất cứ gì**.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCreateSchedules' }
+      responses:
+        '200':
+          description: OK — kể cả khi có lớp bị bỏ qua
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  skipped: { type: integer }
+                  sessionsCreated:
+                    type: integer
+                    description: Số buổi sinh ra khi có generateSessions
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/BulkResultRow' }
+        '400':
+          description: Thiếu field bắt buộc, giờ/ngày ngược, classId lặp, hoặc thiếu cả catalogId lẫn subjectId
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /teaching-schedules/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [teaching-schedules]
+      operationId: getTeachingSchedule
+      summary: Chi tiết mẫu lịch
+      responses:
+        '200': { description: OK }
+        '404': { description: Không tồn tại }
+    patch:
+      tags: [teaching-schedules]
+      operationId: updateTeachingSchedule
+      summary: Sửa mẫu lịch (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeachingSchedule' }
+      responses:
+        '200': { description: OK }
+        '409': { description: Trùng lịch giáo viên }
+    delete:
+      tags: [teaching-schedules]
+      operationId: deleteTeachingSchedule
+      summary: Xoá mẫu lịch (role nhansu)
+      description: Buổi đã sinh bị xoá theo. 409 nếu đã có buổi được chấm công.
+      responses:
+        '200': { description: 'Đã xoá: { "deleted": true }' }
+        '409': { description: Đã có buổi được chấm công }
+
+  /teaching-schedules/{id}/generate-sessions:
+    post:
+      tags: [teaching-schedules]
+      operationId: generateTeachingSessions
+      summary: Sinh buổi dạy cụ thể từ mẫu lặp (role nhansu)
+      description: |
+        Idempotent — chạy lại không nhân đôi (unique `schedule_id` + `date`);
+        buổi đã tồn tại được bỏ qua nên không mất dữ liệu chấm công.
+        Chỉ sinh trong phần giao giữa khoảng yêu cầu và khoảng hiệu lực của mẫu.
+        Tối đa 400 ngày mỗi lần.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromDate, toDate]
+              properties:
+                fromDate: { type: string, format: date }
+                toDate: { type: string, format: date }
+            example: { fromDate: '2026-08-01', toDate: '2026-08-31' }
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created, skipped, dates]
+                properties:
+                  created: { type: integer }
+                  skipped: { type: integer, description: Buổi đã tồn tại, bỏ qua }
+                  dates:
+                    type: array
+                    items: { type: string, format: date }
+              example:
+                created: 4
+                skipped: 0
+                dates: ['2026-08-04', '2026-08-11', '2026-08-18', '2026-08-25']
+        '400': { description: Mẫu ngừng áp dụng, khoảng ngày ngược hoặc quá 400 ngày }
+
+  /teaching-sessions:
+    get:
+      tags: [teaching-sessions]
+      operationId: listTeachingSessions
+      summary: Danh sách buổi dạy
+      parameters:
+        - { name: teacherId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: schoolId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: classId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: subjectId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: scheduleId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/SessionStatus' } }
+        - name: unchecked
+          in: query
+          description: true = chỉ buổi chưa chấm công
+          schema: { type: boolean }
+        - { name: fromDate, in: query, schema: { type: string, format: date } }
+        - { name: toDate, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/TeachingSession' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      tags: [teaching-sessions]
+      operationId: createTeachingSession
+      summary: Tạo buổi lẻ hoặc buổi dạy bù (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeachingSession' }
+            example:
+              teacherId: 1
+              schoolId: 494
+              subjectId: 794
+              date: '2026-08-13'
+              startTime: '14:00'
+              endTime: '15:30'
+              makeupForSessionId: 2
+              note: Dạy bù buổi 11/8
+      responses:
+        '201': { description: Đã tạo }
+        '409':
+          description: Giáo viên đã có buổi giao giờ trong cùng ngày
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /teaching-sessions/bulk:
+    post:
+      tags: [teaching-sessions]
+      operationId: bulkCreateTeachingSessions
+      summary: Tạo tiết cho nhiều lớp × nhiều ngày (nhansu)
+      description: |
+        Nhân **lớp × ngày**. Bỏ `teacherId` thì tiết được tạo ở
+        `assignmentStatus = OPEN` để giáo viên đăng ký nhận.
+
+        Giới hạn 200 lớp, 31 ngày, 500 tiết mỗi lần.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCreateSessions' }
+      responses:
+        '200':
+          description: OK — kể cả khi có tiết bị bỏ qua
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  skipped: { type: integer }
+                  results:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: '#/components/schemas/BulkResultRow' }
+                        - type: object
+                          properties:
+                            date: { type: string, format: date }
+        '400':
+          description: Thiếu ngày/giờ, classId lặp, hoặc vượt trần 500 tiết
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /teaching-sessions/me:
+    get:
+      tags: [teaching-sessions]
+      operationId: getMyTeachingSessions
+      summary: Lịch dạy của chính giáo viên đang đăng nhập (role giaovien)
+      description: teacherId lấy từ access token; tham số teacherId gửi lên bị bỏ qua.
+      parameters:
+        - { name: fromDate, in: query, schema: { type: string, format: date } }
+        - { name: toDate, in: query, schema: { type: string, format: date } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/SessionStatus' } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200': { description: OK }
+        '404': { description: Tài khoản chưa gắn hồ sơ giáo viên nào }
+
+  /teaching-sessions/attendance/summary:
+    get:
+      tags: [teaching-sessions]
+      operationId: getAttendanceSummary
+      summary: Bảng tổng hợp chấm công theo giáo viên
+      parameters:
+        - { name: fromDate, in: query, required: true, schema: { type: string, format: date } }
+        - { name: toDate, in: query, required: true, schema: { type: string, format: date } }
+        - { name: teacherId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: schoolId, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: classId, in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendanceSummary' }
+              example:
+                fromDate: '2026-08-01'
+                toDate: '2026-08-31'
+                data:
+                  - teacherId: 1
+                    teacherName: Giáo viên A (test)
+                    totalSessions: 4
+                    present: 3
+                    absent: 1
+                    excused: 0
+                    cancelled: 0
+                    unchecked: 0
+                    makeup: 0
+                    totalPeriods: 8
+                    payablePeriods: 6
+                    payableAmount: 900000
+                    missingRateSessions: 0
+                grandTotal:
+                  payablePeriods: 6
+                  payableAmount: 900000
+                  missingRateSessions: 0
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /teaching-sessions/attendance/bulk:
+    patch:
+      tags: [teaching-sessions]
+      operationId: bulkCheckAttendance
+      summary: Chấm công nhiều buổi cùng lúc (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [sessionId, status]
+                    properties:
+                      sessionId: { type: integer, minimum: 1 }
+                      status: { $ref: '#/components/schemas/SessionStatus' }
+                      attendanceNote: { type: string, maxLength: 1000 }
+            example:
+              items:
+                - { sessionId: 2, status: ABSENT }
+                - { sessionId: 3, status: EXCUSED, attendanceNote: Xin phép ốm }
+                - { sessionId: 4, status: CANCELLED, attendanceNote: Trường nghỉ lễ }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated: { type: integer }
+                  sessionIds:
+                    type: array
+                    items: { type: integer }
+              example: { updated: 3, sessionIds: [2, 3, 4] }
+        '400': { description: Danh sách có sessionId trùng nhau }
+        '404': { description: Có sessionId không tồn tại (liệt kê rõ id) }
+
+  /teaching-sessions/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [teaching-sessions]
+      operationId: getTeachingSession
+      summary: Chi tiết buổi dạy
+      responses:
+        '200': { description: OK }
+        '404': { description: Không tồn tại }
+    patch:
+      tags: [teaching-sessions]
+      operationId: updateTeachingSession
+      summary: Sửa buổi dạy — đổi giờ, đổi ngày, đổi giáo viên dạy thay (role nhansu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                teacherId: { type: integer, minimum: 1 }
+                date: { type: string, format: date }
+                startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+                endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        '200': { description: OK }
+        '409': { description: Giáo viên đã có buổi giao giờ trong cùng ngày }
+    delete:
+      tags: [teaching-sessions]
+      operationId: deleteTeachingSession
+      summary: Xoá buổi dạy (role nhansu)
+      responses:
+        '200': { description: 'Đã xoá: { "deleted": true }' }
+        '409': { description: Buổi đã chấm công — chuyển sang CANCELLED thay vì xoá }
+
+  /teaching-sessions/{id}/attendance:
+    patch:
+      tags: [teaching-sessions]
+      operationId: checkAttendance
+      summary: Chấm công một buổi (role nhansu)
+      description: |
+        Chuyển sang PRESENT/ABSENT/EXCUSED/CANCELLED sẽ ghi lại `checkedById` và `checkedAt`.
+        Đưa về SCHEDULED = bỏ chấm, xoá luôn dấu vết người chấm.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/SessionStatus' }
+                attendanceNote: { type: string, maxLength: 1000 }
+            example: { status: EXCUSED, attendanceNote: Xin phép ốm }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeachingSession' }
+        '404': { description: Buổi dạy không tồn tại }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Dữ liệu không hợp lệ
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Thiếu hoặc sai token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Role không có quyền
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Forbidden resource, error: Forbidden, statusCode: 403 }
+
+  schemas:
+    SessionStatus:
+      type: string
+      enum: [SCHEDULED, PRESENT, ABSENT, EXCUSED, CANCELLED]
+      description: |
+        SCHEDULED = Chưa chấm · PRESENT = Có dạy · ABSENT = Vắng ·
+        EXCUSED = Nghỉ có phép · CANCELLED = Huỷ buổi (không tính công)
+
+    Pagination:
+      type: object
+      required: [page, limit, total, totalPages]
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+
+    TeacherListItem:
+      type: object
+      required: [id, name, phone, email, employeeId, employeeName, teacherRole, isActive, note, googleMapsUrl, schoolIds, allowedSchools, subjectCatalogIds, teachableSubjects]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        phone: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        employeeId:
+          type: [integer, 'null']
+          description: null với giáo viên thuê ngoài không có tài khoản
+        employeeName: { type: [string, 'null'] }
+        teacherRole:
+          type: [string, 'null']
+          enum: [giaovien_congty, giaovien_ctv, null]
+          description: Loại giáo viên lấy từ role tài khoản; null khi chưa gắn tài khoản
+        isActive: { type: boolean }
+        note: { type: [string, 'null'] }
+        googleMapsUrl:
+          type: [string, 'null']
+          description: Link vị trí Google Maps của giáo viên, phục vụ gợi ý lịch theo khoảng cách
+        schoolIds:
+          type: array
+          items: { type: integer }
+          description: Các trường giáo viên có thể nhận dạy
+        allowedSchools:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: integer }
+              name: { type: string }
+        subjectCatalogIds:
+          type: array
+          items: { type: integer }
+          description: Các môn giáo viên có thể dạy, dùng ID danh mục môn chung
+        teachableSubjects:
+          type: array
+          items:
+            type: object
+            required: [id, name, code]
+            properties:
+              id: { type: integer }
+              name: { type: string }
+              code: { type: [string, 'null'] }
+
+    CreateTeacher:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 150 }
+        phone: { type: string, maxLength: 20 }
+        email: { type: string, format: email }
+        employeeId:
+          type: integer
+          minimum: 1
+          description: Tài khoản phải đã có role `giaovien`, nếu không trả 400
+        isActive: { type: boolean, default: true }
+        note: { type: string, maxLength: 1000 }
+        googleMapsUrl:
+          type: [string, 'null']
+          maxLength: 500
+          description: Link Google Maps; PATCH gửi null hoặc chuỗi rỗng để xoá
+        schoolIds:
+          type: array
+          uniqueItems: true
+          items: { type: integer, minimum: 1 }
+          description: Multi-select trường có thể dạy; PATCH gửi [] để xoá toàn bộ lựa chọn
+        subjectCatalogIds:
+          type: array
+          uniqueItems: true
+          items: { type: integer, minimum: 1 }
+          description: Multi-select môn từ subject-catalogs; PATCH gửi [] để xoá toàn bộ lựa chọn
+        defaultRatePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: Đơn giá mặc định mỗi tiết (VND); null = chưa khai
+
+    BulkResultRow:
+      type: object
+      description: Kết quả của một lớp trong lô.
+      properties:
+        classId: { type: integer }
+        className: { type: [string, 'null'] }
+        schoolId: { type: [integer, 'null'] }
+        schoolName: { type: [string, 'null'] }
+        status: { type: string, enum: [CREATED, SKIPPED] }
+        reason:
+          type: string
+          description: Chỉ có khi SKIPPED — lý do đọc được, hiển thị thẳng cho Nhân sự
+        subjectId: { type: integer, description: Môn của trường đã tra ra }
+        subjectName: { type: string }
+
+    BulkScheduleItem:
+      type: object
+      required: [classId]
+      description: Mọi field ngoài classId đều ghi đè giá trị mặc định của lô.
+      properties:
+        classId: { type: integer, minimum: 1 }
+        teacherId: { type: integer, minimum: 1 }
+        subjectId:
+          type: integer
+          minimum: 1
+          description: Khai thẳng môn của trường, bỏ qua việc tra theo catalogId
+        dayOfWeek: { type: integer, minimum: 2, maximum: 8 }
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        periods: { type: integer, minimum: 1, maximum: 20 }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date }
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        note: { type: string, maxLength: 1000 }
+
+    BulkCreateSchedules:
+      type: object
+      required: [items]
+      properties:
+        catalogId:
+          type: integer
+          minimum: 1
+          description: >-
+            Môn trong danh mục dùng chung. Bắt buộc trừ khi mọi item đều khai subjectId.
+        schoolYear:
+          type: string
+          maxLength: 20
+          description: Năm học dùng để tra môn. Bỏ trống = lấy theo năm học của từng lớp.
+        teacherId: { type: integer, minimum: 1 }
+        dayOfWeek: { type: integer, minimum: 2, maximum: 8 }
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        periods: { type: integer, minimum: 1, maximum: 20 }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date }
+        isActive: { type: boolean, default: true }
+        note: { type: string, maxLength: 1000 }
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: '#/components/schemas/BulkScheduleItem' }
+        generateSessions:
+          type: object
+          description: Có thì sinh luôn buổi dạy cho các mẫu vừa tạo — gộp 2 bước làm 1.
+          required: [fromDate, toDate]
+          properties:
+            fromDate: { type: string, format: date }
+            toDate: { type: string, format: date }
+
+    BulkSessionItem:
+      type: object
+      required: [classId]
+      properties:
+        classId: { type: integer, minimum: 1 }
+        teacherId: { type: integer, minimum: 1 }
+        subjectId: { type: integer, minimum: 1 }
+        date:
+          type: string
+          format: date
+          description: Ngày riêng của lớp này — thắng `dates` chung của lô
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        periods: { type: integer, minimum: 1, maximum: 20 }
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        note: { type: string, maxLength: 1000 }
+
+    BulkCreateSessions:
+      type: object
+      required: [items]
+      properties:
+        catalogId: { type: integer, minimum: 1 }
+        schoolYear: { type: string, maxLength: 20 }
+        teacherId:
+          type: integer
+          minimum: 1
+          description: Bỏ trống = tiết mở (OPEN) cho giáo viên đăng ký
+        assignmentStatus: { type: string, enum: [OPEN, ASSIGNED, CLOSED, CANCELLED] }
+        date: { type: string, format: date }
+        dates:
+          type: array
+          minItems: 1
+          maxItems: 31
+          items: { type: string, format: date }
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        periods: { type: integer, minimum: 1, maximum: 20 }
+        note: { type: string, maxLength: 1000 }
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: '#/components/schemas/BulkSessionItem' }
+
+    SchoolClass:
+      type: object
+      properties:
+        id: { type: integer }
+        schoolId: { type: integer }
+        schoolName: { type: string }
+        name: { type: string, example: 1A }
+        gradeLevel: { type: [integer, 'null'], description: Khối 1–12; null với mầm non }
+        schoolYear: { type: string, example: 2026-2027 }
+        studentCount: { type: integer }
+        homeroomTeacher:
+          type: [string, 'null']
+          description: GVCN phía trường — chỉ là tên, không phải hồ sơ `teachers`
+        isActive: { type: boolean }
+        note: { type: [string, 'null'] }
+        scheduleCount: { type: integer, description: Số mẫu lịch đang dùng lớp này }
+        sessionCount: { type: integer, description: Số buổi dạy đang dùng lớp này }
+        subjectStatus:
+          type: string
+          enum: [RESOLVED, MISSING, AMBIGUOUS]
+          description: Chỉ có khi truy vấn kèm catalogId
+        subjectId: { type: [integer, 'null'], description: Môn của trường khi RESOLVED }
+        subjectName: { type: [string, 'null'] }
+        subjectReason: { type: [string, 'null'], description: Lý do khi không RESOLVED }
+
+    CreateSchoolClass:
+      type: object
+      required: [schoolId, name, schoolYear]
+      properties:
+        schoolId: { type: integer, minimum: 1 }
+        name:
+          type: string
+          maxLength: 100
+          description: Tự bỏ khoảng trắng thừa; không trùng trong cùng trường + năm học
+        schoolYear:
+          type: string
+          maxLength: 20
+          description: Chuỗi tự do, cùng quy ước với subjects.school_year
+          example: 2026-2027
+        gradeLevel: { type: integer, minimum: 1, maximum: 12 }
+        studentCount: { type: integer, minimum: 0, maximum: 1000, default: 0 }
+        homeroomTeacher: { type: string, maxLength: 255 }
+        isActive: { type: boolean, default: true }
+        note: { type: string, maxLength: 1000 }
+
+    UpdateSchoolClass:
+      type: object
+      description: Mọi field tuỳ chọn; `schoolId` gửi lên sẽ bị bỏ qua.
+      properties:
+        name: { type: string, maxLength: 100 }
+        schoolYear: { type: string, maxLength: 20 }
+        gradeLevel: { type: [integer, 'null'], minimum: 1, maximum: 12 }
+        studentCount: { type: integer, minimum: 0, maximum: 1000 }
+        homeroomTeacher: { type: string, maxLength: 255 }
+        isActive: { type: boolean }
+        note: { type: string, maxLength: 1000 }
+
+    CreateTeachingSchedule:
+      type: object
+      required: [teacherId, classId, subjectId, dayOfWeek, startTime, endTime, effectiveFrom]
+      properties:
+        teacherId: { type: integer, minimum: 1 }
+        classId:
+          type: integer
+          minimum: 1
+          description: Lịch được xếp cho lớp; trường suy ra từ lớp
+        schoolId:
+          type: integer
+          minimum: 1
+          description: Tuỳ chọn — chỉ để đối chiếu, phải đúng trường của classId
+        subjectId:
+          type: integer
+          minimum: 1
+          description: Phải thuộc trường của classId, nếu không trả 400
+        dayOfWeek:
+          type: integer
+          minimum: 2
+          maximum: 8
+          description: 2 = Thứ Hai … 7 = Thứ Bảy, 8 = Chủ Nhật
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo:
+          type: string
+          format: date
+          description: Bỏ trống = chưa có ngày kết thúc
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        isActive: { type: boolean, default: true }
+        note: { type: string, maxLength: 1000 }
+
+    TeachingSchedule:
+      type: object
+      properties:
+        id: { type: integer }
+        teacherId: { type: integer }
+        teacherName: { type: string }
+        schoolId: { type: integer }
+        schoolName: { type: string }
+        classId: { type: [integer, 'null'], description: null = lịch cũ chưa gắn lớp }
+        className: { type: [string, 'null'], example: 1A }
+        classGradeLevel: { type: [integer, 'null'] }
+        subjectId: { type: integer }
+        subjectName: { type: string }
+        schoolYear: { type: [string, 'null'] }
+        dayOfWeek: { type: integer }
+        dayOfWeekLabel: { type: [string, 'null'], example: Thứ Ba }
+        startTime: { type: string, example: '07:30' }
+        endTime: { type: string, example: '09:00' }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: [string, 'null'], format: date }
+        ratePerPeriod:
+          type: [number, 'null']
+          description: Đơn giá mỗi tiết đã chốt cho mẫu này; null = chưa khai
+        isActive: { type: boolean }
+        note: { type: [string, 'null'] }
+
+    CreateTeachingSession:
+      type: object
+      required: [teacherId, subjectId, date, startTime, endTime]
+      properties:
+        teacherId: { type: integer, minimum: 1 }
+        classId:
+          type: integer
+          minimum: 1
+          description: >-
+            Lớp được dạy buổi này. Bỏ trống thì phải gửi schoolId; buổi dạy bù
+            bỏ trống sẽ kế thừa lớp của buổi gốc.
+        schoolId:
+          type: integer
+          minimum: 1
+          description: Tuỳ chọn khi đã có classId — khi đó trường lấy theo lớp
+        subjectId: { type: integer, minimum: 1 }
+        date: { type: string, format: date }
+        startTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        endTime: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$' }
+        ratePerPeriod:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100000000
+          description: >-
+            Đơn giá mỗi tiết (VND), tối đa 2 chữ số thập phân. Bỏ trống = kế thừa
+            (mẫu lịch -> giáo viên). 0 là giá hợp lệ và KHÔNG kế thừa.
+        makeupForSessionId:
+          type: integer
+          minimum: 1
+          description: Buổi này dạy bù cho buổi nào — tự động bật isMakeup
+        note: { type: string, maxLength: 1000 }
+
+    TeachingSession:
+      type: object
+      properties:
+        id: { type: integer }
+        scheduleId:
+          type: [integer, 'null']
+          description: null = buổi lẻ hoặc buổi dạy bù
+        teacherId: { type: integer }
+        teacherName: { type: string }
+        schoolId: { type: integer }
+        schoolName: { type: string }
+        classId: { type: [integer, 'null'], description: null = buổi cũ chưa gắn lớp }
+        className: { type: [string, 'null'], example: 1A }
+        classGradeLevel: { type: [integer, 'null'] }
+        subjectId: { type: integer }
+        subjectName: { type: string }
+        schoolYear: { type: [string, 'null'] }
+        date: { type: string, format: date }
+        dayOfWeek: { type: integer }
+        dayOfWeekLabel: { type: [string, 'null'] }
+        startTime: { type: string, example: '07:30' }
+        endTime: { type: string, example: '09:00' }
+        periods: { type: [integer, 'null'] }
+        ratePerPeriod:
+          type: [number, 'null']
+          description: >-
+            Đơn giá chốt tại thời điểm tạo buổi. Đổi đơn giá giáo viên KHÔNG làm
+            đổi giá trị này — bảng công tháng cũ giữ nguyên.
+        amount:
+          type: [number, 'null']
+          description: >-
+            Tiền công buổi này = ratePerPeriod × periods. null = CHƯA KHAI GIÁ,
+            khác hẳn 0 (dạy không công).
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        statusLabel: { type: [string, 'null'], example: Có dạy }
+        isMakeup: { type: boolean }
+        makeupForSessionId: { type: [integer, 'null'] }
+        attendanceNote: { type: [string, 'null'] }
+        checkedById: { type: [integer, 'null'] }
+        checkedByName: { type: [string, 'null'] }
+        checkedAt: { type: [string, 'null'], format: date-time }
+        note: { type: [string, 'null'] }
+
+    AttendanceSummary:
+      type: object
+      required: [fromDate, toDate, data]
+      properties:
+        fromDate: { type: string, format: date }
+        toDate: { type: string, format: date }
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              teacherId: { type: integer }
+              teacherName: { type: string }
+              totalSessions: { type: integer }
+              present: { type: integer }
+              absent: { type: integer }
+              excused: { type: integer }
+              cancelled: { type: integer }
+              unchecked: { type: integer }
+              makeup: { type: integer }
+              totalPeriods:
+                type: integer
+                description: Tổng số tiết trong khoảng, mọi trạng thái
+              payablePeriods:
+                type: integer
+                description: Số tiết được trả tiền — chỉ buổi PRESENT
+              payableAmount:
+                type: number
+                description: Tiền công = Σ (ratePerPeriod × periods) của buổi PRESENT
+              missingRateSessions:
+                type: integer
+                description: >-
+                  Số buổi đã dạy nhưng CHƯA khai đơn giá. > 0 nghĩa là bảng công
+                  chưa đầy đủ — FE nên cảnh báo trước khi chốt lương.
+        grandTotal:
+          type: object
+          description: Cộng dồn cả bảng.
+          properties:
+            payablePeriods: { type: integer }
+            payableAmount: { type: number }
+            missingRateSessions: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+        error: { type: string }
+        statusCode: { type: integer }
