@@ -20,6 +20,12 @@ export interface BulkResultRow {
     reason?: string;
     subjectId?: number;
     subjectName?: string;
+    /**
+     * Id lịch vừa tạo (chỉ có ở dòng `CREATED`). Nhật ký thao tác đọc lại đúng
+     * các bản ghi này để chốt trường/lớp/môn/giáo viên — tin vào payload thì
+     * sai, vì môn được tra từ `catalogId` chứ client không gửi `subjectId`.
+     */
+    scheduleId?: number;
 }
 
 /**
@@ -129,6 +135,7 @@ export class TeachingBulkService {
 
                 createdScheduleIds.push(created.id);
                 results.push({
+                    scheduleId: created.id,
                     classId: item.classId,
                     className: info.name,
                     schoolId: info.schoolId,

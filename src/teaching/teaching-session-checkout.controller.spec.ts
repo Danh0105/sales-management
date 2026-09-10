@@ -7,6 +7,7 @@ import { TeachingBulkService } from './teaching-bulk.service';
 import { TeachingSessionController } from './teaching-session.controller';
 import { TeachingSessionService } from './teaching-session.service';
 import { TEACHER_STAFF_ROLE } from './teaching-roles';
+import { LessonImageLibraryService } from './lesson-image-library.service';
 
 describe('POST /teaching-sessions/:id/checkout multipart', () => {
   let app: INestApplication;
@@ -27,6 +28,7 @@ describe('POST /teaching-sessions/:id/checkout multipart', () => {
       providers: [
         { provide: TeachingSessionService, useValue: service },
         { provide: TeachingBulkService, useValue: {} },
+        { provide: LessonImageLibraryService, useValue: {} },
       ],
     })
       .overrideGuard(JwtAuthGuard)

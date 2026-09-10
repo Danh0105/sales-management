@@ -5,23 +5,16 @@ import { effectiveRatePerPeriod } from './teaching-rate.util';
 
 describe('teacher default rate', () => {
   it.each([
-    [150_000, 100_000, false, 150_000],
-    [null, 100_000, false, 100_000],
-    [0, 100_000, false, 0],
-    [null, null, false, null],
-    [150_000, 100_000, true, null],
-  ])(
-    'teacher=%s subject=%s company=%s => %s',
-    (teacherRate, subjectRate, company, expected) => {
-      expect(
-        effectiveRatePerPeriod(
-          { defaultRatePerPeriod: teacherRate },
-          subjectRate,
-          company,
-        ),
-      ).toBe(expected);
-    },
-  );
+    [150_000, false, 150_000],
+    // Chưa khai đơn giá => null, KHÔNG rơi về đơn giá môn học nữa.
+    [null, false, null],
+    [0, false, 0],
+    [150_000, true, null],
+  ])('teacher=%s company=%s => %s', (teacherRate, company, expected) => {
+    expect(
+      effectiveRatePerPeriod({ defaultRatePerPeriod: teacherRate }, company),
+    ).toBe(expected);
+  });
 
   it.each([-1, 100_000_001, 1.234])('rejects invalid rate %s', async (rate) => {
     const dto = plainToInstance(CreateTeacherDto, {

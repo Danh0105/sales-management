@@ -10,6 +10,9 @@ export interface LessonImage {
 
   url: string;
 
+  /** Ảnh 320px dùng cho danh sách; không bao giờ trỏ về file gốc. */
+  thumbnailUrl?: string;
+
   /** Tên file trên đĩa. */
   name: string;
 

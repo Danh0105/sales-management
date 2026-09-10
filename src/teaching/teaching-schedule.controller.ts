@@ -25,6 +25,7 @@ import {
     CreateTeachingScheduleDto,
     GenerateSessionsDto,
     QueryTeachingSchedulesDto,
+    RemoveSchedulesBySchoolDto,
     UpdateTeachingScheduleDto,
 } from './dto/teaching-schedule.dto';
 import { BulkCreateSchedulesDto } from './dto/teaching-bulk.dto';
@@ -101,6 +102,26 @@ export class TeachingScheduleController {
     ) {
         assertCanManageTeaching(req.user);
         return this.service.update(id, dto);
+    }
+
+    /**
+     * Xoá cả một mảng thời khoá biểu của một trường (lọc thêm theo môn nếu
+     * có). Khai báo TRƯỚC `@Delete(':id')` — Nest khớp route theo thứ tự, để
+     * sau thì ':id' nuốt mất đường dẫn này.
+     *
+     * Dùng POST chứ không phải DELETE vì tham số đi trong body: DELETE kèm
+     * body bị nhiều proxy và thư viện HTTP lược mất, mà mất `schoolId` ở đây
+     * thì DTO chặn ngay chứ không âm thầm xoá diện rộng.
+     */
+    @Roles(...TEACHING_MANAGE_ROLES)
+    @Post('bulk-delete')
+    @HttpCode(200)
+    removeBySchool(
+        @Body() dto: RemoveSchedulesBySchoolDto,
+        @Req() req: Request,
+    ) {
+        assertCanManageTeaching(req.user);
+        return this.service.removeBySchool(dto);
     }
 
     @Roles(...TEACHING_MANAGE_ROLES)

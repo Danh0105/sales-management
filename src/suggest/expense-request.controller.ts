@@ -37,6 +37,7 @@ import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
+import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 
 const singleUpload = FileInterceptor('file', {
     storage: diskStorage({
@@ -207,6 +208,41 @@ export class ExpenseRequestController {
         return this.service.createExpensePaymentOrder(id, dto, req.user);
     }
 
+    /** Kinh doanh xác nhận đã nhận thiết bị (nhánh đề xuất thiết bị) */
+    @Post(':id/equipment-received')
+    @Roles(ExpenseRole.SALES)
+    equipmentReceived(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.confirmEquipmentReceived(id, req.user, dto.note);
+    }
+
+    // ================= PHÒNG KỸ THUẬT =================
+    // Nhánh đề xuất thiết bị: kỹ thuật giữ vai trò tương đương kế toán công
+    // nợ + thủ quỹ ở nhánh tiền (lên lệnh xuất kho, nhận lại thiết bị).
+
+    @Post(':id/stock-issue-order')
+    @Roles(ExpenseRole.TECHNICAL)
+    stockIssueOrder(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: CreateStockIssueOrderDto,
+        @Req() req: any,
+    ) {
+        return this.service.createExpenseStockIssueOrder(id, dto, req.user);
+    }
+
+    @Post(':id/equipment-returned')
+    @Roles(ExpenseRole.TECHNICAL)
+    equipmentReturned(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.confirmEquipmentReturned(id, req.user, dto.note);
+    }
+
     // ================= THỦ QUỸ =================
 
     @Post(':id/cash-released')
@@ -274,17 +310,20 @@ export class ExpenseRequestController {
     }
 
     @Get()
-    findAll(@Query() filter: FilterExpenseDto) {
-        return this.service.findAllExpense(filter);
+    findAll(@Query() filter: FilterExpenseDto, @Req() req: any) {
+        return this.service.findAllExpense(filter, req.user);
     }
 
     @Get('grouped-by-employee')
-    findAllGroupedByEmployee(@Query() filter: FilterExpenseDto) {
-        return this.service.findAllExpenseGroupedByEmployee(filter);
+    findAllGroupedByEmployee(
+        @Query() filter: FilterExpenseDto,
+        @Req() req: any,
+    ) {
+        return this.service.findAllExpenseGroupedByEmployee(filter, req.user);
     }
 
     @Get(':id')
-    findOne(@Param('id', ParseIntPipe) id: number) {
-        return this.service.findOneExpense(id);
+    findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+        return this.service.findOneExpense(id, req.user);
     }
 }

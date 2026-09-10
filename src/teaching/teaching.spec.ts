@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
   ValidationPipe,
 } from '@nestjs/common';
+import { In } from 'typeorm';
 import { SchoolClassService } from './school-class.service';
 import { SubjectResolverService } from './subject-resolver.service';
 import { TeachingBulkService } from './teaching-bulk.service';
@@ -81,13 +82,19 @@ function makeRepo(overrides: Record<string, any> = {}) {
       save: jest.fn(async (data) => ({ id: 1, ...data })),
       insert: jest.fn().mockResolvedValue({}),
       update: jest.fn().mockResolvedValue({ affected: 0 }),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
       remove: jest.fn().mockResolvedValue(undefined),
       ...overrides,
     } as any,
   };
 }
 
-const ACTIVE_TEACHER = { id: 5, name: 'Cô A', isActive: true };
+const ACTIVE_TEACHER = {
+  id: 5,
+  name: 'Cô A',
+  isActive: true,
+  employeeId: 30,
+};
 const SUBJECT = { id: 25, name: 'STEM', schoolId: 10 };
 const SCHOOL_CLASS = {
   id: 7,
@@ -182,6 +189,18 @@ function makeScheduleService(
       .fn()
       .mockResolvedValue({ distanceToSchoolKm: null, gasAllowance: null }),
   };
+  const dataSource = {
+    transaction: jest.fn(async (work: any) =>
+      work({
+        getRepository: (target: any) =>
+          target.name === 'TeachingSchedule'
+            ? schedule.repo
+            : target.name === 'TeachingSession'
+              ? session.repo
+              : teacher.repo,
+      }),
+    ),
+  };
 
   const service = new TeachingScheduleService(
     schedule.repo,
@@ -189,7 +208,7 @@ function makeScheduleService(
     teacher.repo,
     subject.repo,
     classService as any,
-    {} as any,
+    dataSource as any,
     employee.repo,
     notificationService as any,
     fcmService as any,
@@ -309,7 +328,9 @@ describe('Phân quyền module giảng dạy', () => {
   );
 
   it('role giaovien chỉ xem dữ liệu của chính mình', () => {
-    expect(resolveTeachingScope({ id: 30, roles: [TEACHER_STAFF_ROLE] })).toEqual({
+    expect(
+      resolveTeachingScope({ id: 30, roles: [TEACHER_STAFF_ROLE] }),
+    ).toEqual({
       kind: 'self',
       employeeId: 30,
     });
@@ -598,6 +619,358 @@ describe('TeachingScheduleService', () => {
     expect(call[1]).toEqual({ candidateTo: '9999-12-31' });
   });
 
+  describe('đồng bộ chấm công khi sửa mẫu lịch', () => {
+    // Đóng băng "hôm nay": các buổi trong test phải nằm ở tương lai, nếu không
+    // quy tắc "trừ tiết đã qua ngày" sẽ bỏ qua chúng và test mục dần theo ngày chạy.
+    beforeEach(() =>
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-25T08:00:00')),
+    );
+    afterEach(() => jest.useRealTimers());
+
+    /** Mẫu lịch thứ Ba, đã sinh buổi, dùng chung cho các ca đồng bộ chấm công. */
+    const SYNCED_SCHEDULE = {
+      id: 1,
+      teacherId: 5,
+      schoolId: 10,
+      schoolLocationId: 3,
+      classId: 7,
+      subjectId: 25,
+      dayOfWeek: 3,
+      startTime: '07:30:00',
+      endTime: '09:00:00',
+      periods: 1,
+      effectiveFrom: '2026-08-01',
+      effectiveTo: '2027-05-31',
+      isActive: true,
+      confirmationStatus: 'CONFIRMED',
+    };
+
+    /** dayOfWeek 3 = thứ Ba (quy ước 2 = thứ Hai): 01/09 và 08/09/2026. */
+    const scheduledSession = (id: number, date: string, extra: any = {}) => ({
+      id,
+      scheduleId: 1,
+      date,
+      status: SessionStatus.SCHEDULED,
+      checkinAt: null,
+      checkoutAt: null,
+      lessonSubmittedAt: null,
+      ...extra,
+    });
+
+    const syncSetup = (sessions: any[], teacher?: any) => {
+      const made = makeScheduleService(teacher ? { teacher } : {});
+      made.schedule.repo.findOne = jest.fn().mockResolvedValue({
+        ...SYNCED_SCHEDULE,
+      });
+      made.session.repo.find = jest.fn().mockResolvedValue(sessions);
+      return made;
+    };
+
+    it('đổi giáo viên trên mẫu thì đồng bộ các buổi chưa chấm cho người mới', async () => {
+      const { service, session } = syncSetup(
+        [
+          scheduledSession(11, '2026-09-01'),
+          scheduledSession(12, '2026-09-08'),
+        ],
+        { id: 9, name: 'Thầy mới', isActive: true },
+      );
+
+      const result = await service.update(1, { teacherId: 9 });
+
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([11, 12]) },
+        expect.objectContaining({
+          teacherId: 9,
+          assignmentStatus: 'ASSIGNED',
+          confirmationStatus: 'PENDING',
+        }),
+      );
+      expect(result.sessionSync).toEqual({
+        updated: 2,
+        removed: 0,
+        created: 0,
+        skipped: 0,
+      });
+    });
+
+    it('đổi giờ dạy cũng đẩy xuống chấm công, không chỉ khi đổi giáo viên', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(11, '2026-09-01'),
+      ]);
+
+      await service.update(1, { startTime: '13:00', endTime: '14:30' });
+
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([11]) },
+        expect.objectContaining({
+          startTime: '13:00:00',
+          endTime: '14:30:00',
+          subjectId: 25,
+          classId: 7,
+        }),
+      );
+    });
+
+    it('buổi đã check-in thì không đụng tới và được đếm vào skipped', async () => {
+      // status vẫn là SCHEDULED — check-in không đổi status, chỉ Giáo vụ chấm
+      // công mới đổi. Xét mỗi status thì buổi này bị ghi đè oan.
+      const { service, session } = syncSetup([
+        scheduledSession(11, '2026-09-01', { checkinAt: new Date() }),
+        scheduledSession(12, '2026-09-08'),
+        scheduledSession(13, '2026-09-15', { status: SessionStatus.PRESENT }),
+      ]);
+
+      const result = await service.update(1, { startTime: '07:00' });
+
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([12]) },
+        expect.anything(),
+      );
+      expect(result.sessionSync.skipped).toBe(2);
+    });
+
+    it('đổi thứ thì xoá buổi rơi sai ngày rồi sinh lại ở thứ mới', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(11, '2026-09-01'),
+        scheduledSession(12, '2026-09-08'),
+      ]);
+
+      // Thứ Ba (3) sang thứ Năm (5): cả hai buổi cũ đều không còn hợp lệ.
+      const result = await service.update(1, { dayOfWeek: 5 });
+
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([11, 12]) });
+      expect(result.sessionSync.removed).toBe(2);
+      // Sinh lại đúng trong khoảng đã từng sinh, không nới ra cả năm học.
+      expect(session.repo.insert).toHaveBeenCalled();
+      const inserted = session.repo.insert.mock.calls[0][0];
+      // Chỉ thứ Năm nằm trong khoảng đã từng sinh (01/09–08/09).
+      expect(inserted.map((row: any) => row.date)).toEqual(['2026-09-03']);
+    });
+
+    it('thu hẹp khoảng hiệu lực thì cắt các buổi văng ra ngoài', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(11, '2026-09-01'),
+        scheduledSession(12, '2026-09-08'),
+      ]);
+
+      const result = await service.update(1, { effectiveTo: '2026-09-05' });
+
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([12]) });
+      expect(result.sessionSync).toMatchObject({ updated: 1, removed: 1 });
+    });
+
+    it('tiết đã qua ngày giữ nguyên giáo viên cũ, không bị ghi đè', async () => {
+      // 18/08 đã qua so với "hôm nay" 25/08: người đứng lớp hôm đó là người
+      // cũ thật, đổi tên thành người mới là ghi sai công.
+      const { service, session } = syncSetup(
+        [
+          scheduledSession(10, '2026-08-18'),
+          scheduledSession(11, '2026-09-01'),
+        ],
+        { id: 9, name: 'Thầy mới', isActive: true },
+      );
+
+      const result = await service.update(1, { teacherId: 9 });
+
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([11]) },
+        expect.objectContaining({ teacherId: 9 }),
+      );
+      expect(result.sessionSync.updated).toBe(1);
+    });
+
+    it('đổi thứ không sinh bù buổi vào những ngày đã trôi qua', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(10, '2026-08-18'),
+        scheduledSession(11, '2026-09-01'),
+      ]);
+
+      await service.update(1, { dayOfWeek: 5 });
+
+      const inserted = session.repo.insert.mock.calls[0][0];
+      expect(inserted.every((row: any) => row.date >= '2026-08-25')).toBe(true);
+    });
+
+    it('mẫu chưa sinh buổi nào thì sửa lịch không tự sinh buổi', async () => {
+      const { service, session } = syncSetup([]);
+
+      await service.update(1, { dayOfWeek: 5 });
+
+      expect(session.repo.insert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('xoá tiết khỏi thời khoá biểu', () => {
+    // Thời khoá biểu chỉ áp cho hiện tại và tương lai, nên "hôm nay" phải cố
+    // định thì mới chốt được ranh giới quá khứ / tương lai.
+    beforeEach(() => jest.useFakeTimers().setSystemTime(new Date('2026-09-10T08:00:00')));
+    afterEach(() => jest.useRealTimers());
+
+    const removalSetup = (sessions: any[]) => {
+      const made = makeScheduleService();
+      made.schedule.repo.findOne = jest.fn().mockResolvedValue({ id: 1 });
+      made.session.repo.find = jest.fn().mockResolvedValue(sessions);
+      return made;
+    };
+
+    const sess = (id: number, date: string, extra: any = {}) => ({
+      id,
+      scheduleId: 1,
+      date,
+      status: SessionStatus.SCHEDULED,
+      checkinAt: null,
+      checkoutAt: null,
+      lessonSubmittedAt: null,
+      ...extra,
+    });
+
+    it('TIẾT ĐÃ QUA NGÀY KHÔNG BỊ XOÁ, chỉ gỡ khỏi mẫu lịch', async () => {
+      const { service, session, schedule } = removalSetup([
+        sess(10, '2026-09-03'),
+        sess(11, '2026-09-09'),
+        sess(12, '2026-09-17'),
+      ]);
+
+      const result: any = await service.remove(1);
+
+      // Khoá ngoại là ON DELETE CASCADE — còn giữ liên kết là buổi cũ bị cuốn
+      // theo, nên phải gỡ scheduleId trước khi xoá mẫu.
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([10, 11]) },
+        { scheduleId: null },
+      );
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([12]) });
+      expect(schedule.repo.delete).toHaveBeenCalledWith({ id: In([1]) });
+      expect(result.sessions).toEqual({ kept: 2, removed: 1 });
+    });
+
+    it('buổi hôm nay chưa ai đụng thì xoá cùng mẫu lịch', async () => {
+      const { service, session } = removalSetup([sess(20, '2026-09-10')]);
+
+      const result: any = await service.remove(1);
+
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([20]) });
+      expect(result.sessions).toEqual({ kept: 0, removed: 1 });
+    });
+
+    it('buổi tương lai đã check-in thì giữ, không xoá công đã dạy', async () => {
+      // status vẫn SCHEDULED vì Giáo vụ chưa chấm — nhưng giáo viên đã đứng lớp.
+      const { service, session } = removalSetup([
+        sess(30, '2026-09-10', { checkinAt: new Date() }),
+        sess(31, '2026-09-17', { lessonSubmittedAt: new Date() }),
+        sess(32, '2026-09-24', { status: SessionStatus.PRESENT }),
+        sess(33, '2026-09-24'),
+      ]);
+
+      const result: any = await service.remove(1);
+
+      expect(session.repo.update).toHaveBeenCalledWith(
+        { id: In([30, 31, 32]) },
+        { scheduleId: null },
+      );
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([33]) });
+      expect(result.sessions).toEqual({ kept: 3, removed: 1 });
+    });
+
+    it('mẫu lịch toàn buổi cũ vẫn xoá được, không còn chặn bằng ConflictException', async () => {
+      const { service, session, schedule } = removalSetup([
+        sess(40, '2026-09-01', { status: SessionStatus.PRESENT }),
+      ]);
+
+      await expect(service.remove(1)).resolves.toMatchObject({ deleted: true });
+      expect(session.repo.delete).not.toHaveBeenCalled();
+      expect(schedule.repo.delete).toHaveBeenCalledWith({ id: In([1]) });
+    });
+
+    describe('xoá toàn bộ lịch của trường', () => {
+      const bulkSetup = (schedules: any[], sessions: any[]) => {
+        const made = makeScheduleService();
+        made.schedule.repo.find = jest.fn().mockResolvedValue(schedules);
+        made.session.repo.find = jest.fn().mockResolvedValue(sessions);
+        return made;
+      };
+
+      it('chọn trường thì xoá mọi môn của trường đó', async () => {
+        const { service, schedule, session } = bulkSetup(
+          [{ id: 1 }, { id: 2 }, { id: 3 }],
+          [sess(10, '2026-09-03'), sess(11, '2026-09-17', { scheduleId: 2 })],
+        );
+
+        const result: any = await service.removeBySchool({ schoolId: 448 });
+
+        expect(schedule.repo.find).toHaveBeenCalledWith({
+          where: { schoolId: 448 },
+        });
+        expect(schedule.repo.delete).toHaveBeenCalledWith({ id: In([1, 2, 3]) });
+        // Tiết đã qua ngày vẫn được giữ, y như xoá một tiết.
+        expect(session.repo.update).toHaveBeenCalledWith(
+          { id: In([10]) },
+          { scheduleId: null },
+        );
+        expect(session.repo.delete).toHaveBeenCalledWith({ id: In([11]) });
+        expect(result).toMatchObject({
+          deletedSchedules: 3,
+          sessions: { kept: 1, removed: 1 },
+        });
+      });
+
+      it('chọn thêm môn thì chỉ xoá tiết của môn đó', async () => {
+        const { service, schedule } = bulkSetup([{ id: 2 }], []);
+
+        await service.removeBySchool({ schoolId: 448, subjectId: 25 });
+
+        expect(schedule.repo.find).toHaveBeenCalledWith({
+          where: { schoolId: 448, subjectId: 25 },
+        });
+        expect(schedule.repo.delete).toHaveBeenCalledWith({ id: In([2]) });
+      });
+
+      it('trường không có tiết nào thì báo 0, không xoá gì', async () => {
+        const { service, schedule, session } = bulkSetup([], []);
+
+        const result: any = await service.removeBySchool({ schoolId: 999 });
+
+        expect(result).toEqual({
+          deleted: true,
+          deletedSchedules: 0,
+          sessions: { kept: 0, removed: 0 },
+        });
+        expect(schedule.repo.delete).not.toHaveBeenCalled();
+        expect(session.repo.delete).not.toHaveBeenCalled();
+      });
+
+      it('lô toàn tiết đã chấm công: xoá hết mẫu, không mất buổi nào', async () => {
+        const { service, schedule, session } = bulkSetup(
+          [{ id: 1 }, { id: 2 }],
+          [
+            sess(20, '2026-09-01', { status: SessionStatus.PRESENT }),
+            sess(21, '2026-09-17', { checkinAt: new Date() }),
+          ],
+        );
+
+        const result: any = await service.removeBySchool({ schoolId: 448 });
+
+        expect(session.repo.delete).not.toHaveBeenCalled();
+        expect(session.repo.update).toHaveBeenCalledWith(
+          { id: In([20, 21]) },
+          { scheduleId: null },
+        );
+        expect(schedule.repo.delete).toHaveBeenCalledWith({ id: In([1, 2]) });
+        expect(result.sessions).toEqual({ kept: 2, removed: 0 });
+      });
+    });
+
+    it('mẫu chưa sinh buổi nào thì xoá gọn, không gọi update/delete thừa', async () => {
+      const { service, session } = removalSetup([]);
+
+      const result: any = await service.remove(1);
+
+      expect(session.repo.update).not.toHaveBeenCalled();
+      expect(session.repo.delete).not.toHaveBeenCalled();
+      expect(result.sessions).toEqual({ kept: 0, removed: 0 });
+    });
+  });
+
   describe('mẫu lịch tuần của tôi', () => {
     it('lấy teacherId từ token, bỏ qua teacherId FE gửi lên', async () => {
       const { service, schedule, teacher } = makeScheduleService();
@@ -628,6 +1001,7 @@ describe('TeachingScheduleService', () => {
     function pendingSchedule(over: Record<string, any> = {}) {
       return {
         id: 1,
+        teacherId: 5,
         dayOfWeek: 3,
         startTime: '07:30:00',
         endTime: '09:00:00',
@@ -760,15 +1134,13 @@ describe('TeachingScheduleService', () => {
 
       it('xác nhận thành công: chốt buổi PENDING có sẵn và gọi generateSessions cho cả effectiveFrom→effectiveTo', async () => {
         const { service, schedule, session } = makeScheduleService();
-        schedule.repo.findOne = jest
-          .fn()
-          .mockResolvedValue(
-            pendingSchedule({
-              isActive: true,
-              effectiveFrom: '2026-08-01',
-              effectiveTo: '2026-08-31',
-            }),
-          );
+        schedule.repo.findOne = jest.fn().mockResolvedValue(
+          pendingSchedule({
+            isActive: true,
+            effectiveFrom: '2026-08-01',
+            effectiveTo: '2026-08-31',
+          }),
+        );
         schedule.qb.getRawOne = jest.fn().mockResolvedValue(confirmedRawRow());
         session.repo.update = jest.fn().mockResolvedValue({ affected: 2 });
         const generateSpy = jest
@@ -789,15 +1161,13 @@ describe('TeachingScheduleService', () => {
 
       it('effectiveTo bỏ trống: cắt ở 400 ngày kể từ effectiveFrom thay vì để trống', async () => {
         const { service, schedule, session } = makeScheduleService();
-        schedule.repo.findOne = jest
-          .fn()
-          .mockResolvedValue(
-            pendingSchedule({
-              isActive: true,
-              effectiveFrom: '2026-01-01',
-              effectiveTo: null,
-            }),
-          );
+        schedule.repo.findOne = jest.fn().mockResolvedValue(
+          pendingSchedule({
+            isActive: true,
+            effectiveFrom: '2026-01-01',
+            effectiveTo: null,
+          }),
+        );
         schedule.qb.getRawOne = jest.fn().mockResolvedValue(confirmedRawRow());
         session.repo.update = jest.fn().mockResolvedValue({ affected: 0 });
         const generateSpy = jest
@@ -814,15 +1184,13 @@ describe('TeachingScheduleService', () => {
 
       it('effectiveTo quá xa (>400 ngày): vẫn cắt ở 400 ngày, không ném lỗi khoảng quá dài', async () => {
         const { service, schedule, session } = makeScheduleService();
-        schedule.repo.findOne = jest
-          .fn()
-          .mockResolvedValue(
-            pendingSchedule({
-              isActive: true,
-              effectiveFrom: '2026-01-01',
-              effectiveTo: '2030-01-01',
-            }),
-          );
+        schedule.repo.findOne = jest.fn().mockResolvedValue(
+          pendingSchedule({
+            isActive: true,
+            effectiveFrom: '2026-01-01',
+            effectiveTo: '2030-01-01',
+          }),
+        );
         schedule.qb.getRawOne = jest.fn().mockResolvedValue(confirmedRawRow());
         session.repo.update = jest.fn().mockResolvedValue({ affected: 0 });
         const generateSpy = jest
@@ -842,14 +1210,12 @@ describe('TeachingScheduleService', () => {
         schedule.repo.findOne = jest
           .fn()
           .mockResolvedValue(pendingSchedule({ isActive: true }));
-        schedule.qb.getRawOne = jest
-          .fn()
-          .mockResolvedValue(
-            confirmedRawRow({
-              confirmationStatus: 'REJECTED',
-              rejectionReason: 'Bận việc',
-            }),
-          );
+        schedule.qb.getRawOne = jest.fn().mockResolvedValue(
+          confirmedRawRow({
+            confirmationStatus: 'REJECTED',
+            rejectionReason: 'Bận việc',
+          }),
+        );
         session.repo.update = jest.fn().mockResolvedValue({ affected: 0 });
         const generateSpy = jest.spyOn(service, 'generateSessions');
 
@@ -947,6 +1313,53 @@ describe('TeachingScheduleService.generateSessions', () => {
     expect(result.created).toBe(2);
     expect(result.skipped).toBe(2);
     expect(result.dates).toEqual(['2026-08-18', '2026-08-25']);
+  });
+
+  it('bỏ qua ngày mà giáo viên đã có buổi ở trường khác cùng giờ', async () => {
+    const { service, session } = setup();
+    // Lần 1 = các buổi đã sinh của chính mẫu này, lần 2 = quét trùng ô lịch.
+    session.qb.getRawMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        date: '2026-08-11',
+        teacherId: 5,
+        classId: 99,
+        teacherName: 'Cô A',
+        schoolName: 'Trường XYZ',
+      },
+    ]);
+
+    const result = await service.generateSessions(1, {
+      fromDate: '2026-08-01',
+      toDate: '2026-08-31',
+    });
+
+    expect(result.created).toBe(3);
+    expect(result.dates).not.toContain('2026-08-11');
+    expect(result.conflicts).toEqual([
+      {
+        date: '2026-08-11',
+        reason: 'Giáo viên Cô A đã có buổi tại Trường XYZ',
+      },
+    ]);
+  });
+
+  it('bỏ qua ngày mà lớp đã có buổi khác cùng giờ', async () => {
+    const { service, session } = setup({ classId: 7 });
+    session.qb.getRawMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { date: '2026-08-18', teacherId: 88, classId: 7, className: '1A' },
+      ]);
+
+    const result = await service.generateSessions(1, {
+      fromDate: '2026-08-01',
+      toDate: '2026-08-31',
+    });
+
+    expect(result.created).toBe(3);
+    expect(result.conflicts).toEqual([
+      { date: '2026-08-18', reason: 'Lớp 1A đã có buổi khác cùng giờ' },
+    ]);
   });
 
   it('chỉ sinh trong phần giao với khoảng hiệu lực của mẫu', async () => {
@@ -1770,7 +2183,9 @@ describe('TeacherService', () => {
       ([condition]: [unknown]) =>
         typeof condition === 'string' && condition.includes('= :teacherRole'),
     );
-    expect(roleFilterCall?.[0]).toContain("WHEN 'giaovien_congty' = ANY(e.roles)");
+    expect(roleFilterCall?.[0]).toContain(
+      "WHEN 'giaovien_congty' = ANY(e.roles)",
+    );
     expect(roleFilterCall?.[0]).toContain("WHEN 'giaovien_ctv' = ANY(e.roles)");
     expect(roleFilterCall?.[1]).toEqual({ teacherRole: TEACHER_STAFF_ROLE });
   });
@@ -2961,9 +3376,11 @@ describe('Đơn giá mỗi tiết', () => {
   });
 
   describe('buổi dạy sinh từ mẫu', () => {
-    it('chốt đơn giá hiện tại của môn học vào buổi mới sinh', async () => {
+    it('chốt đơn giá mặc định của giáo viên vào buổi mới sinh', async () => {
       const { service, schedule, session } = makeScheduleService({
-        subject: { id: 25, name: 'STEM', schoolId: 10, ratePerPeriod: 150_000 },
+        teacher: { ...ACTIVE_TEACHER, defaultRatePerPeriod: 150_000 },
+        // Giá môn học có cũng mặc kệ: đơn giá chỉ lấy theo giáo viên.
+        subject: { id: 25, name: 'STEM', schoolId: 10, ratePerPeriod: 999_000 },
       });
       schedule.repo.findOne = jest.fn().mockResolvedValue({
         id: 1,
@@ -2989,7 +3406,7 @@ describe('Đơn giá mỗi tiết', () => {
       expect(inserted[0]).toMatchObject({ ratePerPeriod: 150_000, periods: 2 });
     });
 
-    it('môn học chưa khai giá thì buổi mới sinh để null', async () => {
+    it('giáo viên chưa khai đơn giá thì buổi mới sinh để null', async () => {
       const { service, schedule, session } = makeScheduleService();
       schedule.repo.findOne = jest.fn().mockResolvedValue({
         id: 1,
@@ -3028,13 +3445,14 @@ describe('Đơn giá mỗi tiết', () => {
       return ctx;
     }
 
-    it('lấy đơn giá hiện tại của môn học', async () => {
-      const { service, session } = setupCreate({
-        id: 25,
-        name: 'STEM',
-        schoolId: 10,
-        ratePerPeriod: 120_000,
-      });
+    it('lấy đơn giá mặc định của giáo viên', async () => {
+      const { service, session, teacher } = setupCreate();
+      teacher.repo.findOne = jest
+        .fn()
+        .mockResolvedValue({
+          ...ACTIVE_TEACHER,
+          defaultRatePerPeriod: 120_000,
+        });
 
       await service.create(validSession);
 
@@ -3043,9 +3461,9 @@ describe('Đơn giá mỗi tiết', () => {
       );
     });
 
-    it('môn học chưa khai giá thì để null, không phụ thuộc giáo viên/buổi gốc', async () => {
+    it('giáo viên chưa khai giá thì để null, không kế thừa buổi gốc', async () => {
       const { service, session } = setupCreate();
-      // Buổi gốc có giá cũ — buổi bù vẫn phải lấy giá môn học hiện tại, không kế thừa.
+      // Buổi gốc có giá cũ — buổi bù vẫn chốt theo đơn giá giáo viên hiện tại.
       session.repo.findOne = jest
         .fn()
         .mockResolvedValue({ id: 99, classId: 7, ratePerPeriod: 90_000 });
@@ -3057,7 +3475,7 @@ describe('Đơn giá mỗi tiết', () => {
       );
     });
 
-    it('tiết mở chưa có giáo viên vẫn chốt theo giá môn học', async () => {
+    it('tiết mở chưa có giáo viên thì chưa chốt được đơn giá', async () => {
       const { service, session } = setupCreate({
         id: 25,
         name: 'STEM',
@@ -3073,8 +3491,9 @@ describe('Đơn giá mỗi tiết', () => {
 
       await service.create(withoutTeacher as any);
 
+      // Giá chốt theo giáo viên nên chưa gán người thì để null, đợi lúc gán.
       expect(session.repo.save).toHaveBeenCalledWith(
-        expect.objectContaining({ ratePerPeriod: 120_000, teacherId: null }),
+        expect.objectContaining({ ratePerPeriod: null, teacherId: null }),
       );
     });
   });

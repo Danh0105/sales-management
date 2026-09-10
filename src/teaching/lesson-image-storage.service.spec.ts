@@ -160,3 +160,99 @@ describe('LessonImageStorageService', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 });
+
+describe('LessonImageStorageService — ảnh camera Android "khó"', () => {
+  let directory: string;
+  let service: LessonImageStorageService;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'lesson-images-'));
+    service = new LessonImageStorageService({
+      get: (key: string) => (key === 'LESSON_IMAGE_UPLOAD_DIR' ? directory : ''),
+    } as ConfigService);
+  });
+  afterEach(() => rm(directory, { recursive: true, force: true }));
+
+  /** Ảnh đủ lớn để cắt cụt vẫn còn phần đầu hợp lệ. */
+  const photo = (options: sharp.JpegOptions = {}) =>
+    sharp({
+      create: { width: 600, height: 400, channels: 3, background: '#4488cc' },
+    })
+      .jpeg({ quality: 90, ...options })
+      .toBuffer();
+
+  const upload = (buffer: Buffer, originalname = '20260907_164148.jpg') =>
+    ({ buffer, mimetype: 'image/jpeg', originalname }) as Express.Multer.File;
+
+  const codeOf = async (file: Express.Multer.File) => {
+    try {
+      await service.storeMany([file]);
+      return 'OK';
+    } catch (error) {
+      return (error as HttpException).getResponse()['code'];
+    }
+  };
+
+  it('JPEG progressive vẫn lưu được', async () => {
+    const [stored] = await service.storeMany([
+      upload(await photo({ progressive: true })),
+    ]);
+    expect(stored.mimeType).toBe('image/webp');
+  });
+
+  it('Motion Photo (video nối sau EOI) vẫn lưu được, không bị coi là hỏng', async () => {
+    const buffer = Buffer.concat([await photo(), Buffer.alloc(50_000, 7)]);
+    const [stored] = await service.storeMany([upload(buffer)]);
+    expect(stored.mimeType).toBe('image/webp');
+  });
+
+  it('ảnh bị cắt cụt báo mã riêng, không lẫn với ảnh hỏng', async () => {
+    const full = await photo();
+    const cut = upload(full.subarray(0, Math.floor(full.length * 0.6)));
+
+    expect(await codeOf(cut)).toBe('LESSON_IMAGE_TRUNCATED');
+    // Không được lặng lẽ lưu một tấm ảnh mất nửa dưới làm minh chứng.
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it('không nhận nhầm ảnh nguyên vẹn là bị cắt cụt', async () => {
+    for (const format of ['jpeg', 'png', 'webp'] as const) {
+      const buffer = await sharp({
+        create: { width: 60, height: 40, channels: 3, background: 'red' },
+      })
+        .toFormat(format)
+        .toBuffer();
+      expect(
+        await codeOf({ buffer, mimetype: `image/${format}` } as Express.Multer.File),
+      ).toBe('OK');
+    }
+  });
+
+  it('rác không giải mã nổi thì trả LESSON_IMAGE_UNREADABLE', async () => {
+    // Có SOI và EOI nên qua được kiểm tra định dạng lẫn kiểm tra cắt cụt,
+    // nhưng bên trong không có ảnh nào.
+    const junk = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      Buffer.alloc(64, 0x41),
+      Buffer.from([0xff, 0xd9]),
+    ]);
+    expect(await codeOf(upload(junk))).toBe('LESSON_IMAGE_UNREADABLE');
+  });
+
+  it('ghi log kèm tên file và lỗi gốc của sharp khi giải mã hỏng', async () => {
+    const warn = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+
+    const full = await photo();
+    await codeOf(upload(full.subarray(0, 500), '20260907_164148.jpg'));
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('20260907_164148.jpg'),
+    );
+    expect(warn.mock.calls[0][0]).toContain('truncated=true');
+    // Nguyên văn lỗi của sharp, thứ trước đây bị nuốt mất.
+    expect(warn.mock.calls[0][0]).toMatch(/premature end|VipsJpeg|Error/i);
+  });
+});

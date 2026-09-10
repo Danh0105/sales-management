@@ -18,4 +18,11 @@ export const ExpenseRole = {
      * được), và nhận thông báo theo dõi.
      */
     SALES_ADMIN: 'saleadmin',
+
+    /**
+     * Phòng kỹ thuật — nhánh **đề xuất thiết bị**: lên lệnh xuất kho, xác nhận
+     * đã nhận lại thiết bị khi kinh doanh không dùng đến. Giữ vai trò tương
+     * đương kế toán công nợ + thủ quỹ nhưng cho hàng hoá thay vì tiền.
+     */
+    TECHNICAL: 'ky_thuat',
 } as const;

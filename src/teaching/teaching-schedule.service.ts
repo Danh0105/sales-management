@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
 import { TeachingSchedule } from './entities/teaching-schedule.entity';
 import { TeachingSession } from './entities/teaching-session.entity';
 import { Teacher } from './entities/teacher.entity';
@@ -19,9 +19,12 @@ import {
   CreateTeachingScheduleDto,
   GenerateSessionsDto,
   QueryTeachingSchedulesDto,
+  RemoveSchedulesBySchoolDto,
   UpdateTeachingScheduleDto,
 } from './dto/teaching-schedule.dto';
 import {
+  ACTIVE_SESSION_STATUSES,
+  AssignmentStatus,
   ConfirmationStatus,
   DAY_OF_WEEK_LABELS,
   SessionStatus,
@@ -32,6 +35,7 @@ import {
   addDays,
   assertDateOrder,
   assertTimeOrder,
+  dayOfWeekOf,
   listDatesForDayOfWeek,
   nullableNumber,
   toDateString,
@@ -60,6 +64,24 @@ const MAX_LIMIT = 100;
 
 /** Chặn sinh buổi cho khoảng ngày quá dài (1 mẫu × 2 năm ≈ 104 buổi). */
 const MAX_GENERATE_DAYS = 400;
+
+/**
+ * Kết quả đẩy thay đổi của mẫu lịch xuống màn Chấm công.
+ *
+ * Trả thẳng trong response của `PATCH /teaching-schedules/:id`: Giáo vụ cần
+ * thấy ngay có bao nhiêu buổi bị dời và **bao nhiêu buổi không đụng được** vì
+ * đã chấm công — đó là phần họ phải tự xử lý.
+ */
+export interface ScheduleSessionSync {
+  /** Buổi được cập nhật tại chỗ (giờ, môn, lớp, số tiết, giáo viên). */
+  updated: number;
+  /** Buổi bị xoá vì rơi sai thứ hoặc ra ngoài khoảng hiệu lực mới. */
+  removed: number;
+  /** Buổi sinh lại ở ngày mới. */
+  created: number;
+  /** Buổi đã chấm công nên giữ nguyên — Giáo vụ phải xử lý tay. */
+  skipped: number;
+}
 
 @Injectable()
 export class TeachingScheduleService {
@@ -157,6 +179,12 @@ export class TeachingScheduleService {
     if (query.schoolId) {
       qb.andWhere('s.schoolId = :schoolId', { schoolId: query.schoolId });
     }
+    if (query.provinceId) {
+      // Khu vực là của trường → xã/phường → tỉnh; mẫu lịch không tự giữ.
+      qb.leftJoin('sc.ward', 'wd').andWhere('wd.province_id = :provinceId', {
+        provinceId: query.provinceId,
+      });
+    }
     if (query.schoolLocationId) {
       qb.andWhere('s.schoolLocationId = :schoolLocationId', {
         schoolLocationId: query.schoolLocationId,
@@ -245,6 +273,14 @@ export class TeachingScheduleService {
   async update(id: number, dto: UpdateTeachingScheduleDto) {
     const schedule = await this.getEntity(id);
 
+    // Chốt giá trị cũ trước khi `Object.assign` ghi đè — cần để biết buổi đã
+    // sinh còn rơi đúng thứ/khoảng hiệu lực nữa không.
+    const before = {
+      dayOfWeek: schedule.dayOfWeek,
+      effectiveFrom: toDateString(schedule.effectiveFrom) as string,
+      effectiveTo: toDateString(schedule.effectiveTo),
+    };
+
     // Đổi lớp thì trường đổi theo; giữ nguyên lớp cũ (kể cả null) nếu không gửi classId.
     const classId = dto.classId ?? schedule.classId ?? null;
     const schoolClass = dto.classId
@@ -254,6 +290,11 @@ export class TeachingScheduleService {
     const merged = {
       teacherId: dto.teacherId ?? schedule.teacherId,
       schoolId: schoolClass?.schoolId ?? dto.schoolId ?? schedule.schoolId,
+      // Điểm trường thuộc về lớp. Khi chuyển lớp trong cùng một trường phải
+      // cập nhật cả cơ sở, nếu không mẫu lịch và các buổi dạy sẽ trỏ hai nơi
+      // khác nhau.
+      schoolLocationId:
+        schoolClass?.schoolLocationId ?? schedule.schoolLocationId ?? null,
       classId,
       subjectId: dto.subjectId ?? schedule.subjectId,
       dayOfWeek: dto.dayOfWeek ?? schedule.dayOfWeek,
@@ -314,33 +355,300 @@ export class TeachingScheduleService {
 
     const saved = await this.scheduleRepo.save(schedule);
 
+    const sessionSync = await this.syncSessionsToSchedule(
+      saved,
+      before,
+      teacherChanged ? newTeacher : null,
+    );
+
     if (teacherChanged && newTeacher) {
       await this.notifyConfirmationRequest(saved, newTeacher);
     }
 
-    return this.findOne(id);
+    return { ...(await this.findOne(id)), sessionSync };
   }
 
-  /** Xoá mẫu lặp; các buổi đã sinh bị xoá theo (FK ON DELETE CASCADE). */
+  /**
+   * Đẩy mọi thay đổi của mẫu lịch xuống các buổi đã sinh (màn Chấm công).
+   *
+   * Trước đây chỉ đồng bộ khi đổi giáo viên, nên sửa giờ/thứ/môn/lớp là mẫu
+   * lịch một đằng, chấm công một nẻo: giáo viên mới bấm check-in thì bị chặn
+   * vì buổi vẫn đứng tên người cũ, còn đổi thứ thì buổi nằm ở ngày cũ nên
+   * không ai check-in được ngày nào cả (check-in chỉ cho phép trong ngày dạy).
+   *
+   * Buổi đã có dấu vết chấm công thì **không bao giờ** đụng tới — trả về số
+   * lượng trong `skipped` để Giáo vụ tự xử lý riêng.
+   */
+  private async syncSessionsToSchedule(
+    schedule: TeachingSchedule,
+    before: {
+      dayOfWeek: number;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+    },
+    newTeacher: Teacher | null,
+  ): Promise<ScheduleSessionSync> {
+    const sessions = await this.sessionRepo.find({
+      where: { scheduleId: schedule.id },
+    });
+
+    // Buổi đã qua ngày là lịch sử, không phải phân công sắp tới: người dạy hôm
+    // đó là người đã đứng lớp thật, đổi tên trên bảng công thành người mới là
+    // ghi sai công. Chỉ đồng bộ từ hôm nay trở đi.
+    const today = this.todayDateString();
+    const upcoming = sessions.filter(
+      (session) => (toDateString(session.date) as string) >= today,
+    );
+
+    const locked = upcoming.filter((session) =>
+      this.isAttendanceLocked(session),
+    );
+    const editable = upcoming.filter(
+      (session) => !this.isAttendanceLocked(session),
+    );
+
+    const effectiveFrom = toDateString(schedule.effectiveFrom) as string;
+    const effectiveTo = toDateString(schedule.effectiveTo);
+
+    // Buổi không còn hợp lệ sau khi sửa: rơi sai thứ, hoặc văng ra ngoài
+    // khoảng hiệu lực vừa thu hẹp.
+    const stale = editable.filter((session) => {
+      const date = toDateString(session.date) as string;
+      return (
+        dayOfWeekOf(date) !== schedule.dayOfWeek ||
+        date < effectiveFrom ||
+        (effectiveTo !== null && date > effectiveTo)
+      );
+    });
+
+    const fields: Partial<TeachingSession> = {
+      schoolId: schedule.schoolId,
+      schoolLocationId: schedule.schoolLocationId ?? null,
+      classId: schedule.classId ?? null,
+      subjectId: schedule.subjectId,
+      startTime: schedule.startTime,
+      endTime: schedule.endTime,
+      periods: schedule.periods ?? 1,
+    };
+
+    // Đổi giáo viên là giao lịch mới trên thực tế: phải chốt lại đơn giá và
+    // phụ cấp xăng của người mới, và bắt xác nhận lại từ đầu.
+    if (newTeacher) {
+      const { isCompanyTeacher, distanceToSchoolKm, gasAllowance } =
+        await this.fuelAllowanceTierService.computeForTeacherSchool(
+          newTeacher.id,
+          schedule.schoolId,
+          schedule.schoolLocationId,
+        );
+      Object.assign(fields, {
+        teacherId: newTeacher.id,
+        assignmentStatus: AssignmentStatus.ASSIGNED,
+        recommendedTeacherId: newTeacher.id,
+        declinedTeacherId: null,
+        declinedAt: null,
+        declineReason: null,
+        ratePerPeriod: effectiveRatePerPeriod(newTeacher, isCompanyTeacher),
+        distanceToSchoolKm,
+        gasAllowance,
+        confirmationStatus: ConfirmationStatus.PENDING,
+        confirmedAt: null,
+        rejectionReason: null,
+      });
+    }
+
+    const staleIds = new Set(stale.map((session) => session.id));
+    const keptIds = editable
+      .filter((session) => !staleIds.has(session.id))
+      .map((session) => session.id);
+
+    if (keptIds.length) {
+      await this.sessionRepo.update({ id: In(keptIds) }, fields);
+    }
+    if (staleIds.size) {
+      await this.sessionRepo.delete({ id: In([...staleIds]) });
+    }
+
+    const created = await this.regenerateMovedSessions(
+      schedule,
+      sessions,
+      before,
+    );
+
+    return {
+      updated: keptIds.length,
+      removed: staleIds.size,
+      created,
+      skipped: locked.length,
+    };
+  }
+
+  /**
+   * Sinh lại buổi cho đúng thứ mới, trong **đúng khoảng mà mẫu này đã từng
+   * sinh** — không tự ý nới rộng ra cả năm học chỉ vì Giáo vụ sửa một chữ.
+   *
+   * Mẫu chưa sinh buổi nào thì không sinh gì cả: việc sinh buổi là thao tác có
+   * chủ đích của Giáo vụ, sửa lịch không phải là lúc thay họ quyết định.
+   */
+  private async regenerateMovedSessions(
+    schedule: TeachingSchedule,
+    previous: TeachingSession[],
+    before: {
+      dayOfWeek: number;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+    },
+  ): Promise<number> {
+    const unchanged =
+      before.dayOfWeek === schedule.dayOfWeek &&
+      before.effectiveFrom === toDateString(schedule.effectiveFrom) &&
+      before.effectiveTo === toDateString(schedule.effectiveTo);
+
+    if (unchanged || !previous.length || !schedule.isActive) return 0;
+
+    const dates = previous.map(
+      (session) => toDateString(session.date) as string,
+    );
+    const earliest = dates.reduce((a, b) => (a < b ? a : b));
+    const toDate = dates.reduce((a, b) => (a > b ? a : b));
+
+    // Không sinh bù vào quá khứ: buổi đã qua mà chưa ai chấm thì để nguyên,
+    // sinh thêm buổi cho một ngày đã trôi qua chỉ tạo ra công ma.
+    const today = this.todayDateString();
+    const fromDate = earliest > today ? earliest : today;
+
+    if (fromDate > toDate) return 0;
+
+    // `generateSessions` tự cắt theo khoảng hiệu lực mới, bỏ qua ngày đã có
+    // buổi và né các ô lịch đã bị mẫu khác chiếm.
+    const { created } = await this.generateSessions(schedule.id, {
+      fromDate,
+      toDate,
+    } as GenerateSessionsDto);
+
+    return created;
+  }
+
+  /** Hôm nay theo giờ địa phương, dạng `YYYY-MM-DD`. */
+  private todayDateString(): string {
+    const now = new Date();
+    return [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, '0'),
+      String(now.getDate()).padStart(2, '0'),
+    ].join('-');
+  }
+
+  /**
+   * Buổi đã đụng tới chấm công thì bất khả xâm phạm.
+   *
+   * `status` **không** đủ để nhận biết: check-in/check-out của giáo viên không
+   * đổi `status`, chỉ Giáo vụ chấm công mới đổi. Xét mỗi `status` thì một buổi
+   * giáo viên vừa check-in xong vẫn bị coi là chưa ai đụng và bị ghi đè.
+   */
+  private isAttendanceLocked(session: TeachingSession): boolean {
+    return (
+      session.status !== SessionStatus.SCHEDULED ||
+      !!session.checkinAt ||
+      !!session.checkoutAt ||
+      !!session.lessonSubmittedAt
+    );
+  }
+
+  /** Xoá một tiết khỏi thời khoá biểu. Xem `removeSchedules`. */
   async remove(id: number) {
     const schedule = await this.getEntity(id);
+    return this.removeSchedules([schedule]);
+  }
 
-    const checkedCount = await this.sessionRepo
-      .createQueryBuilder('ss')
-      .where('ss.scheduleId = :id', { id })
-      .andWhere('ss.status != :scheduled', {
-        scheduled: SessionStatus.SCHEDULED,
-      })
-      .getCount();
+  /**
+   * Xoá toàn bộ lịch của một trường, lọc thêm theo môn nếu có.
+   *
+   * Giáo vụ nhập nhầm cả thời khoá biểu của một trường thì việc xoá tay từng
+   * tiết là hàng trăm lần bấm — và bấm tay thì kiểu gì cũng sót vài tiết, để
+   * lại lịch rác không ai nhớ vì sao còn đó.
+   *
+   * Quy tắc giữ buổi cũ y hệt xoá một tiết: tiết đã qua ngày và tiết đã chấm
+   * công không bao giờ bị đụng tới.
+   */
+  async removeBySchool(dto: RemoveSchedulesBySchoolDto) {
+    const where: FindOptionsWhere<TeachingSchedule> = {
+      schoolId: dto.schoolId,
+    };
+    if (dto.subjectId) where.subjectId = dto.subjectId;
 
-    if (checkedCount > 0) {
-      throw new ConflictException(
-        `Lịch này đã có ${checkedCount} buổi được chấm công, không xoá được. Hãy đặt isActive = false để ngừng áp dụng.`,
+    const schedules = await this.scheduleRepo.find({ where });
+
+    if (!schedules.length) {
+      // Không ném lỗi: "không có gì để xoá" là kết quả hợp lệ, không phải sự cố.
+      return {
+        deleted: true,
+        deletedSchedules: 0,
+        sessions: { kept: 0, removed: 0 },
+      };
+    }
+
+    return this.removeSchedules(schedules);
+  }
+
+  /**
+   * Xoá mẫu lịch khỏi thời khoá biểu, giữ nguyên phần đã thành lịch sử.
+   *
+   * Thời khoá biểu chỉ áp cho **hiện tại và tương lai**: xoá một tiết nghĩa là
+   * "từ nay không dạy tiết này nữa", không phải "tiết này chưa từng tồn tại".
+   * Buổi đã qua ngày là công đã dạy — có ảnh check-in, có báo giảng — nên phải
+   * còn nguyên trên bảng chấm công sau khi mẫu lịch biến mất.
+   *
+   * Khoá ngoại `schedule_id` là `ON DELETE CASCADE`, nên phải **gỡ liên kết**
+   * các buổi cần giữ trước khi xoá mẫu, nếu không chúng bị xoá theo. Cột này
+   * vốn cho phép null (buổi lẻ, buổi dạy bù) và index unique là partial
+   * `WHERE schedule_id IS NOT NULL`, nên gỡ ra là hợp lệ, không phải lách.
+   *
+   * Làm theo lô chứ không lặp từng mẫu: xoá cả thời khoá biểu của một trường
+   * là hàng trăm mẫu và hàng nghìn buổi, chạy từng cái sẽ là hàng nghìn lượt
+   * truy vấn trong một transaction.
+   */
+  private async removeSchedules(schedules: TeachingSchedule[]) {
+    const today = this.todayDateString();
+    const scheduleIds = schedules.map((schedule) => schedule.id);
+
+    const sessions = await this.sessionRepo.find({
+      where: { scheduleId: In(scheduleIds) },
+    });
+
+    // Giữ lại: buổi đã qua ngày, và buổi đã có dấu vết chấm công dù ở tương
+    // lai (giáo viên đã check-in sáng nay thì công đó là thật).
+    const keptIds: number[] = [];
+    const removedIds: number[] = [];
+
+    for (const session of sessions) {
+      const past = (toDateString(session.date) as string) < today;
+      (past || this.isAttendanceLocked(session) ? keptIds : removedIds).push(
+        session.id,
       );
     }
 
-    await this.scheduleRepo.remove(schedule);
-    return { deleted: true };
+    // Cả ba bước phải cùng thành công: gỡ liên kết xong mà xoá mẫu hỏng thì
+    // buổi cũ mồ côi, còn xoá mẫu trước khi gỡ thì CASCADE cuốn sạch.
+    await this.dataSource.transaction(async (manager) => {
+      const sessionRepo = manager.getRepository(TeachingSession);
+
+      if (keptIds.length) {
+        await sessionRepo.update({ id: In(keptIds) }, { scheduleId: null });
+      }
+      if (removedIds.length) {
+        await sessionRepo.delete({ id: In(removedIds) });
+      }
+
+      await manager.getRepository(TeachingSchedule).delete({
+        id: In(scheduleIds),
+      });
+    });
+
+    return {
+      deleted: true,
+      deletedSchedules: scheduleIds.length,
+      sessions: { kept: keptIds.length, removed: removedIds.length },
+    };
   }
 
   /**
@@ -353,33 +661,37 @@ export class TeachingScheduleService {
     employeeId: number,
     dto: ConfirmTeachingScheduleDto,
   ) {
-    const schedule = await this.scheduleRepo.findOne({
-      where: { id },
-      relations: ['teacher'],
-    });
-
-    if (!schedule) {
-      throw new NotFoundException('Lịch dạy không tồn tại');
-    }
-
-    if (schedule.teacher?.employeeId !== employeeId) {
-      throw new ForbiddenException('Bạn không phải giáo viên của lịch này');
-    }
-
-    if (schedule.confirmationStatus !== ConfirmationStatus.PENDING) {
-      throw new ConflictException('Lịch này đã được xử lý');
-    }
-
     if (dto.status === ConfirmationStatus.REJECTED && !dto.reason?.trim()) {
       throw new BadRequestException('Vui lòng nhập lý do từ chối');
     }
 
-    schedule.confirmationStatus = dto.status;
-    schedule.confirmedAt = new Date();
-    schedule.rejectionReason =
-      dto.status === ConfirmationStatus.REJECTED ? dto.reason!.trim() : null;
+    // Khoá đúng dòng lịch: hai request do retry mạng sẽ chạy tuần tự; request
+    // thứ hai thấy trạng thái đã xử lý và không sinh buổi/thông báo lần nữa.
+    const schedule = await this.dataSource.transaction(async (manager) => {
+      const scheduleRepo = manager.getRepository(TeachingSchedule);
+      const locked = await scheduleRepo.findOne({
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    await this.scheduleRepo.save(schedule);
+      if (!locked) throw new NotFoundException('Lịch dạy không tồn tại');
+
+      const teacher = await manager
+        .getRepository(Teacher)
+        .findOne({ where: { id: locked.teacherId } });
+      if (teacher?.employeeId !== employeeId) {
+        throw new ForbiddenException('Bạn không phải giáo viên của lịch này');
+      }
+      if (locked.confirmationStatus !== ConfirmationStatus.PENDING) {
+        throw new ConflictException('Lịch này đã được xử lý');
+      }
+
+      locked.confirmationStatus = dto.status;
+      locked.confirmedAt = new Date();
+      locked.rejectionReason =
+        dto.status === ConfirmationStatus.REJECTED ? dto.reason!.trim() : null;
+      return scheduleRepo.save(locked);
+    });
 
     if (dto.status === ConfirmationStatus.CONFIRMED) {
       await this.onScheduleConfirmed(schedule);
@@ -491,14 +803,26 @@ export class TeachingScheduleService {
       existing.map((row) => toDateString(row.date) as string),
     );
 
-    const toCreate = dates.filter((date) => !existingDates.has(date));
+    const candidateDates = dates.filter((date) => !existingDates.has(date));
+
+    /**
+     * Chặn trùng ô lịch **trước khi** chèn.
+     *
+     * `existingDates` chỉ chống nhân đôi buổi của CHÍNH mẫu này (unique
+     * schedule_id + date). Hai mẫu lịch khác nhau — vd cùng một giáo viên được
+     * xếp ở hai trường cùng khung giờ — vẫn lọt qua và sinh ra hai buổi chồng
+     * giờ, đúng kiểu dữ liệu rác mà không ai phát hiện cho tới lúc chấm công.
+     *
+     * Ngày nào vướng thì **bỏ qua ngày đó** và trả về trong `conflicts`, thay
+     * vì ném lỗi cho cả lượt sinh: một ngày kẹt không nên chặn cả học kỳ.
+     */
+    const conflicts = await this.findSlotConflicts(schedule, candidateDates);
+    const conflictDates = new Set(conflicts.map((c) => c.date));
+    const toCreate = candidateDates.filter((date) => !conflictDates.has(date));
 
     if (toCreate.length > 0) {
-      // Chốt đơn giá hiện tại của môn học vào từng buổi mới sinh — đổi giá
-      // môn học sau đó không được làm lệch giá đã chốt của buổi đã sinh.
-      const subject = await this.subjectRepo.findOne({
-        where: { id: schedule.subjectId },
-      });
+      // Chốt đơn giá mặc định hiện tại của giáo viên vào từng buổi mới sinh —
+      // đổi đơn giá sau đó không được làm lệch giá đã chốt của buổi đã sinh.
       const teacher = await this.teacherRepo.findOne({
         where: { id: schedule.teacherId },
       });
@@ -512,11 +836,7 @@ export class TeachingScheduleService {
           schedule.schoolId,
           schedule.schoolLocationId,
         );
-      const ratePerPeriod = effectiveRatePerPeriod(
-        teacher,
-        subject?.ratePerPeriod,
-        isCompanyTeacher,
-      );
+      const ratePerPeriod = effectiveRatePerPeriod(teacher, isCompanyTeacher);
 
       // Buổi sinh ra kế thừa trạng thái xác nhận của mẫu lịch tại thời điểm
       // sinh: mẫu đã CONFIRMED thì buổi cũng CONFIRMED luôn, khỏi bắt giáo
@@ -534,6 +854,11 @@ export class TeachingScheduleService {
           scheduleId: schedule.id,
           teacherId: schedule.teacherId,
           schoolId: schedule.schoolId,
+          // Điểm trường phải chép sang buổi dạy: Mini App đọc điểm trường của
+          // BUỔI (để hiện tên cơ sở và đo GPS check-in theo đúng cơ sở đó),
+          // không đọc ngược lên mẫu lịch. Thiếu dòng này thì buổi sinh từ mẫu
+          // mất sạch cơ sở — giáo viên không biết phải đến điểm trường nào.
+          schoolLocationId: schedule.schoolLocationId ?? null,
           classId: schedule.classId ?? null,
           subjectId: schedule.subjectId,
           date,
@@ -553,7 +878,66 @@ export class TeachingScheduleService {
       created: toCreate.length,
       skipped: dates.length - toCreate.length,
       dates: toCreate,
+      conflicts,
     };
+  }
+
+  /**
+   * Các ngày mà giáo viên hoặc lớp đã bận trong đúng khung giờ của mẫu lịch.
+   *
+   * Một tiết / một khung giờ chỉ được có **một lớp và một giáo viên**: giáo
+   * viên không phân thân sang trường khác, học sinh không ngồi hai lớp cùng lúc.
+   */
+  private async findSlotConflicts(
+    schedule: TeachingSchedule,
+    dates: string[],
+  ): Promise<{ date: string; reason: string }[]> {
+    if (!dates.length) return [];
+
+    const rows = await this.sessionRepo
+      .createQueryBuilder('ss')
+      .leftJoin('ss.teacher', 't')
+      .leftJoin('ss.class', 'cl')
+      .leftJoin('ss.school', 'sc')
+      .select([
+        'ss.date AS "date"',
+        'ss.teacherId AS "teacherId"',
+        'ss.classId AS "classId"',
+        't.name AS "teacherName"',
+        'cl.name AS "className"',
+        'sc.name AS "schoolName"',
+      ])
+      .where('ss.date IN (:...dates)', { dates })
+      .andWhere('ss.status IN (:...statuses)', {
+        statuses: ACTIVE_SESSION_STATUSES,
+      })
+      // Buổi của chính mẫu này không tính là trùng — sinh lại vẫn phải chạy được.
+      .andWhere('(ss.scheduleId IS NULL OR ss.scheduleId != :scheduleId)', {
+        scheduleId: schedule.id,
+      })
+      .andWhere(
+        '(ss.teacherId = :teacherId OR (:classId::int IS NOT NULL AND ss.classId = :classId))',
+        { teacherId: schedule.teacherId, classId: schedule.classId ?? null },
+      )
+      .andWhere('ss.startTime < :endTime', { endTime: schedule.endTime })
+      .andWhere('ss.endTime > :startTime', { startTime: schedule.startTime })
+      .getRawMany();
+
+    const seen = new Map<string, string>();
+
+    for (const row of rows) {
+      const date = toDateString(row.date) as string;
+      if (seen.has(date)) continue;
+
+      seen.set(
+        date,
+        row.teacherId === schedule.teacherId
+          ? `Giáo viên ${row.teacherName ?? ''} đã có buổi tại ${row.schoolName ?? 'trường khác'}`.trim()
+          : `Lớp ${row.className ?? ''} đã có buổi khác cùng giờ`.trim(),
+      );
+    }
+
+    return [...seen.entries()].map(([date, reason]) => ({ date, reason }));
   }
 
   private async getEntity(id: number): Promise<TeachingSchedule> {

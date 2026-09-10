@@ -39,6 +39,25 @@ const NO_ALLOWANCE: GasAllowanceResult = {
   gasAllowance: null,
 };
 
+/** Giới hạn của cột `teaching_sessions.distance_to_school_km` — numeric(6,2). */
+const MAX_DISTANCE_KM = 9999.99;
+
+/**
+ * `0, 0` là toạ độ KHAI THIẾU, không phải một địa điểm.
+ *
+ * Form nhập để trống hoặc lưu hụt đều ra `0, 0`, mà điểm đó nằm giữa Đại Tây
+ * Dương: mọi trường ở Việt Nam cách nó ~11.800 km. Tính thật con số đó vừa vô
+ * nghĩa (phụ cấp xăng luôn rơi vào bậc cao nhất) vừa làm vỡ cột khoảng cách
+ * khi ghi buổi dạy. Coi như chưa có toạ độ để lùi về nhánh an toàn sẵn có.
+ */
+function hasCoordinates(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+): boolean {
+  if (lat == null || lng == null) return false;
+  return !(Number(lat) === 0 && Number(lng) === 0);
+}
+
 @Injectable()
 export class FuelAllowanceTierService {
   constructor(
@@ -175,7 +194,7 @@ export class FuelAllowanceTierService {
     // Từ đây chắc chắn là giáo viên công ty — dù không tra được khoảng cách
     // (thiếu vị trí/toạ độ trường/chưa khai bậc) vẫn phải báo `isCompanyTeacher`
     // để nơi gọi bỏ `ratePerPeriod`, không được âm thầm trả theo tiết.
-    if (teacher.latitude == null || teacher.longitude == null) {
+    if (!hasCoordinates(teacher.latitude, teacher.longitude)) {
       return { isCompanyTeacher: true, distanceToSchoolKm: null, gasAllowance: null };
     }
 
@@ -186,25 +205,34 @@ export class FuelAllowanceTierService {
 
     if (schoolLocationId) {
       const location = await this.locationRepo.findOne({ where: { id: schoolLocationId } });
-      if (location?.latitude != null && location?.longitude != null) {
-        lat = location.latitude;
-        lng = location.longitude;
+      if (hasCoordinates(location?.latitude, location?.longitude)) {
+        lat = location!.latitude;
+        lng = location!.longitude;
       }
     }
 
-    if (lat == null || lng == null) {
+    if (!hasCoordinates(lat, lng)) {
       return { isCompanyTeacher: true, distanceToSchoolKm: null, gasAllowance: null };
     }
 
     const distanceKm =
       Math.round(
         haversineKm(
-          teacher.latitude,
-          teacher.longitude,
-          lat,
-          lng,
+          teacher.latitude!,
+          teacher.longitude!,
+          lat!,
+          lng!,
         ) * 100,
       ) / 100;
+
+    // Chốt chặn cuối: khoảng cách vô lý thì coi như chưa khai toạ độ. Cột
+    // `teaching_sessions.distance_to_school_km` là numeric(6,2), nhét số lớn
+    // hơn vào là Postgres ném `numeric field overflow` — mà chỗ gọi hàm này
+    // (sinh buổi dạy sau khi giáo viên xác nhận lịch) nuốt lỗi vào log, nên
+    // hậu quả là giáo viên mất sạch buổi dạy mà không ai được báo.
+    if (!Number.isFinite(distanceKm) || distanceKm > MAX_DISTANCE_KM) {
+      return { isCompanyTeacher: true, distanceToSchoolKm: null, gasAllowance: null };
+    }
 
     const tiers = await this.findAll();
     const gasAllowance = this.resolveAmount(tiers, distanceKm);

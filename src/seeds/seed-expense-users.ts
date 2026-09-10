@@ -1,6 +1,6 @@
 /**
  * Seed các user cho quy trình đề xuất chi:
- *   sales, director, ketoan_congno, thuquy, saleadmin, ketoan_truong
+ *   sales, director, ketoan_congno, thuquy, saleadmin, ketoan_truong, ky_thuat
  *
  * ketoan_truong (Kế toán trưởng) = vai trò CHỈ XEM: Quản lý thu chi, Thống kê,
  *   Đề xuất chi, Chính sách.
@@ -60,6 +60,12 @@ const USERS: {
         email: 'ketoan.truong.expense@test.local',
         phone: '0900000006',
         roles: ['ketoan_truong'],
+    },
+    {
+        name: 'Phòng kỹ thuật (test)',
+        email: 'kythuat.expense@test.local',
+        phone: '0900000007',
+        roles: ['ky_thuat'],
     },
 ];
 

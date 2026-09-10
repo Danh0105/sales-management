@@ -31,6 +31,8 @@ import { TeacherService } from './teacher.service';
 import { TeacherMatchingService } from './teacher-matching.service';
 import { AvatarStorageService } from './avatar-storage.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
+import { LessonImageLibraryService } from './lesson-image-library.service';
+import { LessonImageEntity } from './entities/lesson-image.entity';
 import { TeachingScheduleService } from './teaching-schedule.service';
 import { TeachingSessionService } from './teaching-session.service';
 import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
@@ -65,6 +67,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
       TeacherLocationChange,
       TeacherAccountRequest,
       FuelAllowanceTier,
+      LessonImageEntity,
       Ward,
     ]),
   ],
@@ -82,6 +85,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     TeacherMatchingService,
     AvatarStorageService,
     LessonImageStorageService,
+    LessonImageLibraryService,
     TeachingScheduleService,
     TeachingSessionService,
     TeachingBulkService,

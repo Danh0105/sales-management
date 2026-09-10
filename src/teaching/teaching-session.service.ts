@@ -114,6 +114,10 @@ import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
 import { LessonImage } from './lesson-image.type';
+import {
+  LESSON_REPORT_IMAGE_TYPE,
+  LessonImageEntity,
+} from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
 import {
   TEACHING_LESSON_REPORT_ALERT_KIND,
@@ -555,13 +559,9 @@ export class TeachingSessionService {
       startTime: toDbTime(dto.startTime),
       endTime: toDbTime(dto.endTime),
       periods: dto.periods ?? 1,
-      // Chốt đơn giá của môn học ngay tại thời điểm tạo buổi — trừ giáo viên
-      // công ty, họ không nhận theo tiết dù môn có giá (nhận phụ cấp xăng).
-      ratePerPeriod: effectiveRatePerPeriod(
-        teacher,
-        subject.ratePerPeriod,
-        isCompanyTeacher,
-      ),
+      // Chốt đơn giá mặc định của GIÁO VIÊN ngay tại thời điểm tạo buổi — trừ
+      // giáo viên công ty, họ không nhận theo tiết (nhận phụ cấp xăng).
+      ratePerPeriod: effectiveRatePerPeriod(teacher, isCompanyTeacher),
       distanceToSchoolKm,
       gasAllowance,
       status: SessionStatus.SCHEDULED,
@@ -678,17 +678,14 @@ export class TeachingSessionService {
     // Chỉ đổi snapshot khi người dùng chủ động gán/đổi giáo viên. Các chỉnh sửa
     // khác tuyệt đối không tra lại giá hiện tại, nhờ vậy lịch sử không biến động.
     if (dto.teacherId !== undefined && dto.teacherId !== null) {
-      const [subject, allowance] = await Promise.all([
-        this.subjectRepo.findOne({ where: { id: session.subjectId } }),
-        this.fuelAllowanceTierService.computeForTeacherSchool(
+      const allowance =
+        await this.fuelAllowanceTierService.computeForTeacherSchool(
           dto.teacherId,
           session.schoolId,
           session.schoolLocationId,
-        ),
-      ]);
+        );
       session.ratePerPeriod = effectiveRatePerPeriod(
         assignedTeacher,
-        subject?.ratePerPeriod,
         allowance.isCompanyTeacher,
       );
       session.distanceToSchoolKm = allowance.distanceToSchoolKm;
@@ -702,9 +699,18 @@ export class TeachingSessionService {
   async remove(id: number) {
     const session = await this.getEntity(id);
 
-    if (CHECKED_STATUSES.includes(session.status)) {
+    // `status` KHÔNG đủ để biết buổi đã được chấm công hay chưa: check-in,
+    // check-out và báo giảng của giáo viên không đổi `status`, chỉ Giáo vụ
+    // chấm công mới đổi. Xét mỗi `status` thì một buổi đã dạy xong, có ảnh
+    // check-in và báo giảng, vẫn xoá được sạch chỉ vì Giáo vụ chưa duyệt.
+    if (
+      CHECKED_STATUSES.includes(session.status) ||
+      session.checkinAt ||
+      session.checkoutAt ||
+      session.lessonSubmittedAt
+    ) {
       throw new ConflictException(
-        'Buổi đã chấm công, không xoá được. Hãy chuyển trạng thái sang "Huỷ buổi" nếu cần.',
+        'Buổi đã có dữ liệu chấm công, không xoá được. Hãy chuyển trạng thái sang "Huỷ buổi" nếu cần.',
       );
     }
 
@@ -921,23 +927,15 @@ export class TeachingSessionService {
         session.schoolId,
         session.schoolLocationId,
       );
-    const subject = await this.subjectRepo.findOne({
-      where: { id: session.subjectId },
-    });
-
     await this.dataSource.transaction(async (manager) => {
       await manager.getRepository(TeachingSession).update(id, {
         teacherId: teacher.id,
         assignmentStatus: AssignmentStatus.ASSIGNED,
         recommendedTeacherId: teacher.id,
-        // Đơn giá đã chốt theo môn học ngay lúc tạo buổi — đổi giáo viên
-        // không đụng tới đơn giá, TRỪ KHI gán sang giáo viên công ty: họ
+        // Đơn giá chốt theo giáo viên nên đổi người là chốt lại theo đơn giá
+        // mặc định của người mới; gán sang giáo viên công ty thì về null vì họ
         // không nhận theo tiết dù buổi đã chốt giá nào trước đó.
-        ratePerPeriod: effectiveRatePerPeriod(
-          teacher,
-          subject?.ratePerPeriod,
-          isCompanyTeacher,
-        ),
+        ratePerPeriod: effectiveRatePerPeriod(teacher, isCompanyTeacher),
         distanceToSchoolKm,
         gasAllowance,
         // Gán giáo viên (mới hoặc đổi người) luôn cần xác nhận lại từ đầu.
@@ -981,33 +979,39 @@ export class TeachingSessionService {
     employeeId: number,
     dto: ConfirmTeachingSessionDto,
   ) {
-    const session = await this.sessionRepo.findOne({
-      where: { id },
-      relations: ['teacher'],
-    });
-
-    if (!session) {
-      throw new NotFoundException('Buổi dạy không tồn tại');
-    }
-
-    if (session.teacher?.employeeId !== employeeId) {
-      throw new ForbiddenException('Bạn không phải giáo viên của buổi dạy này');
-    }
-
-    if (session.confirmationStatus !== ConfirmationStatus.PENDING) {
-      throw new ConflictException('Buổi dạy này đã được xử lý');
-    }
-
     if (dto.status === ConfirmationStatus.REJECTED && !dto.reason?.trim()) {
       throw new BadRequestException('Vui lòng nhập lý do từ chối');
     }
 
-    session.confirmationStatus = dto.status;
-    session.confirmedAt = new Date();
-    session.rejectionReason =
-      dto.status === ConfirmationStatus.REJECTED ? dto.reason!.trim() : null;
+    const session = await this.dataSource.transaction(async (manager) => {
+      const sessionRepo = manager.getRepository(TeachingSession);
+      const locked = await sessionRepo.findOne({
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    await this.sessionRepo.save(session);
+      if (!locked) throw new NotFoundException('Buổi dạy không tồn tại');
+
+      const teacher = locked.teacherId
+        ? await manager
+            .getRepository(Teacher)
+            .findOne({ where: { id: locked.teacherId } })
+        : null;
+      if (teacher?.employeeId !== employeeId) {
+        throw new ForbiddenException(
+          'Bạn không phải giáo viên của buổi dạy này',
+        );
+      }
+      if (locked.confirmationStatus !== ConfirmationStatus.PENDING) {
+        throw new ConflictException('Buổi dạy này đã được xử lý');
+      }
+
+      locked.confirmationStatus = dto.status;
+      locked.confirmedAt = new Date();
+      locked.rejectionReason =
+        dto.status === ConfirmationStatus.REJECTED ? dto.reason!.trim() : null;
+      return sessionRepo.save(locked);
+    });
     await this.notifyConfirmationResult(session);
     await this.notificationService.markTeachingSessionConfirmationAsRead(
       employeeId,
@@ -1155,20 +1159,34 @@ export class TeachingSessionService {
       );
     }
 
-    const { distance, outOfRange } = await this.calculatePunchLocation(session, dto);
+    const { distance, outOfRange } = await this.calculatePunchLocation(
+      session,
+      dto,
+    );
 
     const checkinImages = await this.lessonImageStorage.storeMany([file]);
 
-    session.checkinAt = new Date();
-    session.checkinLatitude = dto.latitude;
-    session.checkinLongitude = dto.longitude;
-    session.checkinAccuracy = null;
-    session.checkinDistance = distance;
-    session.checkinOutOfRange = outOfRange;
-    session.checkinImages = checkinImages;
-
     try {
-      await this.sessionRepo.save(session);
+      await this.dataSource.transaction(async (manager) => {
+        const repository = manager.getRepository(TeachingSession);
+        const locked = await repository.findOne({
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!locked) throw new NotFoundException('Buổi dạy không tồn tại');
+        if (locked.checkinAt) {
+          throw new ConflictException('Buổi này đã check-in');
+        }
+
+        locked.checkinAt = new Date();
+        locked.checkinLatitude = dto.latitude;
+        locked.checkinLongitude = dto.longitude;
+        locked.checkinAccuracy = null;
+        locked.checkinDistance = distance;
+        locked.checkinOutOfRange = outOfRange;
+        locked.checkinImages = checkinImages;
+        await repository.save(locked);
+      });
     } catch (error) {
       await this.lessonImageStorage
         .removeMany(checkinImages)
@@ -1472,8 +1490,24 @@ export class TeachingSessionService {
         session.lessonEvaluation = dto.lessonEvaluation;
         session.actualStudentCount = dto.actualStudentCount;
         session.lessonImages = lessonImages;
-        session.lessonSubmittedAt = new Date();
+        const submittedAt = new Date();
+        session.lessonSubmittedAt = submittedAt;
         await repository.save(session);
+        const imageRepository = manager.getRepository(LessonImageEntity);
+        const imageRows = lessonImages
+          .filter((image) => !image.mimeType.startsWith('video/'))
+          .map((image) =>
+            imageRepository.create({
+              sessionId: session.id,
+              url: image.url,
+              thumbnailUrl: image.thumbnailUrl!,
+              mimeType: image.mimeType,
+              sortOrder: image.sortOrder,
+              type: LESSON_REPORT_IMAGE_TYPE,
+              createdAt: submittedAt,
+            }),
+          );
+        if (imageRows.length) await imageRepository.insert(imageRows);
       });
     } catch (error) {
       await this.lessonImageStorage
@@ -1955,6 +1989,14 @@ export class TeachingSessionService {
     if (query.schoolId) {
       qb.andWhere('ss.schoolId = :schoolId', { schoolId: query.schoolId });
     }
+    if (query.provinceId) {
+      // Buổi dạy không giữ khu vực; khu vực là của trường → xã/phường → tỉnh.
+      // Dùng leftJoin để trường chưa gắn xã/phường bị loại theo đúng điều kiện
+      // WHERE, thay vì âm thầm đổi ngữ nghĩa của các truy vấn khác.
+      qb.leftJoin('sc.ward', 'wd').andWhere('wd.province_id = :provinceId', {
+        provinceId: query.provinceId,
+      });
+    }
     if (query.classId) {
       qb.andWhere('ss.classId = :classId', { classId: query.classId });
     }
@@ -2115,7 +2157,7 @@ export class TeachingSessionService {
 
   /**
    * Ghi đè `checkinRequired`/`checkoutRequired` cho các buổi thuộc block
-   * nhiều tiết liên tiếp cùng ĐỊA ĐIỂM (trường, hoặc điểm trường nếu có) —
+   * nhiều tiết liên tiếp cùng BUỔI và ĐỊA ĐIỂM (trường, hoặc điểm trường nếu có) —
    * chỉ tính khi thực sự cần (gọi từ
    * `findOne` luôn, từ `findAll`/`findMine` khi caller yêu cầu) vì phải truy
    * vấn thêm cả ngày dạy của từng giáo viên xuất hiện trong kết quả.
@@ -3021,7 +3063,8 @@ export class TeachingSessionService {
    */
   /**
    * Trong số các buổi ASSIGNED/SCHEDULED hôm nay của MỌI giáo viên, những buổi
-   * cần tự check-in. Mỗi block chỉ có tiết đầu (`checkinRequired=true`) được
+   * cần tự check-in. Sáng/chiều là hai block riêng dù cùng trường. Mỗi block
+   * chỉ có tiết đầu (`checkinRequired=true`) được
    * xét; tiết giữa/cuối không bao giờ bị coi là thiếu check-in, kể cả khi cả
    * block chưa có thao tác nào.
    */
@@ -3034,6 +3077,8 @@ export class TeachingSessionService {
         'ss.id AS "id"',
         'ss.teacherId AS "teacherId"',
         'ss.schoolId AS "schoolId"',
+        'ss.schoolLocationId AS "schoolLocationId"',
+        'ss.startTime AS "startTime"',
         'ss.checkinAt AS "checkinAt"',
       ])
       .where('ss.teacherId IS NOT NULL')
@@ -3050,31 +3095,29 @@ export class TeachingSessionService {
       .getRawMany();
 
     const result = new Set<number>();
-    let blockFirstId: number | null = null;
-    let blockFirstHasCheckin = false;
-    let prevTeacherId: number | null = null;
-    let prevSchoolId: number | null = null;
-
-    const flushBlock = () => {
-      if (blockFirstId !== null && !blockFirstHasCheckin) {
-        result.add(blockFirstId);
-      }
-    };
-
+    const byTeacher = new Map<number, any[]>();
     for (const row of rows) {
       const teacherId = Number(row.teacherId);
-      const schoolId = Number(row.schoolId);
-      const sameBlock =
-        teacherId === prevTeacherId && schoolId === prevSchoolId;
-      if (!sameBlock) {
-        flushBlock();
-        blockFirstId = Number(row.id);
-        blockFirstHasCheckin = Boolean(row.checkinAt);
-      }
-      prevTeacherId = teacherId;
-      prevSchoolId = schoolId;
+      const sessions = byTeacher.get(teacherId) ?? [];
+      sessions.push({
+        id: Number(row.id),
+        schoolId: Number(row.schoolId),
+        schoolLocationId:
+          row.schoolLocationId == null ? null : Number(row.schoolLocationId),
+        startTime: row.startTime,
+        checkinAt: row.checkinAt ? new Date(row.checkinAt) : null,
+      });
+      byTeacher.set(teacherId, sessions);
     }
-    flushBlock();
+
+    for (const sessions of byTeacher.values()) {
+      const flags = computeDayBlocks(sessions);
+      for (const session of sessions) {
+        if (flags.get(session.id)?.checkinRequired && !session.checkinAt) {
+          result.add(session.id);
+        }
+      }
+    }
 
     return result;
   }
@@ -3366,7 +3409,7 @@ export class TeachingSessionService {
 
   /**
    * Các buổi thực sự "sống" (đã phân công, chưa huỷ) của một giáo viên trong
-   * một ngày, sắp theo giờ dạy — nền tảng để gộp block cùng trường
+   * một ngày, sắp theo giờ dạy — nền tảng để gộp block cùng buổi và cùng trường
    * (`computeDayBlocks`/`isBlockCheckedIn`). Nhận `manager` để đọc trong cùng
    * transaction với thao tác đang chờ ghi (checkout/nộp bài).
    */
@@ -3380,6 +3423,8 @@ export class TeachingSessionService {
     Array<{
       id: number;
       schoolId: number;
+      schoolLocationId: number | null;
+      startTime: string;
       checkinAt: Date | null;
       checkoutAt: Date | null;
     }>
@@ -3396,6 +3441,7 @@ export class TeachingSessionService {
         // Block chấm công ngắt theo ĐỊA ĐIỂM: thiếu cột này thì hai cơ sở khác
         // nhau của cùng một trường bị gộp thành một lần đến trường.
         'ss.schoolLocationId AS "schoolLocationId"',
+        'ss.startTime AS "startTime"',
         'ss.checkinAt AS "checkinAt"',
         'ss.checkoutAt AS "checkoutAt"',
       ])
@@ -3416,6 +3462,7 @@ export class TeachingSessionService {
       schoolId: Number(row.schoolId),
       schoolLocationId:
         row.schoolLocationId == null ? null : Number(row.schoolLocationId),
+      startTime: row.startTime,
       checkinAt: row.checkinAt ? new Date(row.checkinAt) : null,
       checkoutAt: row.checkoutAt ? new Date(row.checkoutAt) : null,
     }));

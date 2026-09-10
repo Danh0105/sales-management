@@ -48,9 +48,13 @@ import {
   assertCanSetTeachingRates,
     TEACHER_ROLES,
     TEACHING_MANAGE_ROLES,
+    TEACHING_OWN_SCHOOLS_ROLES,
     TEACHING_VIEW_ROLES,
+    resolveTeachingScope,
 } from './teaching-roles';
 import { LessonImageUploadFilter } from './lesson-image-upload.filter';
+import { LessonImageLibraryService } from './lesson-image-library.service';
+import { QueryLessonImagesDto } from './dto/query-lesson-images.dto';
 
 @Controller('teaching-sessions')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -59,6 +63,7 @@ export class TeachingSessionController {
     constructor(
         private readonly service: TeachingSessionService,
         private readonly bulkService: TeachingBulkService,
+        private readonly lessonImageLibrary: LessonImageLibraryService,
     ) { }
 
     /**
@@ -324,6 +329,13 @@ export class TeachingSessionController {
     @Get('attendance/summary')
     attendanceSummary(@Query() query: QueryAttendanceSummaryDto) {
         return this.service.attendanceSummary(query);
+    }
+
+    /** Thư viện ảnh báo giảng, phân trang theo từng ảnh trong SQL. */
+    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES, ...TEACHING_OWN_SCHOOLS_ROLES)
+    @Get('lesson-images')
+    lessonImages(@Query() query: QueryLessonImagesDto, @Req() req: Request) {
+        return this.lessonImageLibrary.findAll(query, resolveTeachingScope(req.user));
     }
 
     @Roles(...TEACHING_VIEW_ROLES)

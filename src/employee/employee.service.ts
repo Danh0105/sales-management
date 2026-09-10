@@ -296,7 +296,11 @@ export class EmployeeService {
     const isMatch = await bcrypt.compare(dto.oldPassword, user.password);
 
     if (!isMatch) {
-      throw new BadRequestException('Old password is incorrect');
+      throw new BadRequestException('Mật khẩu hiện tại không đúng');
+    }
+
+    if (dto.oldPassword === dto.newPassword) {
+      throw new BadRequestException('Mật khẩu mới phải khác mật khẩu hiện tại');
     }
 
     const hashedPassword = await bcrypt.hash(dto.newPassword, 10);

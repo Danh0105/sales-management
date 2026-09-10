@@ -3,6 +3,7 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { SuggestStatus } from './SuggestStatus.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
 import { ExpenseRole } from './constants/expense-roles';
+import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 
 export interface TransitionDef {
   from: SuggestStatus[];
@@ -25,6 +26,14 @@ export interface TransitionDef {
    * đơn của chính mình). Phải là tập con của `roles`.
    */
   overrideRoles?: string[];
+  /**
+   * Loại đề xuất được phép dùng action này. Bỏ trống = áp cho cả hai loại
+   * (các bước dùng chung: tạo, duyệt, từ chối, rút đơn, xác nhận đã dùng /
+   * chưa dùng). Cần thiết vì hai nhánh dùng chung một số trạng thái —
+   * `APPROVED` là việc của kế toán công nợ với đề xuất tiền nhưng là việc của
+   * phòng kỹ thuật với đề xuất thiết bị.
+   */
+  kinds?: ExpenseRequestKind[];
 }
 
 /**
@@ -36,6 +45,15 @@ export interface TransitionDef {
  *                                      ↑             │
  *                                      └─ PAYMENT_ORDERED (lập lại lệnh chi)
  * PENDING_APPROVAL → REJECTED (kết thúc - bị từ chối)
+ *
+ * Với ĐỀ XUẤT THIẾT BỊ (kind = EQUIPMENT), nhánh sau APPROVED đổi sang phòng
+ * kỹ thuật:
+ *
+ * APPROVED → STOCK_ISSUE_ORDERED → EQUIPMENT_RECEIVED → SPENT
+ *                                                     ↘ NOT_SPENT
+ *                                                        → EQUIPMENT_RETURNED ─┐
+ *                                                           ↑                  │
+ *                                                           └─ STOCK_ISSUE_ORDERED
  */
 export const EXPENSE_TRANSITIONS: Partial<
   Record<ExpenseAction, TransitionDef>
@@ -81,12 +99,14 @@ export const EXPENSE_TRANSITIONS: Partial<
     from: [SuggestStatus.APPROVED, SuggestStatus.FUND_RETURNED],
     to: SuggestStatus.PAYMENT_ORDERED,
     roles: [ExpenseRole.DEBT_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   [ExpenseAction.CONFIRM_CASH_RELEASED]: {
     from: [SuggestStatus.PAYMENT_ORDERED],
     to: SuggestStatus.CASH_RELEASED,
     roles: [ExpenseRole.TREASURER],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   [ExpenseAction.CONFIRM_CASH_RECEIVED]: {
@@ -94,17 +114,18 @@ export const EXPENSE_TRANSITIONS: Partial<
     to: SuggestStatus.CASH_RECEIVED,
     roles: [ExpenseRole.SALES],
     ownerOnly: true,
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   [ExpenseAction.CONFIRM_SPENT]: {
-    from: [SuggestStatus.CASH_RECEIVED],
+    from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.SPENT,
     roles: [ExpenseRole.SALES],
     ownerOnly: true,
   },
 
   [ExpenseAction.CONFIRM_NOT_SPENT]: {
-    from: [SuggestStatus.CASH_RECEIVED],
+    from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.NOT_SPENT,
     roles: [ExpenseRole.SALES],
     ownerOnly: true,
@@ -114,11 +135,42 @@ export const EXPENSE_TRANSITIONS: Partial<
     from: [SuggestStatus.NOT_SPENT],
     to: SuggestStatus.FUND_RETURNED,
     roles: [ExpenseRole.TREASURER],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  // ===== nhánh ĐỀ XUẤT THIẾT BỊ =====
+  // Phòng kỹ thuật giữ cả hai chốt (lên lệnh xuất kho, nhận lại thiết bị) —
+  // tương ứng kế toán công nợ + thủ quỹ ở nhánh tiền. Không có bước "xuất
+  // kho" tách riêng: lệnh xuất kho được lập là hàng đã sẵn sàng giao, bước
+  // kế tiếp là kinh doanh xác nhận đã nhận.
+
+  [ExpenseAction.CREATE_STOCK_ISSUE_ORDER]: {
+    from: [SuggestStatus.APPROVED, SuggestStatus.EQUIPMENT_RETURNED],
+    to: SuggestStatus.STOCK_ISSUE_ORDERED,
+    roles: [ExpenseRole.TECHNICAL],
+    kinds: [ExpenseRequestKind.EQUIPMENT],
+  },
+
+  [ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED]: {
+    from: [SuggestStatus.STOCK_ISSUE_ORDERED],
+    to: SuggestStatus.EQUIPMENT_RECEIVED,
+    roles: [ExpenseRole.SALES],
+    ownerOnly: true,
+    kinds: [ExpenseRequestKind.EQUIPMENT],
+  },
+
+  [ExpenseAction.CONFIRM_EQUIPMENT_RETURNED]: {
+    from: [SuggestStatus.NOT_SPENT],
+    to: SuggestStatus.EQUIPMENT_RETURNED,
+    roles: [ExpenseRole.TECHNICAL],
+    kinds: [ExpenseRequestKind.EQUIPMENT],
   },
 };
 
 export interface TransitionContext {
   actorRoles: string[];
+  /** Loại đề xuất; mặc định `CASH` để giữ nguyên hành vi của luồng tiền. */
+  kind?: ExpenseRequestKind;
   isOwner: boolean;
   /** id người đang thao tác — để so với người làm bước ngay trước. */
   actorId?: number | null;
@@ -151,6 +203,14 @@ export function assertExpenseTransition(
   if (!def) {
     throw new ConflictException(
       `Action ${action} không phải là một bước chuyển trạng thái`,
+    );
+  }
+
+  const kind = ctx.kind ?? ExpenseRequestKind.CASH;
+
+  if (def.kinds && !def.kinds.includes(kind)) {
+    throw new ConflictException(
+      `Action ${action} không thuộc luồng của loại đề xuất ${kind}`,
     );
   }
 
@@ -212,10 +272,15 @@ export function assertExpenseTransition(
  */
 export function expenseActorForStatus(
   status: SuggestStatus,
+  kind: ExpenseRequestKind = ExpenseRequestKind.CASH,
 ): { roles: string[]; owner: boolean } | null {
+  const isEquipment = kind === ExpenseRequestKind.EQUIPMENT;
+
   switch (status) {
     case SuggestStatus.CASH_RELEASED:
     case SuggestStatus.CASH_RECEIVED:
+    case SuggestStatus.STOCK_ISSUE_ORDERED:
+    case SuggestStatus.EQUIPMENT_RECEIVED:
       return { roles: [ExpenseRole.SALES], owner: true };
 
     // Cả Giám đốc lẫn Sales Admin đều duyệt được bước này nên nhắc cả hai.
@@ -225,12 +290,30 @@ export function expenseActorForStatus(
         owner: false,
       };
 
+    // Sau khi duyệt, đề xuất tiền về kế toán công nợ còn đề xuất thiết bị về
+    // phòng kỹ thuật — cùng trạng thái nhưng khác người giữ bước.
     case SuggestStatus.APPROVED:
+      return {
+        roles: [
+          isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.DEBT_ACCOUNTANT,
+        ],
+        owner: false,
+      };
+
     case SuggestStatus.FUND_RETURNED:
       return { roles: [ExpenseRole.DEBT_ACCOUNTANT], owner: false };
 
-    case SuggestStatus.PAYMENT_ORDERED:
+    case SuggestStatus.EQUIPMENT_RETURNED:
+      return { roles: [ExpenseRole.TECHNICAL], owner: false };
+
+    // `NOT_SPENT`: tiền thì hoàn về thủ quỹ, thiết bị thì nhập lại kho.
     case SuggestStatus.NOT_SPENT:
+      return {
+        roles: [isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.TREASURER],
+        owner: false,
+      };
+
+    case SuggestStatus.PAYMENT_ORDERED:
       return { roles: [ExpenseRole.TREASURER], owner: false };
 
     default:

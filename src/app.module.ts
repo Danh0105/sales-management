@@ -41,6 +41,7 @@ import { ZaloLocationModule } from './zalo-location/zalo-location.module';
 import { TimetableImportModule } from './timetable-import/timetable-import.module';
 import { VirtualTryOnModule } from './virtual-tryon/virtual-tryon.module';
 import { SchoolLocationModule } from './school-location/school-location.module';
+import { ActivityLogModule } from './activity-log/activity-log.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { SchoolLocationModule } from './school-location/school-location.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ActivityLogModule,
     EmployeeModule,
     AuthModule,
     SchoolsModule,

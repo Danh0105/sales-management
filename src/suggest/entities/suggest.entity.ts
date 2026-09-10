@@ -2,17 +2,20 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, JoinColumn, ManyToOne, OneToMany, OneToOne, Index } from 'typeorm';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
+import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { Policy } from '../../policy/entities/policy.entity';
 import { Employee } from '../../employee/employee.entity';
 import { School } from '../../school/schools.entity';
 import { Ward } from '../../ward/ward.entity';
 import { SuggestPaymentOrder } from './suggest-payment-order.entity';
+import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 
 @Entity()
 @Index(['type', 'status'])
 @Index(['type', 'expectedPaymentDate'])
 @Index('idx_suggest_expense_school_year_status', ['type', 'schoolId', 'schoolYear', 'status'])
+@Index(['type', 'requestKind', 'status'])
 export class Suggest {
     @PrimaryGeneratedColumn()
     id?: number;
@@ -24,6 +27,19 @@ export class Suggest {
         default: SuggestType.SUGGESTION,
     })
     type?: SuggestType;
+
+    /**
+     * Loại đề xuất chi: tiền (về kế toán lên lệnh chi) hay thiết bị (về phòng
+     * kỹ thuật lên lệnh xuất kho). Chỉ có nghĩa khi `type = EXPENSE_REQUEST`;
+     * mặc định `CASH` để mọi đề xuất cũ giữ nguyên luồng tiền.
+     */
+    @Column({
+        type: 'enum',
+        enum: ExpenseRequestKind,
+        name: 'request_kind',
+        default: ExpenseRequestKind.CASH,
+    })
+    requestKind?: ExpenseRequestKind;
 
     @Column({ type: 'text' })
     content?: string;
@@ -171,8 +187,24 @@ export class Suggest {
     @Column({ type: 'timestamptz', nullable: true })
     saleadminReviewedAt?: Date | null;
 
+    // ===== nhánh ĐỀ XUẤT THIẾT BỊ =====
+
+    /** Kinh doanh xác nhận đã nhận thiết bị */
+    @Column({ type: 'timestamptz', name: 'equipment_received_at', nullable: true })
+    equipmentReceivedAt?: Date | null;
+
+    /** Kỹ thuật xác nhận đã nhập lại kho thiết bị chưa dùng */
+    @Column({ type: 'int', name: 'equipment_returned_by', nullable: true })
+    equipmentReturnedBy?: number | null;
+
+    @Column({ type: 'timestamptz', name: 'equipment_returned_at', nullable: true })
+    equipmentReturnedAt?: Date | null;
+
     @OneToOne(() => SuggestPaymentOrder, (po) => po.suggest)
     paymentOrder?: SuggestPaymentOrder;
+
+    @OneToOne(() => SuggestStockIssueOrder, (so) => so.suggest)
+    stockIssueOrder?: SuggestStockIssueOrder;
 
     @OneToMany(() => SuggestAttachment, (att) => att.suggest)
     attachments?: SuggestAttachment[];

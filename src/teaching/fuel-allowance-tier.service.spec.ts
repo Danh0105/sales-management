@@ -18,6 +18,7 @@ describe('FuelAllowanceTierService', () => {
     teacher?: any;
     employee?: any;
     school?: any;
+    location?: any;
   } = {}) {
     const tiers = overrides.tiers ?? TIERS;
     const tierRepo: any = {
@@ -51,13 +52,18 @@ describe('FuelAllowanceTierService', () => {
       ),
     };
 
+    const locationRepo: any = {
+      findOne: jest.fn().mockResolvedValue(overrides.location ?? null),
+    };
+
     const service = new FuelAllowanceTierService(
       tierRepo,
       teacherRepo,
       schoolRepo,
       employeeRepo,
+      locationRepo,
     );
-    return { service, tierRepo, teacherRepo, employeeRepo, schoolRepo };
+    return { service, tierRepo, teacherRepo, employeeRepo, schoolRepo, locationRepo };
   }
 
   describe('create()/update() — chặn chồng khoảng cách', () => {
@@ -174,6 +180,40 @@ describe('FuelAllowanceTierService', () => {
       const result = await service.computeForTeacherSchool(1, 5);
       expect(result.distanceToSchoolKm).not.toBeNull();
       expect(result.gasAllowance).toBeNull();
+    });
+
+    // `0, 0` là dữ liệu khai thiếu chứ không phải toạ độ giữa Đại Tây Dương:
+    // tính thật ra ~11.800 km, vừa sai phụ cấp vừa làm vỡ cột numeric(6,2)
+    // của buổi dạy khiến cả lịch dạy không sinh được buổi nào.
+    it('trường khai toạ độ 0,0 → coi như chưa có toạ độ, không tính khoảng cách', async () => {
+      const { service } = setup({ school: { id: 5, latitude: 0, longitude: 0 } });
+      const result = await service.computeForTeacherSchool(1, 5);
+      expect(result).toEqual({
+        isCompanyTeacher: true,
+        distanceToSchoolKm: null,
+        gasAllowance: null,
+      });
+    });
+
+    it('giáo viên khai toạ độ 0,0 → cũng coi như chưa có vị trí', async () => {
+      const { service } = setup({
+        teacher: { id: 1, employeeId: 100, latitude: 0, longitude: 0 },
+      });
+      const result = await service.computeForTeacherSchool(1, 5);
+      expect(result).toEqual({
+        isCompanyTeacher: true,
+        distanceToSchoolKm: null,
+        gasAllowance: null,
+      });
+    });
+
+    it('điểm trường khai 0,0 → lùi về toạ độ trường mẹ thay vì đo tới 0,0', async () => {
+      const { service } = setup({
+        location: { id: 9, latitude: 0, longitude: 0 },
+      });
+      const result = await service.computeForTeacherSchool(1, 5, 9);
+      expect(result.distanceToSchoolKm).toBeCloseTo(2.6, 0);
+      expect(result.gasAllowance).toBe(20_000);
     });
   });
 });

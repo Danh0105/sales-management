@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsDateString,
+  IsEnum,
   IsInt,
   IsOptional,
   IsString,
@@ -8,9 +9,19 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { ExpenseRequestKind } from '../../enums/expense-request-kind.enum';
+
 export class CreateExpenseRequestDto {
   @IsString()
   content!: string;
+
+  /**
+   * CASH (mặc định) → kế toán lên lệnh chi.
+   * EQUIPMENT       → phòng kỹ thuật lên lệnh xuất kho.
+   */
+  @IsOptional()
+  @IsEnum(ExpenseRequestKind)
+  requestKind?: ExpenseRequestKind;
 
   @IsOptional()
   @IsString()

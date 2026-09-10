@@ -10,11 +10,17 @@ import {
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../../SuggestStatus.enum';
+import { ExpenseRequestKind } from '../../enums/expense-request-kind.enum';
 
 export class FilterExpenseDto {
     @IsOptional()
     @IsEnum(SuggestStatus)
     status?: SuggestStatus;
+
+    /** Lọc theo loại đề xuất: tiền hay thiết bị */
+    @IsOptional()
+    @IsEnum(ExpenseRequestKind)
+    requestKind?: ExpenseRequestKind;
 
     @IsOptional()
     @Type(() => Number)

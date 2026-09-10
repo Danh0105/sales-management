@@ -44,10 +44,7 @@ function sessionRow(over: Record<string, any> = {}) {
   };
 }
 
-function makeService(
-  rows: any[],
-  managerRecipients: number[] = [11, 12],
-) {
+function makeService(rows: any[], managerRecipients: number[] = [11, 12]) {
   const managers = managerRecipients.map((id) => ({ id, zaloUserId: null }));
   const sessionQb = makeQueryBuilder(rows);
   const employeeQb = makeQueryBuilder(managers);
@@ -57,6 +54,19 @@ function makeService(
     update: jest.fn().mockResolvedValue({ affected: rows.length }),
     findOne: jest.fn().mockResolvedValue(null),
     save: jest.fn(async (data: any) => data),
+  };
+  const teacherRepo: any = {
+    findOne: jest
+      .fn()
+      .mockResolvedValue({ id: 5, name: 'Cô A', employeeId: 30 }),
+  };
+  const dataSource: any = {
+    transaction: jest.fn(async (work: any) =>
+      work({
+        getRepository: (target: any) =>
+          target.name === 'TeachingSession' ? sessionRepo : teacherRepo,
+      }),
+    ),
   };
   const employeeRepo: any = {
     createQueryBuilder: jest.fn().mockReturnValue(employeeQb),
@@ -69,9 +79,14 @@ function makeService(
   };
   const fcmService: any = { sendToMultiple: jest.fn().mockResolvedValue(null) };
   const employeeFcmTokenService: any = {
-    getTokens: jest.fn().mockResolvedValue(
-      [...managerRecipients, 30].map((id) => ({ employeeId: id, token: `t${id}` })),
-    ),
+    getTokens: jest
+      .fn()
+      .mockResolvedValue(
+        [...managerRecipients, 30].map((id) => ({
+          employeeId: id,
+          token: `t${id}`,
+        })),
+      ),
   };
   const zaloNotifyService: any = {
     sendToMany: jest.fn().mockResolvedValue({ sent: 0, failed: 0 }),
@@ -79,12 +94,12 @@ function makeService(
 
   const service = new TeachingSessionService(
     sessionRepo,
+    teacherRepo,
     undefined as any,
     undefined as any,
     undefined as any,
     undefined as any,
-    undefined as any,
-    undefined as any,
+    dataSource,
     notificationService,
     fcmService,
     employeeFcmTokenService,
@@ -147,7 +162,9 @@ describe('Nhắc xác nhận lịch dạy (còn PENDING, sắp tới trong 1 ng�
     expect(receivers.sort()).toEqual([11, 12, 30]);
 
     for (const [payload] of notificationService.create.mock.calls) {
-      expect(payload.type).toBe(NotificationType.TEACHING_SCHEDULE_CONFIRM_ALERT);
+      expect(payload.type).toBe(
+        NotificationType.TEACHING_SCHEDULE_CONFIRM_ALERT,
+      );
     }
   });
 
@@ -169,6 +186,7 @@ describe('TeachingSessionService.confirmSession', () => {
   function pendingSession(over: Record<string, any> = {}) {
     return {
       id: 7,
+      teacherId: 5,
       date: '2026-08-18',
       startTime: '08:00:00',
       confirmationStatus: 'PENDING',

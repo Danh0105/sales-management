@@ -394,6 +394,17 @@ export class QueryTeachingSessionsDto {
   @Min(1)
   schoolId?: number;
 
+  /**
+   * Khu vực (tỉnh/thành) của trường dạy. Buổi dạy không tự giữ khu vực — suy ra
+   * qua `school.ward.province_id`. Lọc ở đây chứ không lọc ở client vì danh
+   * sách phân trang phía server: lọc trang hiện tại sẽ ra số liệu sai.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  provinceId?: number;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

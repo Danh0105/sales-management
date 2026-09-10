@@ -118,6 +118,17 @@ export class QueryTeachingSchedulesDto {
     schoolId?: number;
 
     /**
+     * Khu vực (tỉnh/thành) của trường — suy qua `school.ward.province_id`.
+     * Có ở đây để màn Chấm công lọc theo khu vực thì các lịch chờ xác nhận vẽ
+     * đè lên thời khoá biểu cũng thu theo đúng khu vực đó.
+     */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    provinceId?: number;
+
+    /**
      * Thu hẹp về một điểm trường (cơ sở) của trường đã chọn — trường nhiều cơ
      * sở thì mỗi cơ sở có thời khoá biểu riêng.
      */
@@ -185,4 +196,25 @@ export class ConfirmTeachingScheduleDto {
     @IsString()
     @MaxLength(1000)
     reason?: string;
+}
+
+/**
+ * Xoá cả một mảng thời khoá biểu: toàn bộ tiết của một trường, hoặc chỉ tiết
+ * của một môn trong trường đó.
+ *
+ * `schoolId` bắt buộc và không có "xoá tất cả": một request thiếu tham số
+ * không được phép quét sạch thời khoá biểu của mọi trường.
+ */
+export class RemoveSchedulesBySchoolDto {
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    schoolId!: number;
+
+    /** Bỏ trống = xoá mọi môn của trường. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    subjectId?: number;
 }

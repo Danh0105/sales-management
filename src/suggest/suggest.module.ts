@@ -14,6 +14,7 @@ import { FcmModule } from '../fcm/fcm.module';
 
 // ĐỀ XUẤT CHI (EXPENSE_REQUEST) — dùng chung SuggestService
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
+import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
 import { SuggestReminderSetting } from './entities/suggest-reminder-setting.entity';
 import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entity';
@@ -29,6 +30,7 @@ import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entit
             Employee,
             Policy,
             SuggestPaymentOrder,
+            SuggestStockIssueOrder,
             SuggestAttachment,
             SuggestReminderSetting,
             EmployeeFcmToken,

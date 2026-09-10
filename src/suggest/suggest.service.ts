@@ -48,6 +48,9 @@ import {
   expenseActorForStatus,
 } from './expense-flow.state-machine';
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
+import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
+import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
+import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
 import {
   DEFAULT_EXPENSE_REMINDERS_ENABLED,
@@ -133,6 +136,8 @@ export class SuggestService {
         );
       }
 
+      const kind = dto.requestKind ?? ExpenseRequestKind.CASH;
+
       const saved = await this.dataSource.transaction(async (manager) => {
         let school: School | undefined;
         let ward: Ward | undefined;
@@ -173,6 +178,7 @@ export class SuggestService {
 
         const suggest = manager.create(Suggest, {
           type: SuggestType.EXPENSE_REQUEST,
+          requestKind: kind,
           content: dto.content,
           description: dto.description,
           // Số tiền được xác định khi kế toán lập lệnh chi, không thuộc bước
@@ -216,8 +222,13 @@ export class SuggestService {
       await this.notifyExpense(
         {
           suggestId: saved.id!,
-          title: '💰 Đề xuất chi mới',
-          message: `Có đề xuất chi mới cần duyệt: ${saved.code} - ${saved.content}`,
+          title:
+            kind === ExpenseRequestKind.EQUIPMENT
+              ? '🧰 Đề xuất thiết bị mới'
+              : '💰 Đề xuất chi mới',
+          message:
+            `Có ${kind === ExpenseRequestKind.EQUIPMENT ? 'đề xuất thiết bị' : 'đề xuất chi'} mới cần duyệt: ` +
+            `${saved.code} - ${saved.content}`,
           senderId: actor.id,
           meta: { status: saved.status },
         },
@@ -1031,14 +1042,15 @@ export class SuggestService {
   }
 
   /**
-   * Sinh mã tuần tự theo tháng (DX-YYYYMM-xxxx / LC-YYYYMM-xxxx).
+   * Sinh mã tuần tự theo tháng (DX-YYYYMM-xxxx / LC-YYYYMM-xxxx /
+   * XK-YYYYMM-xxxx).
    * Advisory lock để 2 request song song không trùng mã.
    */
   private async generateCode(
     manager: EntityManager,
-    table: 'suggest' | 'suggest_payment_order',
+    table: 'suggest' | 'suggest_payment_order' | 'suggest_stock_issue_order',
     column: 'code',
-    prefixLetter: 'DX' | 'LC',
+    prefixLetter: 'DX' | 'LC' | 'XK',
   ): Promise<string> {
     const prefix = `${prefixLetter}-${vnYearMonth()}-`;
 
@@ -1263,6 +1275,7 @@ export class SuggestService {
 
       s.status = assertExpenseTransition(opts.action, fromStatus, {
         actorRoles: user.roles ?? [],
+        kind: s.requestKind ?? ExpenseRequestKind.CASH,
         isOwner: s.createdBy === user.id,
         actorId: user.id,
         previousActorId: await this.lastExpenseActorId(manager, opts.id),
@@ -1311,7 +1324,7 @@ export class SuggestService {
     actor: AuthUser,
   ) {
     try {
-      const holder = expenseActorForStatus(fromStatus);
+      const holder = expenseActorForStatus(fromStatus, suggest.requestKind);
       const receiverIds = [actor.id];
 
       if (holder?.owner && suggest.createdBy) {
@@ -1594,18 +1607,24 @@ export class SuggestService {
       throw new BadRequestException('Đề xuất này không phải luồng đề xuất chi');
     }
 
-    const CASH_MOVED_STATUSES: SuggestStatus[] = [
+    // Đã phát sinh dòng tiền (nhánh tiền) hoặc đã xuất kho (nhánh thiết bị)
+    // thì không xoá được — lịch sử tiền/hàng đã thực hiện phải giữ nguyên.
+    const RESOURCE_MOVED_STATUSES: SuggestStatus[] = [
       SuggestStatus.PAYMENT_ORDERED,
       SuggestStatus.CASH_RELEASED,
       SuggestStatus.CASH_RECEIVED,
       SuggestStatus.SPENT,
       SuggestStatus.NOT_SPENT,
       SuggestStatus.FUND_RETURNED,
+      SuggestStatus.STOCK_ISSUE_ORDERED,
+      SuggestStatus.EQUIPMENT_RECEIVED,
+      SuggestStatus.EQUIPMENT_RETURNED,
     ];
 
-    if (suggest.status && CASH_MOVED_STATUSES.includes(suggest.status)) {
+    if (suggest.status && RESOURCE_MOVED_STATUSES.includes(suggest.status)) {
       throw new BadRequestException(
-        'Không thể xoá đề xuất đã phát sinh dòng tiền (đã lên lệnh chi/xuất quỹ)',
+        'Không thể xoá đề xuất đã phát sinh dòng tiền/xuất kho ' +
+          '(đã lên lệnh chi, xuất quỹ hoặc lên lệnh xuất kho)',
       );
     }
 
@@ -1790,17 +1809,23 @@ export class SuggestService {
       },
     });
 
+    const isEquipment = saved.requestKind === ExpenseRequestKind.EQUIPMENT;
+
     await this.notifyExpense(
       {
         suggestId: saved.id!,
-        title: '↩️ Hoàn tiền về quỹ',
-        message:
-          `Kinh doanh chưa chi đề xuất ${saved.code}, sẽ hoàn tiền về quỹ,` +
-          ` vui lòng xác nhận khi nhận lại`,
+        title: isEquipment ? '↩️ Nhập lại kho thiết bị' : '↩️ Hoàn tiền về quỹ',
+        message: isEquipment
+          ? `Kinh doanh chưa dùng thiết bị của đề xuất ${saved.code}, sẽ trả lại kho,` +
+            ` vui lòng xác nhận khi nhận lại`
+          : `Kinh doanh chưa chi đề xuất ${saved.code}, sẽ hoàn tiền về quỹ,` +
+            ` vui lòng xác nhận khi nhận lại`,
         senderId: user.id,
         meta: { status: saved.status, reason },
       },
-      { roles: [ExpenseRole.TREASURER] },
+      {
+        roles: [isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.TREASURER],
+      },
     );
 
     return saved;
@@ -1836,6 +1861,119 @@ export class SuggestService {
     return saved;
   }
 
+
+  // ============================================================
+  // ===== Nhánh ĐỀ XUẤT THIẾT BỊ — phòng kỹ thuật & kho =====
+  // ============================================================
+
+  /** BƯỚC 3' — PHÒNG KỸ THUẬT lên lệnh xuất kho */
+  async createExpenseStockIssueOrder(
+    id: number,
+    dto: CreateStockIssueOrderDto,
+    user: AuthUser,
+  ) {
+    let stockIssueOrder: SuggestStockIssueOrder | null = null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+      user,
+      note: dto.note,
+      mutate: (s) => {
+        // Thiết bị có thể được xuất lại sau khi đã nhập kho trở lại — xoá dấu
+        // vết của vòng trước, giống `createExpensePaymentOrder` ở nhánh tiền.
+        s.equipmentReceivedAt = null;
+        s.spentAt = null;
+        s.notSpentReason = null;
+        s.equipmentReturnedBy = null;
+        s.equipmentReturnedAt = null;
+      },
+      extra: async (manager, s) => {
+        const code = await this.generateCode(
+          manager,
+          'suggest_stock_issue_order',
+          'code',
+          'XK',
+        );
+
+        // Quan hệ 1-1: lệnh xuất kho mới thay lệnh của vòng đã nhập lại kho,
+        // lịch sử chuyển trạng thái vẫn giữ nguyên.
+        await manager.delete(SuggestStockIssueOrder, { suggestId: s.id! });
+
+        stockIssueOrder = await manager.save(SuggestStockIssueOrder, {
+          code,
+          suggestId: s.id!,
+          items: dto.items,
+          warehouse: dto.warehouse ?? null,
+          expectedDeliveryDate: dto.expectedDeliveryDate ?? null,
+          note: dto.note ?? null,
+          createdBy: user.id,
+        });
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '📦 Lệnh xuất kho mới',
+        message:
+          `Lệnh xuất kho ${(stockIssueOrder as SuggestStockIssueOrder | null)?.code} đã được lập` +
+          ` cho đề xuất ${saved.code}, vui lòng xác nhận khi nhận thiết bị`,
+        senderId: user.id,
+        meta: {
+          status: saved.status,
+          stockIssueOrderId: (stockIssueOrder as SuggestStockIssueOrder | null)
+            ?.id,
+        },
+      },
+      { userIds: saved.createdBy ? [saved.createdBy] : [] },
+    );
+
+    return { suggest: saved, stockIssueOrder };
+  }
+
+  /** BƯỚC 4' — SALES xác nhận đã nhận thiết bị */
+  async confirmEquipmentReceived(id: number, user: AuthUser, note?: string) {
+    return this.expenseTransition({
+      id,
+      action: ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED,
+      user,
+      note,
+      mutate: (s) => {
+        s.equipmentReceivedAt = new Date();
+      },
+    });
+  }
+
+  /** BƯỚC 5' — PHÒNG KỸ THUẬT xác nhận đã nhận lại thiết bị chưa dùng */
+  async confirmEquipmentReturned(id: number, user: AuthUser, note?: string) {
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CONFIRM_EQUIPMENT_RETURNED,
+      user,
+      note,
+      mutate: (s) => {
+        s.equipmentReturnedBy = user.id;
+        s.equipmentReturnedAt = new Date();
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '📦 Thiết bị đã nhập lại kho',
+        message:
+          `Thiết bị của đề xuất ${saved.code} đã nhập lại kho,` +
+          ` phòng kỹ thuật có thể lập lại lệnh xuất kho`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      { roles: [ExpenseRole.TECHNICAL] },
+    );
+
+    return saved;
+  }
+
   // ================= QUERY =================
 
   /** Áp các bộ lọc chung của đề xuất chi lên query builder (alias 's'). */
@@ -1843,10 +1981,20 @@ export class SuggestService {
     qb: SelectQueryBuilder<Suggest>,
     filter: FilterExpenseDto,
   ) {
-    const { status, createdBy, schoolId, schoolYear, fromDate, toDate, overdue } =
-      filter;
+    const {
+      status,
+      requestKind,
+      createdBy,
+      schoolId,
+      schoolYear,
+      fromDate,
+      toDate,
+      overdue,
+    } = filter;
 
     if (status) qb.andWhere('s.status = :status', { status });
+    if (requestKind)
+      qb.andWhere('s.requestKind = :requestKind', { requestKind });
     if (createdBy) qb.andWhere('s.createdBy = :createdBy', { createdBy });
     if (schoolId !== undefined && schoolId !== null)
       qb.andWhere('s.schoolId = :schoolId', { schoolId });
@@ -1860,13 +2008,44 @@ export class SuggestService {
     return qb;
   }
 
-  async findAllExpense(filter: FilterExpenseDto) {
+  /**
+   * Phòng kỹ thuật chỉ phụ trách nhánh THIẾT BỊ — nếu tài khoản chỉ có role
+   * `ky_thuat` (không kiêm role nào khác của luồng đề xuất chi) thì mọi truy
+   * vấn đều bị ép về `requestKind = EQUIPMENT`, không xem được đề xuất tiền.
+   */
+  private isTechnicalOnly(actor?: AuthUser): boolean {
+    const roles = actor?.roles ?? [];
+    if (!roles.includes(ExpenseRole.TECHNICAL)) return false;
+    const otherExpenseRoles: string[] = [
+      ExpenseRole.SALES,
+      ExpenseRole.DIRECTOR,
+      ExpenseRole.DEBT_ACCOUNTANT,
+      ExpenseRole.TREASURER,
+      ExpenseRole.SALES_ADMIN,
+    ];
+    return !roles.some((r) => otherExpenseRoles.includes(r));
+  }
+
+  /** Ép bộ lọc theo phạm vi role của người gọi. */
+  private scopeExpenseFilter(
+    filter: FilterExpenseDto,
+    actor?: AuthUser,
+  ): FilterExpenseDto {
+    if (this.isTechnicalOnly(actor)) {
+      return { ...filter, requestKind: ExpenseRequestKind.EQUIPMENT };
+    }
+    return filter;
+  }
+
+  async findAllExpense(rawFilter: FilterExpenseDto, actor?: AuthUser) {
+    const filter = this.scopeExpenseFilter(rawFilter, actor);
     const { page = 1, limit = 20 } = filter;
 
     const qb = this.repo
       .createQueryBuilder('s')
       .leftJoinAndSelect('s.createdByUser', 'creator')
       .leftJoinAndSelect('s.paymentOrder', 'po')
+      .leftJoinAndSelect('s.stockIssueOrder', 'sio')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST });
 
@@ -1892,7 +2071,11 @@ export class SuggestService {
    * Phân trang theo nhân viên: mỗi trang là `limit` nhân viên, kèm toàn bộ
    * đề xuất của họ + tổng số & tổng tiền. Dùng chung bộ lọc của findAllExpense.
    */
-  async findAllExpenseGroupedByEmployee(filter: FilterExpenseDto) {
+  async findAllExpenseGroupedByEmployee(
+    rawFilter: FilterExpenseDto,
+    actor?: AuthUser,
+  ) {
+    const filter = this.scopeExpenseFilter(rawFilter, actor);
     const { page = 1, limit = 20 } = filter;
 
     // Bước 1: tổng hợp theo nhân viên, sắp xếp theo đề xuất gần nhất
@@ -1932,6 +2115,7 @@ export class SuggestService {
     const itemsQb = this.repo
       .createQueryBuilder('s')
       .leftJoinAndSelect('s.paymentOrder', 'po')
+      .leftJoinAndSelect('s.stockIssueOrder', 'sio')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST })
       .andWhere('s.createdBy IN (:...employeeIds)', { employeeIds });
@@ -1979,12 +2163,13 @@ export class SuggestService {
   }
 
   /** Chi tiết đề xuất chi + logs + payment order + attachments */
-  async findOneExpense(id: number) {
+  async findOneExpense(id: number, actor?: AuthUser) {
     const s = await this.repo.findOne({
       where: { id, type: SuggestType.EXPENSE_REQUEST },
       relations: {
         createdByUser: true,
         paymentOrder: { creator: true },
+        stockIssueOrder: { creator: true },
         attachments: true,
         school: true,
       },
@@ -1992,6 +2177,15 @@ export class SuggestService {
 
     if (!s) {
       throw new NotFoundException('Đề xuất chi không tồn tại');
+    }
+
+    if (
+      this.isTechnicalOnly(actor) &&
+      s.requestKind !== ExpenseRequestKind.EQUIPMENT
+    ) {
+      throw new ForbiddenException(
+        'Phòng kỹ thuật chỉ xem được đề xuất thiết bị',
+      );
     }
 
     const logs = await this.historyRepo.find({
@@ -2007,8 +2201,10 @@ export class SuggestService {
    * - director:       PENDING_APPROVAL
    * - saleadmin:      PENDING_APPROVAL (chưa kiểm duyệt)
    * - ketoan_congno:  APPROVED, FUND_RETURNED
-   * - thuquy:         PAYMENT_ORDERED, NOT_SPENT
-   * - sales (chủ):    DRAFT, CASH_RELEASED, CASH_RECEIVED
+   * - thuquy:         PAYMENT_ORDERED, NOT_SPENT (đề xuất tiền)
+   * - ky_thuat:       APPROVED, NOT_SPENT, EQUIPMENT_RETURNED (đề xuất thiết bị)
+   * - sales (chủ):    DRAFT, CASH_RELEASED, CASH_RECEIVED,
+   *                   STOCK_ISSUE_ORDERED, EQUIPMENT_RECEIVED
    */
   async myExpenseTasks(user: AuthUser) {
     const actor = this.ensureUser(user);
@@ -2018,6 +2214,7 @@ export class SuggestService {
       .createQueryBuilder('s')
       .leftJoinAndSelect('s.createdByUser', 'creator')
       .leftJoinAndSelect('s.paymentOrder', 'po')
+      .leftJoinAndSelect('s.stockIssueOrder', 'sio')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST });
 
@@ -2045,17 +2242,44 @@ export class SuggestService {
       conditions.push(notMine('s.status = :saStatus'));
       params.saStatus = SuggestStatus.PENDING_APPROVAL;
     }
+    // Kế toán & thủ quỹ chỉ giữ nhánh tiền, phòng kỹ thuật chỉ giữ nhánh
+    // thiết bị. `APPROVED` và `NOT_SPENT` dùng chung cho cả hai nhánh nên
+    // phải lọc thêm theo `requestKind`, không thì kế toán thấy cả đề xuất
+    // thiết bị rồi bấm vào nhận 409.
+    params.cashKind = ExpenseRequestKind.CASH;
+    params.equipmentKind = ExpenseRequestKind.EQUIPMENT;
+
     if (roles.includes(ExpenseRole.DEBT_ACCOUNTANT)) {
-      conditions.push(notMine('s.status IN (:...accStatuses)'));
+      conditions.push(
+        notMine(
+          's.requestKind = :cashKind AND s.status IN (:...accStatuses)',
+        ),
+      );
       params.accStatuses = [
         SuggestStatus.APPROVED,
         SuggestStatus.FUND_RETURNED,
       ];
     }
     if (roles.includes(ExpenseRole.TREASURER)) {
-      conditions.push(notMine('s.status IN (:...treStatuses)'));
+      conditions.push(
+        notMine(
+          's.requestKind = :cashKind AND s.status IN (:...treStatuses)',
+        ),
+      );
       params.treStatuses = [
         SuggestStatus.PAYMENT_ORDERED,
+        SuggestStatus.NOT_SPENT,
+      ];
+    }
+    if (roles.includes(ExpenseRole.TECHNICAL)) {
+      conditions.push(
+        notMine(
+          's.requestKind = :equipmentKind AND s.status IN (:...techStatuses)',
+        ),
+      );
+      params.techStatuses = [
+        SuggestStatus.APPROVED,
+        SuggestStatus.EQUIPMENT_RETURNED,
         SuggestStatus.NOT_SPENT,
       ];
     }
@@ -2066,6 +2290,8 @@ export class SuggestService {
       params.saleStatuses = [
         SuggestStatus.CASH_RELEASED,
         SuggestStatus.CASH_RECEIVED,
+        SuggestStatus.STOCK_ISSUE_ORDERED,
+        SuggestStatus.EQUIPMENT_RECEIVED,
       ];
     }
 
@@ -2203,10 +2429,15 @@ export class SuggestService {
         `Đề xuất ${s.code} dự kiến chi trong ${daysLeft} ngày` +
         ` (${s.expectedPaymentDate}) nhưng chưa được duyệt`;
     } else if (s.status === SuggestStatus.APPROVED) {
-      roles = [ExpenseRole.DEBT_ACCOUNTANT];
+      // Đã duyệt nhưng chưa sang bước kế: đề xuất tiền chờ kế toán lên lệnh
+      // chi, đề xuất thiết bị chờ kỹ thuật lên lệnh xuất kho.
+      const isEquipment = s.requestKind === ExpenseRequestKind.EQUIPMENT;
+      roles = [
+        isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.DEBT_ACCOUNTANT,
+      ];
       message =
-        `Đề xuất ${s.code} dự kiến chi trong ${daysLeft} ngày` +
-        ` (${s.expectedPaymentDate}) nhưng chưa lên lệnh chi`;
+        `Đề xuất ${s.code} dự kiến ${isEquipment ? 'giao thiết bị' : 'chi'} trong ${daysLeft} ngày` +
+        ` (${s.expectedPaymentDate}) nhưng chưa lên ${isEquipment ? 'lệnh xuất kho' : 'lệnh chi'}`;
     } else {
       return 0;
     }
@@ -2225,7 +2456,10 @@ export class SuggestService {
   }
 
   private async remindDueToday(s: Suggest) {
-    const actor = expenseActorForStatus(s.status as SuggestStatus);
+    const actor = expenseActorForStatus(
+      s.status as SuggestStatus,
+      s.requestKind,
+    );
     if (!actor) return 0;
 
     await this.notifyExpense(
@@ -2255,7 +2489,10 @@ export class SuggestService {
     // màn khác hiển thị đúng trạng thái, chỉ bỏ qua việc gửi thông báo.
     if (s.overdueAlertMuted) return 0;
 
-    const actor = expenseActorForStatus(s.status as SuggestStatus);
+    const actor = expenseActorForStatus(
+      s.status as SuggestStatus,
+      s.requestKind,
+    );
     if (!actor) return 0;
 
     await this.notifyExpense(

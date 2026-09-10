@@ -10,6 +10,7 @@ import {
 } from './SuggestStatus.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
 import { ExpenseRole } from './constants/expense-roles';
+import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 
 const salesOwner = { actorRoles: [ExpenseRole.SALES], isOwner: true };
 const salesOther = { actorRoles: [ExpenseRole.SALES], isOwner: false };
@@ -540,5 +541,136 @@ describe('giám đốc rút hộ đề xuất của người khác (overrideRole
                 isOwner: true,
             }),
         ).toBe(SuggestStatus.WITHDRAWN);
+    });
+});
+
+// ===== Nhánh ĐỀ XUẤT THIẾT BỊ =====
+describe('đề xuất thiết bị (kind = EQUIPMENT)', () => {
+    const equipment = { kind: ExpenseRequestKind.EQUIPMENT };
+    const technical = {
+        actorRoles: [ExpenseRole.TECHNICAL],
+        isOwner: false,
+        ...equipment,
+    };
+
+    it('đi hết luồng thiết bị: PENDING_APPROVAL → ... → SPENT', () => {
+        let status = SuggestStatus.PENDING_APPROVAL;
+
+        status = assertExpenseTransition(ExpenseAction.APPROVE, status, {
+            ...director,
+            ...equipment,
+        });
+        expect(status).toBe(SuggestStatus.APPROVED);
+
+        status = assertExpenseTransition(
+            ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+            status,
+            technical,
+        );
+        expect(status).toBe(SuggestStatus.STOCK_ISSUE_ORDERED);
+
+        status = assertExpenseTransition(
+            ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED,
+            status,
+            { ...salesOwner, ...equipment },
+        );
+        expect(status).toBe(SuggestStatus.EQUIPMENT_RECEIVED);
+
+        status = assertExpenseTransition(ExpenseAction.CONFIRM_SPENT, status, {
+            ...salesOwner,
+            ...equipment,
+        });
+        expect(status).toBe(SuggestStatus.SPENT);
+    });
+
+    it('chưa dùng thì trả kho rồi xuất lại được', () => {
+        let status = assertExpenseTransition(
+            ExpenseAction.CONFIRM_NOT_SPENT,
+            SuggestStatus.EQUIPMENT_RECEIVED,
+            { ...salesOwner, ...equipment },
+        );
+        expect(status).toBe(SuggestStatus.NOT_SPENT);
+
+        status = assertExpenseTransition(
+            ExpenseAction.CONFIRM_EQUIPMENT_RETURNED,
+            status,
+            technical,
+        );
+        expect(status).toBe(SuggestStatus.EQUIPMENT_RETURNED);
+
+        status = assertExpenseTransition(
+            ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+            status,
+            technical,
+        );
+        expect(status).toBe(SuggestStatus.STOCK_ISSUE_ORDERED);
+    });
+
+    it('kế toán công nợ không lên được lệnh chi cho đề xuất thiết bị', () => {
+        expect(() =>
+            assertExpenseTransition(
+                ExpenseAction.CREATE_PAYMENT_ORDER,
+                SuggestStatus.APPROVED,
+                { ...debtAccountant, ...equipment },
+            ),
+        ).toThrow(ConflictException);
+    });
+
+    it('kỹ thuật không lên được lệnh xuất kho cho đề xuất tiền', () => {
+        expect(() =>
+            assertExpenseTransition(
+                ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+                SuggestStatus.APPROVED,
+                { actorRoles: [ExpenseRole.TECHNICAL], isOwner: false },
+            ),
+        ).toThrow(ConflictException);
+    });
+
+    it('không có role kỹ thuật thì không lên được lệnh xuất kho', () => {
+        expect(() =>
+            assertExpenseTransition(
+                ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+                SuggestStatus.APPROVED,
+                { ...treasurer, ...equipment },
+            ),
+        ).toThrow(ForbiddenException);
+    });
+
+    it('chủ đề xuất không tự lên lệnh xuất kho cho đơn của mình', () => {
+        expect(() =>
+            assertExpenseTransition(
+                ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+                SuggestStatus.APPROVED,
+                {
+                    actorRoles: [ExpenseRole.SALES, ExpenseRole.TECHNICAL],
+                    isOwner: true,
+                    ...equipment,
+                },
+            ),
+        ).toThrow(ForbiddenException);
+    });
+
+    it('bước sau APPROVED do đúng bộ phận giữ, theo loại đề xuất', () => {
+        expect(
+            expenseActorForStatus(
+                SuggestStatus.APPROVED,
+                ExpenseRequestKind.EQUIPMENT,
+            ),
+        ).toEqual({ roles: [ExpenseRole.TECHNICAL], owner: false });
+
+        expect(
+            expenseActorForStatus(SuggestStatus.APPROVED, ExpenseRequestKind.CASH),
+        ).toEqual({ roles: [ExpenseRole.DEBT_ACCOUNTANT], owner: false });
+
+        // NOT_SPENT: tiền về thủ quỹ, thiết bị về kỹ thuật
+        expect(
+            expenseActorForStatus(
+                SuggestStatus.NOT_SPENT,
+                ExpenseRequestKind.EQUIPMENT,
+            ),
+        ).toEqual({ roles: [ExpenseRole.TECHNICAL], owner: false });
+        expect(
+            expenseActorForStatus(SuggestStatus.NOT_SPENT, ExpenseRequestKind.CASH),
+        ).toEqual({ roles: [ExpenseRole.TREASURER], owner: false });
     });
 });

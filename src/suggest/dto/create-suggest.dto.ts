@@ -3,6 +3,7 @@ import { IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLe
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
+import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
 
 export class CreateSuggestDto {
@@ -48,6 +49,11 @@ export class CreateSuggestDto {
     @IsOptional()
     @IsEnum(SuggestType)
     type?: SuggestType;
+
+    /** Loại đề xuất chi: CASH (mặc định) | EQUIPMENT */
+    @IsOptional()
+    @IsEnum(ExpenseRequestKind)
+    requestKind?: ExpenseRequestKind;
 
     /** Ngày dự kiến chi (YYYY-MM-DD) — bắt buộc khi type = EXPENSE_REQUEST */
     @IsOptional()

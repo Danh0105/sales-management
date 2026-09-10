@@ -13,7 +13,10 @@ import { computeDayBlocks, isBlockCheckedIn } from './teaching.util';
 describe('computeDayBlocks', () => {
   it('buổi lẻ (không liên tiếp trường nào khác) thì cần cả check-in lẫn check-out', () => {
     const result = computeDayBlocks([{ id: 1, schoolId: 10 }]);
-    expect(result.get(1)).toEqual({ checkinRequired: true, checkoutRequired: true });
+    expect(result.get(1)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: true,
+    });
   });
 
   it('3 tiết liên tiếp cùng trường: chỉ tiết đầu cần check-in, chỉ tiết cuối cần check-out', () => {
@@ -22,9 +25,18 @@ describe('computeDayBlocks', () => {
       { id: 2, schoolId: 10 },
       { id: 3, schoolId: 10 },
     ]);
-    expect(result.get(1)).toEqual({ checkinRequired: true, checkoutRequired: false });
-    expect(result.get(2)).toEqual({ checkinRequired: false, checkoutRequired: false });
-    expect(result.get(3)).toEqual({ checkinRequired: false, checkoutRequired: true });
+    expect(result.get(1)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: false,
+    });
+    expect(result.get(2)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: false,
+    });
+    expect(result.get(3)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: true,
+    });
   });
 
   it('xen trường khác thì ngắt block, mỗi bên tự có đầu/cuối riêng', () => {
@@ -34,10 +46,52 @@ describe('computeDayBlocks', () => {
       { id: 3, schoolId: 20 },
       { id: 4, schoolId: 10 },
     ]);
-    expect(result.get(1)).toEqual({ checkinRequired: true, checkoutRequired: false });
-    expect(result.get(2)).toEqual({ checkinRequired: false, checkoutRequired: true });
-    expect(result.get(3)).toEqual({ checkinRequired: true, checkoutRequired: true });
-    expect(result.get(4)).toEqual({ checkinRequired: true, checkoutRequired: true });
+    expect(result.get(1)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: false,
+    });
+    expect(result.get(2)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: true,
+    });
+    expect(result.get(3)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: true,
+    });
+    expect(result.get(4)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: true,
+    });
+  });
+
+  it('cùng trường nhưng sáng và chiều là hai block độc lập', () => {
+    const result = computeDayBlocks([
+      { id: 1, schoolId: 10, startTime: '07:00:00' },
+      { id: 2, schoolId: 10, startTime: '08:00:00' },
+      { id: 3, schoolId: 10, startTime: '09:00:00' },
+      { id: 4, schoolId: 10, startTime: '13:00:00' },
+      { id: 5, schoolId: 10, startTime: '14:00:00' },
+    ]);
+    expect(result.get(1)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: false,
+    });
+    expect(result.get(2)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: false,
+    });
+    expect(result.get(3)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: true,
+    });
+    expect(result.get(4)).toEqual({
+      checkinRequired: true,
+      checkoutRequired: false,
+    });
+    expect(result.get(5)).toEqual({
+      checkinRequired: false,
+      checkoutRequired: true,
+    });
   });
 });
 
@@ -73,10 +127,22 @@ describe('isBlockCheckedIn', () => {
     ];
     expect(isBlockCheckedIn(sessions, 2)).toBe(false);
   });
+
+  it('checkin buổi sáng không lan sang block buổi chiều cùng trường', () => {
+    const sessions = [
+      { id: 1, schoolId: 10, startTime: '07:00:00', checkinAt: now },
+      { id: 2, schoolId: 10, startTime: '08:00:00', checkinAt: null },
+      { id: 3, schoolId: 10, startTime: '13:00:00', checkinAt: null },
+    ];
+    expect(isBlockCheckedIn(sessions, 2)).toBe(true);
+    expect(isBlockCheckedIn(sessions, 3)).toBe(false);
+  });
 });
 
 describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo block', () => {
-  const today = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
   function makeBlockQb(daySessions: any[]) {
     const qb: any = {};
@@ -168,15 +234,15 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       { id: 7, schoolId: 10, checkinAt: null, checkoutAt: null },
     ]);
 
-    await expect(
-      service.checkout(7, checkoutDto, 99, []),
-    ).resolves.toEqual({ id: 7 });
+    await expect(service.checkout(7, checkoutDto, 99, [])).resolves.toEqual({
+      id: 7,
+    });
     expect(entity.checkoutAt).toBeInstanceOf(Date);
     expect(entity.checkoutViaAdjacent).toBe(false);
-    expect(transactionRepo.update).toHaveBeenCalledWith(
-      expect.any(Object),
-      { checkoutAt: expect.any(Date), checkoutViaAdjacent: true },
-    );
+    expect(transactionRepo.update).toHaveBeenCalledWith(expect.any(Object), {
+      checkoutAt: expect.any(Date),
+      checkoutViaAdjacent: true,
+    });
     // Chỉ đóng hộ tiết KHÁC chưa tự check-out — tiết đang check-out (7) tự
     // lưu qua repository.save(), không lặp lại trong update() cascade.
     expect(transactionRepo.update.mock.calls[0][0].id.value).toEqual([6]);
@@ -203,7 +269,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       { id: 7, schoolId: 10, checkinAt: null, checkoutAt: null },
     ]);
 
-    await expect(service.checkout(7, checkoutDto, 99, [])).rejects.toMatchObject({
+    await expect(
+      service.checkout(7, checkoutDto, 99, []),
+    ).rejects.toMatchObject({
       status: 400,
       response: expect.objectContaining({
         code: 'TEACHING_SESSION_NOT_CHECKED_IN',
@@ -217,9 +285,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       { id: 7, schoolId: 10, checkinAt: null, checkoutAt: null },
     ]);
 
-    await expect(
-      service.checkout(6, checkoutDto, 99, []),
-    ).resolves.toEqual({ id: 7 });
+    await expect(service.checkout(6, checkoutDto, 99, [])).resolves.toEqual({
+      id: 7,
+    });
     expect(entity.checkoutAt).toBeInstanceOf(Date);
     expect(entity.checkoutViaAdjacent).toBe(false);
     expect(transactionRepo.update).not.toHaveBeenCalled();
@@ -231,7 +299,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       { id: 7, schoolId: 10, checkinAt: null, checkoutAt: null },
     ]);
 
-    await expect(service.checkout(6, checkoutDto, 99, [])).rejects.toMatchObject({
+    await expect(
+      service.checkout(6, checkoutDto, 99, []),
+    ).rejects.toMatchObject({
       status: 400,
       response: expect.objectContaining({
         code: 'TEACHING_SESSION_NOT_CHECKED_IN',
@@ -244,7 +314,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       { id: 7, schoolId: 10, checkinAt: null },
     ]);
 
-    await expect(service.checkout(7, checkoutDto, 99, [])).rejects.toMatchObject({
+    await expect(
+      service.checkout(7, checkoutDto, 99, []),
+    ).rejects.toMatchObject({
       status: 400,
       response: expect.objectContaining({
         code: 'TEACHING_SESSION_NOT_CHECKED_IN',
@@ -320,9 +392,13 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
   });
 
   it('submitLesson() khi block chưa ai check-in → 400 yêu cầu check-in trước', async () => {
-    const { service } = setup({ id: 7 }, [{ id: 7, schoolId: 10, checkinAt: null }]);
+    const { service } = setup({ id: 7 }, [
+      { id: 7, schoolId: 10, checkinAt: null },
+    ]);
 
-    await expect(service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File])).rejects.toMatchObject({
+    await expect(
+      service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File]),
+    ).rejects.toMatchObject({
       status: 400,
     });
   });
@@ -330,7 +406,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
   it('submitLesson() buổi đã huỷ → 400', async () => {
     const { service } = setup({ id: 7, status: SessionStatus.CANCELLED }, []);
 
-    await expect(service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File])).rejects.toMatchObject({
+    await expect(
+      service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File]),
+    ).rejects.toMatchObject({
       status: 400,
     });
   });
@@ -346,7 +424,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
       [],
     );
 
-    await expect(service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File])).rejects.toMatchObject({
+    await expect(
+      service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File]),
+    ).rejects.toMatchObject({
       status: 409,
     });
   });
@@ -370,7 +450,9 @@ describe('TeachingSessionService — checkout()/submitLesson() nới lỏng theo
   it('submitLesson() sai giáo viên → 403', async () => {
     const { service } = setup({ id: 7, teacherId: 6 }, []);
 
-    await expect(service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File])).rejects.toMatchObject({
+    await expect(
+      service.submitLesson(7, lessonDto, 99, [{} as Express.Multer.File]),
+    ).rejects.toMatchObject({
       status: 403,
     });
   });
