@@ -27,6 +27,8 @@ import {
     TEACHER_ROLES,
     TEACHING_MANAGE_ROLES,
     TEACHING_VIEW_ROLES,
+    TEACHING_OWN_SCHOOLS_ROLES,
+    resolveTeachingScope,
 } from '../teaching/teaching-roles';
 
 /**
@@ -42,12 +44,13 @@ import {
 export class SchoolLocationController {
     constructor(private readonly service: SchoolLocationService) {}
 
-    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES)
+    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES, ...TEACHING_OWN_SCHOOLS_ROLES)
     @Get()
     findBySchool(
         @Query('schoolId', ParseIntPipe) schoolId: number,
+        @Req() req: Request,
     ): Promise<SchoolLocation[]> {
-        return this.service.findBySchool(schoolId);
+        return this.service.findBySchool(schoolId, resolveTeachingScope(req.user));
     }
 
     @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES)

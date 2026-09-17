@@ -6,6 +6,8 @@ import { Subject } from '../subject/subject.entity';
 
 import { PolicyService } from './policy.service';
 import { PolicyController } from './policy.controller';
+import { PolicyContractMediaController } from './policy-contract-media.controller';
+import { PolicyContractArchiveService } from './policy-contract-archive.service';
 import { PolicyHistory } from './entities/policy-history.entity';
 
 import { PolicyGateway } from './policy.gateway';
@@ -15,6 +17,7 @@ import { NotifyModule } from '../notify-zalo/notify.module';
 import { FcmModule } from '../fcm/fcm.module';
 import { NotificationModule } from '../notifications/notification.module';
 import { EmployeeFcmTokenModule } from '../employee-fcm-token/employee-fcm-token.module';
+import { PolicyContractStorageService } from './policy-contract-storage.service';
 
 @Module({
     imports: [
@@ -24,8 +27,8 @@ import { EmployeeFcmTokenModule } from '../employee-fcm-token/employee-fcm-token
         NotificationModule,
         EmployeeFcmTokenModule
     ],
-    controllers: [PolicyController],
-    providers: [PolicyService, PolicyGateway],
+    controllers: [PolicyController, PolicyContractMediaController],
+    providers: [PolicyService, PolicyGateway, PolicyContractStorageService, PolicyContractArchiveService],
     exports: [PolicyService,
         PolicyGateway,],
 })

@@ -10,7 +10,12 @@ import { DataSource, In } from 'typeorm';
 import { Observable, from, switchMap, tap } from 'rxjs';
 
 import { AuthUser } from '../type/auth-user.type';
-import { ACADEMIC_ROLE, HR_ROLE } from '../teaching/teaching-roles';
+import {
+  ACADEMIC_ROLE,
+  HR_ROLE,
+  TEACHER_STAFF_ROLE,
+  TEACHER_COLLABORATOR_ROLE,
+} from '../teaching/teaching-roles';
 import { ActivityLogService } from './activity-log.service';
 import {
   AUDITED_ENTITIES,
@@ -36,8 +41,31 @@ import {
   stripRowFields,
 } from './activity-log.util';
 
-/** Hai bộ phận cần lưu vết thao tác. */
-export const AUDITED_ROLES = [ACADEMIC_ROLE, HR_ROLE];
+/**
+ * Các role cần lưu vết thao tác.
+ *
+ * Ban đầu chỉ Giáo vụ / Nhân sự. Mở rộng sang kinh doanh và ban giám đốc sau
+ * sự cố 14/09/2026: một nhân viên kinh doanh xoá 2 môn của THCS Quang Trung
+ * (kéo theo toàn bộ TKB) mà nhật ký không có một dòng nào — phải lần qua log
+ * nginx mới truy ra được ai làm. Người sửa được môn học / chính sách thì thao
+ * tác của họ cũng phải có vết.
+ *
+ * Thêm giáo viên (công ty + CTV) sau yêu cầu truy checkin/checkout của giáo
+ * viên tại THCS Chi Lăng ngày 14/09/2026 — trước đó role giáo viên không được
+ * audit nên checkin/checkout/nộp bài chỉ tra được qua các cột trên
+ * teaching_sessions, không có vết thao tác riêng.
+ */
+export const AUDITED_ROLES = [
+  ACADEMIC_ROLE,
+  HR_ROLE,
+  'sales',
+  'saleadmin',
+  'salesadmin_la',
+  'director',
+  'director_la',
+  TEACHER_STAFF_ROLE,
+  TEACHER_COLLABORATOR_ROLE,
+];
 
 const MUTATING_METHODS = ['POST', 'PATCH', 'PUT', 'DELETE'];
 

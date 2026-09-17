@@ -3,6 +3,7 @@ import {
   BadRequestException,
   NotFoundException,
   ConflictException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Employee } from './employee.entity';
@@ -12,7 +13,8 @@ import * as bcrypt from 'bcrypt';
 import { ChangePasswordDto } from './dto/changepassword.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { EmployeeFace } from './employee-face.entity';
-import { assertNoTeacherRoleGrant } from './employee-roles';
+import { AvatarStorageService } from '../teaching/avatar-storage.service';
+import { assertNoTeacherRoleGrant, DEV_ROLE } from './employee-roles';
 import { AuthUser } from '../type/auth-user.type';
 
 /**
@@ -36,6 +38,7 @@ export class EmployeeService {
     private repo: Repository<Employee>,
     @InjectRepository(EmployeeFace)
     private readonly employeeFaceRepository: Repository<EmployeeFace>,
+    private readonly avatarStorage: AvatarStorageService,
   ) {}
   async create(data: CreateEmployeeDto) {
     const existedEmail = await this.repo.findOne({
@@ -191,10 +194,16 @@ export class EmployeeService {
       throw error;
     }
   }
+  /**
+   * Hồ sơ rút gọn cho trang cá nhân (`GET /employees/getbyid/:id`). Chọn
+   * tường minh từng cột để không lộ password; thêm cột mới hiển thị ở trang
+   * cá nhân là phải thêm vào đây — từng quên `avatarUrl` khiến avatar mất
+   * sau khi reload trang.
+   */
   findOne(id: number) {
     return this.repo.findOne({
       where: { id },
-      select: ['id', 'name', 'email', 'phone'],
+      select: ['id', 'name', 'email', 'phone', 'avatarUrl', 'roles', 'isActive'],
     });
   }
 
@@ -266,13 +275,10 @@ export class EmployeeService {
   async findById(id: number) {
     const emp = await this.repo.findOne({
       where: { id },
-      relations: [
-        'department',
-        'schools',
-        'employeeRegions',
-        'dailyReports',
-        'notifications',
-      ],
+      // Không nạp `notifications` / `dailyReports`: một nhân viên Nhân sự có
+      // hàng nghìn thông báo, kéo hết vào GET hồ sơ là vô ích và chậm — FE
+      // không đọc hai field này (đã rà toàn bộ kido-app).
+      relations: ['department', 'schools', 'employeeRegions'],
     });
 
     if (!emp) {
@@ -281,6 +287,30 @@ export class EmployeeService {
 
     return stripPassword(emp);
   }
+  /**
+   * Tài khoản dev tự đổi role cho chính mình — chỉ hoạt động nếu tài khoản
+   * ĐANG đã có role `dev` (kiểm tra lại trên chính bản ghi DB, không chỉ tin
+   * theo JWT — token cũ có thể còn role dev dù DB đã bị gỡ). Luôn giữ lại
+   * role `dev` trong mảng để tài khoản không tự khoá mất khả năng đổi role
+   * của chính mình.
+   */
+  async setDevRoles(userId: number, roles: string[]) {
+    const emp = await this.repo.findOne({ where: { id: userId } });
+    if (!emp) {
+      throw new NotFoundException('Employee not found');
+    }
+    if (!emp.roles?.includes(DEV_ROLE)) {
+      throw new ForbiddenException(
+        'Chỉ tài khoản có role dev mới tự đổi role được',
+      );
+    }
+
+    emp.roles = [...new Set([...roles, DEV_ROLE])];
+    await this.repo.save(emp);
+
+    return stripPassword(emp);
+  }
+
   async changePassword(employeeId: number, dto: ChangePasswordDto) {
     const user = await this.repo.findOne({
       where: { id: employeeId },
@@ -311,14 +341,50 @@ export class EmployeeService {
 
     return { message: 'Password changed successfully' };
   }
-  async update(id: number, dto: UpdateEmployeeDto) {
+  async update(
+    id: number,
+    dto: UpdateEmployeeDto,
+    avatar?: Express.Multer.File,
+  ) {
+    const current = await this.repo.findOne({ where: { id } });
+    if (!current) {
+      throw new NotFoundException('Employee not found');
+    }
+
     const { password, departmentId, ...rest } = dto;
 
-    await this.repo.update(id, {
+    // Lưu ảnh trước, ngoài transaction: xử lý ảnh (sharp) chậm, không giữ
+    // khoá bảng trong lúc đó. Ghi DB hỏng thì xoá ảnh vừa lưu.
+    const newAvatarUrl = avatar ? await this.avatarStorage.store(avatar) : null;
+
+    const patch: Partial<Employee> = {
       ...rest,
       ...(password ? { password: await bcrypt.hash(password, 10) } : {}),
-      ...(departmentId ? { department: { id: departmentId } } : {}),
-    });
+      ...(departmentId ? { department: { id: departmentId } as never } : {}),
+      ...(newAvatarUrl ? { avatarUrl: newAvatarUrl } : {}),
+    };
+
+    // ValidationPipe({ transform: true }) trả về instance của DTO, nên field
+    // optional không gửi vẫn là own-property `undefined`. TypeORM bỏ qua
+    // undefined khi build SET — body rỗng thành UPDATE không có SET và nổ
+    // UpdateValuesMissingError. Lọc trước, rỗng thì trả hồ sơ hiện tại.
+    for (const key of Object.keys(patch) as (keyof typeof patch)[]) {
+      if (patch[key] === undefined) delete patch[key];
+    }
+
+    if (Object.keys(patch).length > 0) {
+      try {
+        await this.repo.update(id, patch);
+      } catch (error) {
+        await this.avatarStorage.remove(newAvatarUrl);
+        throw error;
+      }
+    }
+
+    // Đã ghi xong mới dọn ảnh cũ — xoá trước mà ghi hỏng là mất ảnh.
+    if (newAvatarUrl && current.avatarUrl !== newAvatarUrl) {
+      await this.avatarStorage.remove(current.avatarUrl);
+    }
 
     const updated = await this.repo.findOne({ where: { id } });
     if (!updated) {

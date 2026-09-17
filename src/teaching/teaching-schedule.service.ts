@@ -7,7 +7,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
+import { DataSource, IsNull,
+  FindOptionsWhere, In, Repository } from 'typeorm';
 import { TeachingSchedule } from './entities/teaching-schedule.entity';
 import { TeachingSession } from './entities/teaching-session.entity';
 import { Teacher } from './entities/teacher.entity';
@@ -21,6 +22,7 @@ import {
   QueryTeachingSchedulesDto,
   RemoveSchedulesBySchoolDto,
   UpdateTeachingScheduleDto,
+  ApplyEffectiveRangeDto,
 } from './dto/teaching-schedule.dto';
 import {
   ACTIVE_SESSION_STATUSES,
@@ -185,7 +187,10 @@ export class TeachingScheduleService {
         provinceId: query.provinceId,
       });
     }
-    if (query.schoolLocationId) {
+    // 0 = trường chính (lịch của lớp không gắn điểm trường).
+    if (query.schoolLocationId === 0) {
+      qb.andWhere('s.schoolLocationId IS NULL');
+    } else if (query.schoolLocationId) {
       qb.andWhere('s.schoolLocationId = :schoolLocationId', {
         schoolLocationId: query.schoolLocationId,
       });
@@ -410,9 +415,16 @@ export class TeachingScheduleService {
     const effectiveFrom = toDateString(schedule.effectiveFrom) as string;
     const effectiveTo = toDateString(schedule.effectiveTo);
 
-    // Buổi không còn hợp lệ sau khi sửa: rơi sai thứ, hoặc văng ra ngoài
-    // khoảng hiệu lực vừa thu hẹp.
+    // Buổi không còn hợp lệ sau khi sửa: rơi sai thứ, văng ra ngoài khoảng
+    // hiệu lực vừa thu hẹp, hoặc mẫu đã **ngừng áp dụng**.
+    //
+    // Tắt lịch mà để nguyên buổi tương lai thì hai nguồn của mini app lệch
+    // nhau: `/teaching-schedules/me?isActive=true` mất lớp, còn
+    // `/teaching-sessions/me` vẫn đẩy buổi và bắn báo động check-in cho lớp
+    // Nhân sự đã dừng. Đã ghi nhận 12 lịch tắt kéo theo 411 buổi mồ côi.
+    // Bật lại lịch thì Giáo vụ sinh buổi bằng thao tác sinh như bình thường.
     const stale = editable.filter((session) => {
+      if (!schedule.isActive) return true;
       const date = toDateString(session.date) as string;
       return (
         dayOfWeekOf(date) !== schedule.dayOfWeek ||
@@ -485,6 +497,8 @@ export class TeachingScheduleService {
   /**
    * Sinh lại buổi cho đúng thứ mới, trong **đúng khoảng mà mẫu này đã từng
    * sinh** — không tự ý nới rộng ra cả năm học chỉ vì Giáo vụ sửa một chữ.
+   * Ngoại lệ duy nhất: "Hiệu lực từ" được kéo sớm hơn thì sinh bù từ mốc
+   * mới (không lùi quá hôm nay) để lịch đột xuất áp dụng ngay hôm nay.
    *
    * Mẫu chưa sinh buổi nào thì không sinh gì cả: việc sinh buổi là thao tác có
    * chủ đích của Giáo vụ, sửa lịch không phải là lúc thay họ quyết định.
@@ -509,12 +523,34 @@ export class TeachingScheduleService {
       (session) => toDateString(session.date) as string,
     );
     const earliest = dates.reduce((a, b) => (a < b ? a : b));
-    const toDate = dates.reduce((a, b) => (a > b ? a : b));
+    const latest = dates.reduce((a, b) => (a > b ? a : b));
+
+    // Kéo "Hiệu lực đến" ra xa hơn là Giáo vụ nói rõ: dạy tiếp tới ngày đó.
+    // Trước đây chỉ sinh lại trong khoảng đã từng sinh, nên nới hiệu lực
+    // 13/09 → 30/09 không tạo thêm buổi nào: giáo viên thấy lịch đã xác nhận
+    // trên mini app mà không có buổi để check-in (lịch 1466, 14/09/2026).
+    // Chỉ nới khi mốc cũ và mốc mới đều là ngày cụ thể — đặt mốc cho lịch
+    // đang mở vô hạn là thu hẹp, không phải kéo dài.
+    const effectiveTo = toDateString(schedule.effectiveTo);
+    const extendedLater =
+      before.effectiveTo !== null &&
+      effectiveTo !== null &&
+      effectiveTo > before.effectiveTo;
+    const toDate = extendedLater && effectiveTo > latest ? effectiveTo : latest;
+
+    // Lịch đột xuất: Giáo vụ kéo "Hiệu lực từ" lùi về sớm hơn buổi đầu tiên
+    // (thường là hôm nay) thì phải sinh bù từ mốc mới, không thì chấm công
+    // vẫn trống dù thời khoá biểu đã đổi. `generateSessions` tự cắt ở
+    // effectiveFrom nên lấy mốc sớm hơn là đủ.
+    const effectiveFrom = toDateString(schedule.effectiveFrom) as string;
+    const movedEarlier = effectiveFrom < before.effectiveFrom;
+    const lowerBound =
+      movedEarlier && effectiveFrom < earliest ? effectiveFrom : earliest;
 
     // Không sinh bù vào quá khứ: buổi đã qua mà chưa ai chấm thì để nguyên,
     // sinh thêm buổi cho một ngày đã trôi qua chỉ tạo ra công ma.
     const today = this.todayDateString();
-    const fromDate = earliest > today ? earliest : today;
+    const fromDate = lowerBound > today ? lowerBound : today;
 
     if (fromDate > toDate) return 0;
 
@@ -570,6 +606,75 @@ export class TeachingScheduleService {
    * Quy tắc giữ buổi cũ y hệt xoá một tiết: tiết đã qua ngày và tiết đã chấm
    * công không bao giờ bị đụng tới.
    */
+  /**
+   * Áp một khoảng hiệu lực cho toàn bộ tiết của trường. Đi qua `update()`
+   * từng tiết để hưởng đủ logic đồng bộ buổi dạy (cắt buổi văng ngoài
+   * khoảng, sinh thêm tới mốc mới, giữ buổi đã chấm công). Tiết lỗi (trùng
+   * ô lịch...) bị bỏ qua và báo lại, phần còn lại vẫn áp — cùng cách làm
+   * với tạo hàng loạt.
+   */
+  async applyEffectiveRange(dto: ApplyEffectiveRangeDto) {
+    assertDateOrder(
+      dto.effectiveFrom,
+      dto.effectiveTo ?? null,
+      'effectiveFrom phải nhỏ hơn hoặc bằng effectiveTo',
+    );
+
+    const where: FindOptionsWhere<TeachingSchedule> = { schoolId: dto.schoolId };
+    if (dto.subjectId) where.subjectId = dto.subjectId;
+    if (dto.schoolLocationId === 0) where.schoolLocationId = IsNull();
+    else if (dto.schoolLocationId) where.schoolLocationId = dto.schoolLocationId;
+    if (!dto.includeInactive) where.isActive = true;
+
+    const schedules = await this.scheduleRepo.find({
+      where,
+      order: { dayOfWeek: 'ASC', startTime: 'ASC' },
+    });
+
+    const results: {
+      scheduleId: number;
+      status: 'UPDATED' | 'UNCHANGED' | 'FAILED';
+      message?: string;
+      sessionSync?: ScheduleSessionSync;
+    }[] = [];
+    const totals = { updated: 0, removed: 0, created: 0, skipped: 0 };
+
+    for (const schedule of schedules) {
+      const sameFrom = toDateString(schedule.effectiveFrom) === dto.effectiveFrom;
+      const sameTo = toDateString(schedule.effectiveTo) === (dto.effectiveTo ?? null);
+      if (sameFrom && sameTo) {
+        results.push({ scheduleId: schedule.id, status: 'UNCHANGED' });
+        continue;
+      }
+      try {
+        const { sessionSync } = await this.update(schedule.id, {
+          effectiveFrom: dto.effectiveFrom,
+          effectiveTo: dto.effectiveTo ?? null,
+        } as UpdateTeachingScheduleDto);
+        results.push({ scheduleId: schedule.id, status: 'UPDATED', sessionSync });
+        totals.updated += sessionSync.updated;
+        totals.removed += sessionSync.removed;
+        totals.created += sessionSync.created;
+        totals.skipped += sessionSync.skipped;
+      } catch (error) {
+        results.push({
+          scheduleId: schedule.id,
+          status: 'FAILED',
+          message: (error as Error)?.message ?? String(error),
+        });
+      }
+    }
+
+    return {
+      total: schedules.length,
+      applied: results.filter((r) => r.status === 'UPDATED').length,
+      unchanged: results.filter((r) => r.status === 'UNCHANGED').length,
+      failed: results.filter((r) => r.status === 'FAILED').length,
+      sessions: totals,
+      results,
+    };
+  }
+
   async removeBySchool(dto: RemoveSchedulesBySchoolDto) {
     const where: FindOptionsWhere<TeachingSchedule> = {
       schoolId: dto.schoolId,

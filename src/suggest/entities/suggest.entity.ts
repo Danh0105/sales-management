@@ -11,6 +11,15 @@ import { SuggestPaymentOrder } from './suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 
+/** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
+export interface RequestedEquipmentItem {
+    name: string;
+    quantity: number;
+    unit?: string | null;
+    /** Chọn từ thiết bị có sẵn trong kho, nếu có. */
+    warehouseItemId?: number | null;
+}
+
 @Entity()
 @Index(['type', 'status'])
 @Index(['type', 'expectedPaymentDate'])
@@ -188,6 +197,15 @@ export class Suggest {
     saleadminReviewedAt?: Date | null;
 
     // ===== nhánh ĐỀ XUẤT THIẾT BỊ =====
+
+    /**
+     * Danh sách thiết bị kinh doanh mong muốn khi tạo đề xuất (mỗi dòng có thể
+     * chọn `warehouseItemId` có sẵn trong kho hoặc để trống nếu là thiết bị
+     * cần mua mới). Chỉ mang tính tham khảo — phòng kỹ thuật chốt danh sách
+     * thật khi lập lệnh xuất kho (`SuggestStockIssueOrder.items`).
+     */
+    @Column({ type: 'jsonb', name: 'requested_items', nullable: true })
+    requestedItems?: RequestedEquipmentItem[] | null;
 
     /** Kinh doanh xác nhận đã nhận thiết bị */
     @Column({ type: 'timestamptz', name: 'equipment_received_at', nullable: true })

@@ -25,10 +25,12 @@ import {
 } from './dto/school-class.dto';
 import {
     assertCanManageTeaching,
-  assertCanSetTeachingRates,
+    assertCanSetTeachingRates,
     TEACHER_ROLES,
     TEACHING_MANAGE_ROLES,
     TEACHING_VIEW_ROLES,
+    TEACHING_OWN_SCHOOLS_ROLES,
+    resolveTeachingScope,
 } from './teaching-roles';
 
 /**
@@ -44,10 +46,10 @@ import {
 export class SchoolClassController {
     constructor(private readonly service: SchoolClassService) { }
 
-    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES)
+    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES, ...TEACHING_OWN_SCHOOLS_ROLES)
     @Get()
-    findAll(@Query() query: QuerySchoolClassesDto) {
-        return this.service.findAll(query);
+    findAll(@Query() query: QuerySchoolClassesDto, @Req() req: Request) {
+        return this.service.findAll(query, resolveTeachingScope(req.user));
     }
 
     @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES)

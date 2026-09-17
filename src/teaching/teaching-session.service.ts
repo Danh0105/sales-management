@@ -113,12 +113,14 @@ import { findTeachingManagers as findTeachingManagersUtil } from './teaching-man
 import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
+import { haversineKm } from './teacher-matching.service';
 import { LessonImage } from './lesson-image.type';
 import {
   LESSON_REPORT_IMAGE_TYPE,
   LessonImageEntity,
 } from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
+import { TeachingScope } from './teaching-roles';
 import {
   TEACHING_LESSON_REPORT_ALERT_KIND,
   TEACHING_LESSON_REPORT_ALERT_MANAGER_TITLE,
@@ -191,6 +193,9 @@ export class TeachingSessionService {
     // tham số vị trí nên chèn vào giữa là đẩy lệch mọi dependency phía sau.
     @InjectRepository(SchoolLocation)
     private readonly schoolLocationRepo: Repository<SchoolLocation>,
+
+    @InjectRepository(School)
+    private readonly schoolRepo: Repository<School>,
   ) {}
 
   // ==================== LỊCH DẠY ====================
@@ -451,7 +456,19 @@ export class TeachingSessionService {
     };
   }
 
-  async findOne(id: number) {
+  /**
+   * Chi tiết một buổi dạy, thu hẹp theo phạm vi của người gọi — cùng luật với
+   * `findAll` / thư viện ảnh:
+   *   - manage / view : mọi buổi.
+   *   - self (giáo viên): buổi của chính mình, buổi đang mở tuyển (để xem
+   *     trước khi ứng tuyển), hoặc buổi được gợi ý cho mình.
+   *   - own-schools (kinh doanh): buổi ở trường mình phụ trách.
+   * Ngoài phạm vi trả **404** chứ không 403: không để lộ buổi dạy đó tồn tại.
+   *
+   * Trước đây endpoint này chỉ mở cho role quản lý; mini app giáo viên gọi
+   * để xem chi tiết buổi dạy và bị 403 ~500 lần/ngày.
+   */
+  async findOne(id: number, scope: TeachingScope = { kind: 'manage' }) {
     const row = await this.buildSessionQuery()
       .andWhere('ss.id = :id', { id })
       .getRawOne();
@@ -461,7 +478,38 @@ export class TeachingSessionService {
     }
 
     const [item] = await this.enrichWithBlockFlags([this.toSessionItem(row)]);
+    if (!(await this.inScope(item, scope))) {
+      throw new NotFoundException('Buổi dạy không tồn tại');
+    }
     return item;
+  }
+
+  private async inScope(
+    item: { teacherId: number | null; schoolId: number; assignmentStatus: string; recommendedTeacherId?: number | null },
+    scope: TeachingScope,
+  ): Promise<boolean> {
+    switch (scope.kind) {
+      case 'manage':
+      case 'view':
+        return true;
+      case 'self': {
+        const teacher = await this.teacherRepo.findOne({
+          where: { employeeId: scope.employeeId },
+        });
+        if (!teacher) return false;
+        return (
+          item.teacherId === teacher.id ||
+          item.recommendedTeacherId === teacher.id ||
+          item.assignmentStatus === AssignmentStatus.OPEN
+        );
+      }
+      case 'own-schools':
+        return (
+          (await this.sessionRepo.manager.count(School, {
+            where: { id: item.schoolId, employee: { id: scope.employeeId } },
+          })) > 0
+        );
+    }
   }
 
   /** Tạo buổi lẻ hoặc buổi dạy bù (không thuộc mẫu lặp). */
@@ -593,6 +641,29 @@ export class TeachingSessionService {
       );
     }
 
+    // Đổi thời gian buổi đã có dữ liệu chấm công thì ảnh check-in, giờ
+    // check-out và báo giảng đã gắn với khung giờ cũ, sửa giờ là làm sai lệch
+    // chính những bằng chứng đó. Cùng điều kiện với `remove()`.
+    const timeChanged =
+      (dto.date !== undefined &&
+        dto.date !== (toDateString(session.date) as string)) ||
+      (dto.startTime !== undefined &&
+        toDbTime(dto.startTime) !== session.startTime) ||
+      (dto.endTime !== undefined &&
+        toDbTime(dto.endTime) !== session.endTime);
+
+    if (
+      timeChanged &&
+      (CHECKED_STATUSES.includes(session.status) ||
+        session.checkinAt ||
+        session.checkoutAt ||
+        session.lessonSubmittedAt)
+    ) {
+      throw new ConflictException(
+        'Buổi đã có dữ liệu chấm công, không đổi được ngày/giờ dạy',
+      );
+    }
+
     const merged = {
       teacherId:
         dto.teacherId !== undefined ? dto.teacherId : session.teacherId,
@@ -673,7 +744,24 @@ export class TeachingSessionService {
     session.endTime = toDbTime(merged.endTime);
 
     if (dto.note !== undefined) session.note = dto.note ?? null;
-    if (dto.periods !== undefined) session.periods = dto.periods;
+
+    if (dto.periods !== undefined && dto.periods !== session.periods) {
+      // Cùng điều kiện với remove()/đổi giờ: buổi đã qua ngày hoặc đã có dấu
+      // vết chấm công thì số tiết là căn cứ tính công/phụ cấp đã thực tế xảy
+      // ra, sửa lại sẽ làm sai lệch bảng công đã/sắp chốt.
+      const past = (toDateString(session.date) as string) < this.todayDateString();
+      if (
+        past ||
+        session.checkinAt ||
+        session.checkoutAt ||
+        session.lessonSubmittedAt
+      ) {
+        throw new ConflictException(
+          'Buổi đã qua ngày hoặc đã có dấu vết chấm công, không đổi được số tiết',
+        );
+      }
+      session.periods = dto.periods;
+    }
 
     // Chỉ đổi snapshot khi người dùng chủ động gán/đổi giáo viên. Các chỉnh sửa
     // khác tuyệt đối không tra lại giá hiện tại, nhờ vậy lịch sử không biến động.
@@ -692,7 +780,33 @@ export class TeachingSessionService {
       session.gasAllowance = allowance.gasAllowance;
     }
 
+    // Giáo viên xác nhận theo khung giờ cụ thể, đổi giờ là một lịch khác nên
+    // phải hỏi lại từ đầu. Đổi giáo viên đã tự reset ở `assign()`, ở đây chỉ
+    // lo nhánh giữ nguyên người mà đổi lịch.
+    const needsReconfirm =
+      timeChanged &&
+      dto.teacherId === undefined &&
+      session.teacherId != null &&
+      session.confirmationStatus !== ConfirmationStatus.PENDING;
+
+    if (needsReconfirm) {
+      session.confirmationStatus = ConfirmationStatus.PENDING;
+      session.confirmedAt = null;
+      session.rejectionReason = null;
+      session.confirmationAlertAt = null;
+    }
+
     await this.sessionRepo.save(session);
+
+    if (needsReconfirm) {
+      const teacher =
+        assignedTeacher ??
+        (await this.teacherRepo.findOne({ where: { id: session.teacherId! } }));
+      if (teacher) {
+        await this.notifyConfirmationRequest(session, teacher, 'rescheduled');
+      }
+    }
+
     return this.findOne(id);
   }
 
@@ -1692,12 +1806,13 @@ export class TeachingSessionService {
     }
 
     const rows = await qb.getRawMany();
-    const fuelAllowanceByTeacher =
+    const { fuelAllowanceByTeacher, distanceKmByTeacher } =
       await this.computeFuelAllowanceByTeacher(query);
 
     const data = rows.map((row) => {
       const teacherId = Number(row.teacherId);
       const fuelAllowanceAmount = fuelAllowanceByTeacher.get(teacherId) ?? 0;
+      const totalDistanceKm = distanceKmByTeacher.get(teacherId) ?? 0;
       const otherCostsAmount = Number(row.otherCostsAmount);
       return {
         teacherId,
@@ -1716,6 +1831,8 @@ export class TeachingSessionService {
         // Giáo viên công ty: payableAmount = 0 (không rate_per_period) —
         // phụ cấp xăng thay thế, cộng thêm otherCosts như bình thường.
         fuelAllowanceAmount,
+        // Tổng km di chuyển — chỉ tính cho giáo viên công ty (có gasAllowance).
+        totalDistanceKm,
         totalPayableAmount:
           Number(row.totalPayableAmount) + fuelAllowanceAmount,
         missingRateSessions: Number(row.missingRateSessions),
@@ -1735,6 +1852,10 @@ export class TeachingSessionService {
         ),
         fuelAllowanceAmount: data.reduce(
           (sum, row) => sum + row.fuelAllowanceAmount,
+          0,
+        ),
+        totalDistanceKm: data.reduce(
+          (sum, row) => sum + row.totalDistanceKm,
           0,
         ),
         totalPayableAmount: data.reduce(
@@ -1761,7 +1882,10 @@ export class TeachingSessionService {
    */
   private async computeFuelAllowanceByTeacher(
     query: QueryAttendanceSummaryDto,
-  ): Promise<Map<number, number>> {
+  ): Promise<{
+    fuelAllowanceByTeacher: Map<number, number>;
+    distanceKmByTeacher: Map<number, number>;
+  }> {
     const qb = this.sessionRepo
       .createQueryBuilder('ss')
       .select([
@@ -1771,6 +1895,7 @@ export class TeachingSessionService {
         'ss.date AS "date"',
         'ss.startTime AS "startTime"',
         'ss.gasAllowance AS "gasAllowance"',
+        'ss.distanceToSchoolKm AS "distanceToSchoolKm"',
       ])
       .where('ss.date >= :fromDate', { fromDate: query.fromDate })
       .andWhere('ss.date <= :toDate', { toDate: query.toDate })
@@ -1793,10 +1918,56 @@ export class TeachingSessionService {
 
     const rows = await qb.getRawMany();
 
-    const totals = new Map<number, number>();
+    // Toạ độ từng điểm trường (trường hoặc cơ sở) xuất hiện trong dữ liệu,
+    // dùng để tính quãng đường LIÊN TRƯỜNG (trường trước -> trường sau) khi
+    // một giáo viên dạy nhiều điểm trong cùng ngày, thay vì chỉ hiển thị tổng
+    // (nhà->A)+(nhà->B) — không phản ánh đúng lộ trình di chuyển thật.
+    // Lưu ý: khoản TIỀN phụ cấp (gasAllowance) vẫn giữ nguyên theo bậc
+    // nhà->trường của từng lượt (đã tính sẵn khi sinh session, cố ý theo
+    // đúng lượt đi-về thật từ nhà — xem docstring hàm này).
+    const schoolIds = [...new Set(rows.map((r) => Number(r.schoolId)))];
+    const locationIds = [
+      ...new Set(
+        rows
+          .filter((r) => r.schoolLocationId != null)
+          .map((r) => Number(r.schoolLocationId)),
+      ),
+    ];
+
+    const [schools, locations] = await Promise.all([
+      schoolIds.length
+        ? this.schoolRepo.find({ where: { id: In(schoolIds) } })
+        : Promise.resolve([]),
+      locationIds.length
+        ? this.schoolLocationRepo.find({ where: { id: In(locationIds) } })
+        : Promise.resolve([]),
+    ]);
+    const schoolCoordsById = new Map(
+      schools.map((s) => [s.id, { lat: s.latitude, lng: s.longitude }]),
+    );
+    const locationCoordsById = new Map(
+      locations.map((l) => [l.id, { lat: l.latitude, lng: l.longitude }]),
+    );
+
+    const coordsOfRow = (row: {
+      schoolId: number | string;
+      schoolLocationId: number | string | null;
+    }): { lat: number; lng: number } | null => {
+      if (row.schoolLocationId != null) {
+        const c = locationCoordsById.get(Number(row.schoolLocationId));
+        if (c?.lat != null && c?.lng != null) return { lat: c.lat, lng: c.lng };
+      }
+      const c = schoolCoordsById.get(Number(row.schoolId));
+      if (c?.lat != null && c?.lng != null) return { lat: c.lat, lng: c.lng };
+      return null;
+    };
+
+    const fuelAllowanceByTeacher = new Map<number, number>();
+    const distanceKmByTeacher = new Map<number, number>();
     let prevTeacherId: number | null = null;
     let prevDate: string | null = null;
     let prevPlaceKey: string | null = null;
+    let prevPlaceCoords: { lat: number; lng: number } | null = null;
 
     for (const row of rows) {
       // Phòng khi filter SQL không lọc hết (VD test dựng mock chung 1 query
@@ -1810,16 +1981,46 @@ export class TeachingSessionService {
         ? `L${Number(row.schoolLocationId)}`
         : `S${Number(row.schoolId)}`;
       const date = toDateString(row.date) as string;
-      const isNewBlock =
-        teacherId !== prevTeacherId ||
-        date !== prevDate ||
-        placeKey !== prevPlaceKey;
+      const isNewDay = teacherId !== prevTeacherId || date !== prevDate;
+      const isNewBlock = isNewDay || placeKey !== prevPlaceKey;
 
       if (isNewBlock) {
-        totals.set(
+        fuelAllowanceByTeacher.set(
           teacherId,
-          (totals.get(teacherId) ?? 0) + Number(row.gasAllowance),
+          (fuelAllowanceByTeacher.get(teacherId) ?? 0) +
+            Number(row.gasAllowance),
         );
+
+        // Buổi đầu ngày (hoặc không xác định được toạ độ 2 điểm để nối lộ
+        // trình): dùng khoảng cách nhà->trường đã lưu sẵn trên session.
+        // Từ buổi thứ 2 trở đi trong cùng ngày: tính quãng đường điểm
+        // trường trước -> điểm trường này (đúng lộ trình di chuyển thật).
+        const currentCoords = coordsOfRow(row);
+        let distanceKm: number | null =
+          row.distanceToSchoolKm != null
+            ? Number(row.distanceToSchoolKm)
+            : null;
+
+        if (!isNewDay && prevPlaceCoords && currentCoords) {
+          distanceKm =
+            Math.round(
+              haversineKm(
+                prevPlaceCoords.lat,
+                prevPlaceCoords.lng,
+                currentCoords.lat,
+                currentCoords.lng,
+              ) * 100,
+            ) / 100;
+        }
+
+        if (distanceKm != null) {
+          distanceKmByTeacher.set(
+            teacherId,
+            (distanceKmByTeacher.get(teacherId) ?? 0) + distanceKm,
+          );
+        }
+
+        prevPlaceCoords = currentCoords;
       }
 
       prevTeacherId = teacherId;
@@ -1827,7 +2028,7 @@ export class TeachingSessionService {
       prevPlaceKey = placeKey;
     }
 
-    return totals;
+    return { fuelAllowanceByTeacher, distanceKmByTeacher };
   }
 
   // ==================== INTERNAL ====================
@@ -2794,12 +2995,17 @@ export class TeachingSessionService {
   private async notifyConfirmationRequest(
     session: TeachingSession,
     teacher: Teacher,
+    reason: 'assigned' | 'rescheduled' = 'assigned',
   ): Promise<void> {
     if (!teacher.employeeId) return;
 
+    const slot =
+      `ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
+      `lúc ${toDisplayTime(session.startTime)}`;
     const message =
-      `Bạn được xếp buổi dạy ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
-      `lúc ${toDisplayTime(session.startTime)}. Vui lòng xác nhận hoặc từ chối.`;
+      reason === 'rescheduled'
+        ? `Buổi dạy của bạn đã đổi lịch sang ${slot}. Vui lòng xác nhận hoặc từ chối.`
+        : `Bạn được xếp buổi dạy ${slot}. Vui lòng xác nhận hoặc từ chối.`;
     const pushData = {
       kind: TEACHING_SCHEDULE_CONFIRM_REQUEST_KIND,
       module: TEACHING_MODULE,

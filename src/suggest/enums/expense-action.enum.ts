@@ -1,5 +1,7 @@
 export enum ExpenseAction {
     CREATE = 'CREATE',
+    /** Chủ đề xuất sửa nội dung sau khi đã gửi duyệt. */
+    UPDATE = 'UPDATE',
     SALE_ADMIN_REVIEW = 'SALE_ADMIN_REVIEW',
     SALE_ADMIN_REJECT = 'SALE_ADMIN_REJECT',
     APPROVE = 'APPROVE',

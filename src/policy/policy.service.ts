@@ -38,6 +38,25 @@ import {
     PolicyPageResponse,
 } from './dto/policy-list-item.dto';
 import { PolicyScope } from './policy-scope';
+import { PolicyContractStorageService } from './policy-contract-storage.service';
+import { createHash, randomUUID } from 'crypto';
+import {
+    DEFAULT_POLICY_CONTRACT_CATEGORY,
+    POLICY_CONTRACT_CATEGORIES,
+    PolicyContractCategory,
+    PolicyContractFile,
+} from './entities/policy.entity';
+
+/** Chuẩn hoá category từ FE: giá trị lạ/rỗng -> mặc định CONTRACT, không reject request. */
+function normalizeContractCategory(value: string | undefined | null): PolicyContractCategory {
+    if (value && (POLICY_CONTRACT_CATEGORIES as readonly string[]).includes(value)) {
+        return value as PolicyContractCategory;
+    }
+    return DEFAULT_POLICY_CONTRACT_CATEGORY;
+}
+
+/** Số hợp đồng PDF tối đa cho một chính sách. */
+export const MAX_CONTRACT_FILES = 10;
 
 /** Bộ filter dùng chung cho GET /policies/all và GET /policies/admin/all. */
 type PolicyFilters = Pick<
@@ -101,7 +120,107 @@ export class PolicyService {
         private employeeFcmTokenService:
             EmployeeFcmTokenService,
         private readonly notificationService: NotificationService,
+        private readonly contractStorage: PolicyContractStorageService,
     ) { }
+
+    /**
+     * Thêm một hoặc nhiều hợp đồng PDF. **Nối vào danh sách**, không ghi đè:
+     * hợp đồng chính, phụ lục, biên bản đều cần giữ cùng nhau.
+     *
+     * Lưu file trước, ghi DB sau; ghi hỏng thì xoá đúng những file vừa lưu.
+     * Tối đa `MAX_CONTRACT_FILES` file mỗi chính sách.
+     */
+    async uploadContract(
+        id: number,
+        files: Express.Multer.File[] | Express.Multer.File | undefined,
+        uploader: { id: number; name?: string },
+        category?: string,
+    ) {
+        const policy = await this.findOne(id);
+        if (policy.status !== PolicyStatus.DIRECTOR_APPROVED) {
+            throw new BadRequestException('Chỉ được upload hợp đồng cho chính sách đã được Giám đốc duyệt');
+        }
+
+        const list = (Array.isArray(files) ? files : files ? [files] : []).filter(Boolean);
+        if (list.length === 0) throw new BadRequestException('Vui lòng chọn file hợp đồng PDF');
+
+        const existing = this.contractFilesOf(policy);
+        if (existing.length + list.length > MAX_CONTRACT_FILES) {
+            throw new BadRequestException(
+                `Mỗi chính sách tối đa ${MAX_CONTRACT_FILES} file hợp đồng (đang có ${existing.length})`,
+            );
+        }
+
+        const resolvedCategory = normalizeContractCategory(category);
+        const stored: PolicyContractFile[] = [];
+        try {
+            for (const file of list) {
+                const saved = await this.contractStorage.store(file);
+                stored.push({
+                    id: randomUUID(),
+                    url: saved.url,
+                    originalName: saved.originalName,
+                    size: file.size,
+                    uploadedById: uploader.id,
+                    uploadedByName: uploader.name,
+                    uploadedAt: new Date().toISOString(),
+                    category: resolvedCategory,
+                });
+            }
+            policy.contractFiles = [...existing, ...stored];
+            this.mirrorLatestContract(policy);
+            return await this.policyRepo.save(policy);
+        } catch (error) {
+            await Promise.all(stored.map((f) => this.contractStorage.remove(f.url)));
+            throw error;
+        }
+    }
+
+    /** Xoá một hợp đồng khỏi danh sách và xoá file trên đĩa. */
+    async removeContract(id: number, fileId: string) {
+        const policy = await this.findOne(id);
+        const existing = this.contractFilesOf(policy);
+        const target = existing.find((f) => f.id === fileId);
+        if (!target) throw new NotFoundException('Không tìm thấy file hợp đồng');
+
+        policy.contractFiles = existing.filter((f) => f.id !== fileId);
+        this.mirrorLatestContract(policy);
+        const saved = await this.policyRepo.save(policy);
+        // Ghi DB xong mới xoá file — xoá trước mà ghi hỏng là mất hợp đồng.
+        await this.contractStorage.remove(target.url);
+        return saved;
+    }
+
+    /**
+     * Danh sách hợp đồng, kể cả bản ghi cũ chỉ có một file trong các cột
+     * `contract_*` (chưa qua migration backfill).
+     */
+    private contractFilesOf(policy: Policy): PolicyContractFile[] {
+        if (policy.contractFiles?.length) return policy.contractFiles;
+        if (!policy.contractFileUrl) return [];
+        return [{
+            id: createHash('md5').update(policy.contractFileUrl).digest('hex'),
+            url: policy.contractFileUrl,
+            originalName: policy.contractFileName || 'contract.pdf',
+            size: 0,
+            uploadedById: policy.contractUploadedById ?? 0,
+            uploadedByName: policy.contractUploadedByName,
+            uploadedAt: (policy.contractUploadedAt ?? new Date()).toISOString(),
+        }];
+    }
+
+    /**
+     * Các cột `contract_*` đơn lẻ luôn trỏ tới file **mới nhất** để FE chỉ
+     * đọc một file vẫn chạy như trước.
+     */
+    private mirrorLatestContract(policy: Policy): void {
+        const latest = policy.contractFiles?.at(-1);
+        policy.contractFileUrl = latest?.url ?? undefined;
+        policy.contractFileName = latest?.originalName ?? undefined;
+        policy.contractUploadedById = latest?.uploadedById ?? undefined;
+        policy.contractUploadedByName = latest?.uploadedByName ?? undefined;
+        policy.contractUploadedAt = latest ? new Date(latest.uploadedAt) : undefined;
+    }
 
     // ✅ CREATE
     async create(dto: CreatePolicyDto): Promise<Policy> {
@@ -1202,6 +1321,17 @@ export class PolicyService {
                 policy.durationMonths = dto.durationMonths;
             }
 
+            // Giám đốc chỉnh sửa chính sách đồng nghĩa với việc đã xem và
+            // chấp nhận nội dung sau chỉnh sửa → lưu và chuyển thẳng sang
+            // trạng thái đã duyệt, không bắt phải bấm duyệt thêm lần nữa.
+            const isDirector = options.historyAction === 'DIRECTOR_UPDATE';
+            if (isDirector) {
+                policy.status = PolicyStatus.DIRECTOR_APPROVED;
+                if (dto.note !== undefined) {
+                    policy.note = dto.note;
+                }
+            }
+
             const history = await historyRepo.save({
                 policyId: policy.id,
                 updatedBy: reviewer.name || options.defaultName,
@@ -1216,12 +1346,23 @@ export class PolicyService {
             policy.currentHistoryId = history.id;
             await policyRepo.save(policy);
 
+            // Đã duyệt xong → thông báo "cần duyệt" của lần gửi này coi như
+            // đã xử lý cho mọi người nhận (giống luồng adminUpdateStatusNote).
+            if (isDirector) {
+                await this.notificationService.markAllAsReadByTypeAndEntity(
+                    NotificationType.POLICY,
+                    policy.id,
+                );
+            }
+
             // ===== THÔNG BÁO ĐẾN EMPLOYEE =====
 
             const reviewerName = fixVietnamese(
                 reviewer.name || options.defaultName,
             );
-            const message = `${reviewerName} đã chỉnh sửa chính sách môn ${subject.name} năm học ${subject.schoolYear}`;
+            const message = isDirector
+                ? `${reviewerName} đã chỉnh sửa và duyệt chính sách môn ${subject.name} năm học ${subject.schoolYear}`
+                : `${reviewerName} đã chỉnh sửa chính sách môn ${subject.name} năm học ${subject.schoolYear}`;
 
             const meta = {
                 regionName: subject.school?.ward?.province?.name,
@@ -1344,6 +1485,9 @@ export class PolicyService {
                 // (tự cập nhật mỗi lần save) mới xác định đúng chính sách nào
                 // vừa được thao tác gần nhất.
                 'p.updatedAt AS "policyUpdatedAt"',
+                'p.contractFileUrl AS "contractFileUrl"',
+                'p.contractFileName AS "contractFileName"',
+                'p.contractFiles AS "contractFiles"',
 
                 // SUBJECT
                 'sub.id AS "subjectId"',
@@ -1429,6 +1573,10 @@ export class PolicyService {
                 'p.id AS "policyId"',
                 'p.data AS "policyData"',
                 'p.created_at AS "policyCreatedAt"',
+
+                'p.contractFileUrl AS "contractFileUrl"',
+                'p.contractFileName AS "contractFileName"',
+                'p.contractFiles AS "contractFiles"',
 
                 // ===== SUBJECT =====
                 'sub.id AS "subjectId"',

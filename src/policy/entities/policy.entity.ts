@@ -3,6 +3,26 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 import { Subject } from '../../subject/subject.entity';
 import { PolicyStatus } from '../policy.enum';
 
+/** 3 nhóm file đính kèm của một Policy. */
+export const POLICY_CONTRACT_CATEGORIES = ['CONTRACT', 'BBCS', 'HANDOVER_IMAGE'] as const;
+export type PolicyContractCategory = (typeof POLICY_CONTRACT_CATEGORIES)[number];
+
+/** Mặc định khi file cũ (trước khi có trường category) không có category. */
+export const DEFAULT_POLICY_CONTRACT_CATEGORY: PolicyContractCategory = 'CONTRACT';
+
+/** Một file hợp đồng trong `Policy.contractFiles`. */
+export interface PolicyContractFile {
+    id: string;
+    url: string;
+    originalName: string;
+    size: number;
+    uploadedById: number;
+    uploadedByName?: string;
+    uploadedAt: string;
+    /** Nhóm file. Bản ghi cũ không có field này -> coi như 'CONTRACT' khi đọc. */
+    category?: PolicyContractCategory;
+}
+
 @Entity()
 @Index('IDX_policy_status', ['status'])
 @Index('IDX_policy_created_at', ['createdAt'])
@@ -42,6 +62,30 @@ export class Policy {
 
     @Column({ nullable: true })
     currentHistoryId?: number;
+
+    @Column({ name: 'contract_file_url', nullable: true })
+    contractFileUrl?: string;
+
+    @Column({ name: 'contract_file_name', nullable: true })
+    contractFileName?: string;
+
+    @Column({ name: 'contract_uploaded_by_id', nullable: true })
+    contractUploadedById?: number;
+
+    @Column({ name: 'contract_uploaded_by_name', nullable: true })
+    contractUploadedByName?: string;
+
+    @Column({ name: 'contract_uploaded_at', type: 'timestamptz', nullable: true })
+    contractUploadedAt?: Date;
+
+    /**
+     * Danh sách hợp đồng PDF — một chính sách có thể kèm nhiều file (hợp đồng
+     * chính, phụ lục, biên bản...). Các cột `contract_*` phía trên được giữ
+     * lại và luôn phản chiếu **file mới nhất** để FE cũ chỉ đọc một file
+     * không phải sửa gì.
+     */
+    @Column({ name: 'contract_files', type: 'jsonb', nullable: true })
+    contractFiles?: PolicyContractFile[] | null;
 
     /**
      * Số tháng áp dụng. Dùng `numeric` chứ không phải `int`: người dùng khai

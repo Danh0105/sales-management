@@ -113,7 +113,9 @@ export class TeachingSessionController {
         return this.service.runScheduleConfirmationAlerts();
     }
 
-    @Roles('nhansu')
+    // Giáo vụ xếp lịch thì cũng gửi được lịch — không phải việc khai tiền
+    // (xem teaching-roles.ts). Trước để 'nhansu' riêng nên Giáo vụ bấm là 403.
+    @Roles(...TEACHING_MANAGE_ROLES)
     @Post('notify-schedule')
     @HttpCode(200)
     notifySchedule(
@@ -344,10 +346,11 @@ export class TeachingSessionController {
         return this.service.findAll(query);
     }
 
-    @Roles(...TEACHING_VIEW_ROLES)
+    /** Chi tiết buổi dạy — phạm vi suy từ token (xem `TeachingSessionService.findOne`). */
+    @Roles(...TEACHING_VIEW_ROLES, ...TEACHER_ROLES, ...TEACHING_OWN_SCHOOLS_ROLES)
     @Get(':id')
-    findOne(@Param('id', ParseIntPipe) id: number) {
-        return this.service.findOne(id);
+    findOne(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
+        return this.service.findOne(id, resolveTeachingScope(req.user));
     }
 
     /** Tạo buổi lẻ hoặc buổi dạy bù. */

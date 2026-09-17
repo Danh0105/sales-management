@@ -791,6 +791,7 @@ export class RealExpensesService {
       invoiced: i.invoiced,
       invoiceType: i.invoiceType,
       invoiceOther: i.invoiceOther,
+      invoiceNumber: i.invoiceNumber,
       invoiceDate: i.invoiceDate,
       paidAmount: num(i.paidAmount),
       paymentMethod: i.paymentMethod,

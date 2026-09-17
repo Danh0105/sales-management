@@ -100,11 +100,15 @@ export class QuerySchoolClassesDto {
     @Min(1)
     schoolId?: number;
 
-    /** Chỉ lớp của một điểm trường (cơ sở) — trường nhiều cơ sở có lớp riêng từng nơi. */
+    /**
+     * Chỉ lớp của một điểm trường (cơ sở) — trường nhiều cơ sở có lớp riêng từng nơi.
+     * Truyền `0` = chỉ lớp của TRƯỜNG CHÍNH (chưa gắn điểm trường nào): trường
+     * chính và mỗi điểm trường là các phạm vi lớp tách biệt, không trộn chung.
+     */
     @IsOptional()
     @Type(() => Number)
     @IsInt()
-    @Min(1)
+    @Min(0)
     schoolLocationId?: number;
 
     @IsOptional()

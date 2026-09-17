@@ -42,6 +42,7 @@ import { TimetableImportModule } from './timetable-import/timetable-import.modul
 import { VirtualTryOnModule } from './virtual-tryon/virtual-tryon.module';
 import { SchoolLocationModule } from './school-location/school-location.module';
 import { ActivityLogModule } from './activity-log/activity-log.module';
+import { WarehouseModule } from './warehouse/warehouse.module';
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { ActivityLogModule } from './activity-log/activity-log.module';
     ZaloLocationModule,
     ZaloOaModule,
     SchoolLocationModule,
+    WarehouseModule,
   ],
 })
 export class AppModule {}

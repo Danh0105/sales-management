@@ -7,6 +7,7 @@ import { EmployeeRegionSchoolModule } from '../employee-region-school/employee-r
 import { DepartmentModule } from '../department/department.module';
 import { RegionModule } from '../region/region.module';
 import { EmployeeFace } from './employee-face.entity';
+import { AvatarStorageService } from '../teaching/avatar-storage.service';
 
 
 @Module({
@@ -28,6 +29,7 @@ import { EmployeeFace } from './employee-face.entity';
 
     providers: [
         EmployeeService,
+        AvatarStorageService,
     ],
 
     controllers: [

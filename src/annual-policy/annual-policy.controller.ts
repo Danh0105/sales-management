@@ -8,8 +8,11 @@ import {
     Post,
     Query,
     Req,
+    UploadedFile,
     UseGuards,
+    UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 
 import { AnnualPolicyService } from './annual-policy.service';
@@ -20,6 +23,10 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { BlockReadOnlyGuard } from '../auth/read-only.guard';
+import {
+    ANNUAL_POLICY_CONTRACT_UPLOAD_ROLES,
+    ANNUAL_POLICY_VIEW_ROLES,
+} from './annual-policy.roles';
 
 @Controller('annual-policies')
 export class AnnualPolicyController {
@@ -29,6 +36,21 @@ export class AnnualPolicyController {
     @Post()
     create(@Body() dto: CreateAnnualPolicyDto, @Req() req: Request) {
         return this.service.create(dto, {
+            id: req.user!.id,
+            name: req.user!.name,
+        });
+    }
+
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(...ANNUAL_POLICY_CONTRACT_UPLOAD_ROLES)
+    @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 20 * 1024 * 1024 } }))
+    @Post(':id/contract')
+    uploadContract(
+        @Param('id', ParseIntPipe) id: number,
+        @UploadedFile() file: Express.Multer.File | undefined,
+        @Req() req: Request,
+    ) {
+        return this.service.uploadContract(id, file, {
             id: req.user!.id,
             name: req.user!.name,
         });
@@ -48,7 +70,8 @@ export class AnnualPolicyController {
         });
     }
 
-    @UseGuards(JwtAuthGuard)
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(...ANNUAL_POLICY_VIEW_ROLES)
     @Get()
     findAll(
         @Query('employeeId') employeeId?: string,
@@ -64,7 +87,8 @@ export class AnnualPolicyController {
         });
     }
 
-    @UseGuards(JwtAuthGuard)
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(...ANNUAL_POLICY_VIEW_ROLES)
     @Get(':id')
     findOne(@Param('id', ParseIntPipe) id: number) {
         return this.service.findOne(id);

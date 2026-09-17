@@ -27,6 +27,7 @@ import {
     QueryTeachingSchedulesDto,
     RemoveSchedulesBySchoolDto,
     UpdateTeachingScheduleDto,
+    ApplyEffectiveRangeDto,
 } from './dto/teaching-schedule.dto';
 import { BulkCreateSchedulesDto } from './dto/teaching-bulk.dto';
 import {
@@ -113,6 +114,19 @@ export class TeachingScheduleController {
      * body bị nhiều proxy và thư viện HTTP lược mất, mà mất `schoolId` ở đây
      * thì DTO chặn ngay chứ không âm thầm xoá diện rộng.
      */
+    /**
+     * Áp hiệu lực cho toàn bộ tiết của một trường. Khai báo trước
+     * `@Patch(':id')`-style routes không cần thiết vì đây là POST, nhưng để
+     * gần `bulk-delete` cho dễ tìm.
+     */
+    @Roles(...TEACHING_MANAGE_ROLES)
+    @Post('bulk-effective-range')
+    @HttpCode(200)
+    applyEffectiveRange(@Body() dto: ApplyEffectiveRangeDto, @Req() req: Request) {
+        assertCanManageTeaching(req.user);
+        return this.service.applyEffectiveRange(dto);
+    }
+
     @Roles(...TEACHING_MANAGE_ROLES)
     @Post('bulk-delete')
     @HttpCode(200)

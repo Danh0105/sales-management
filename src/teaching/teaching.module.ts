@@ -31,6 +31,8 @@ import { TeacherService } from './teacher.service';
 import { TeacherMatchingService } from './teacher-matching.service';
 import { AvatarStorageService } from './avatar-storage.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
+import { LessonMediaArchiveService } from './lesson-media-archive.service';
+import { LessonMediaController } from './lesson-media.controller';
 import { LessonImageLibraryService } from './lesson-image-library.service';
 import { LessonImageEntity } from './entities/lesson-image.entity';
 import { TeachingScheduleService } from './teaching-schedule.service';
@@ -72,6 +74,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     ]),
   ],
   controllers: [
+    LessonMediaController,
     SchoolClassController,
     TeacherController,
     TeachingScheduleController,
@@ -85,6 +88,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     TeacherMatchingService,
     AvatarStorageService,
     LessonImageStorageService,
+    LessonMediaArchiveService,
     LessonImageLibraryService,
     TeachingScheduleService,
     TeachingSessionService,

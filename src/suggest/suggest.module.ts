@@ -11,6 +11,7 @@ import { Employee } from '../employee/employee.entity';
 import { Policy } from '../policy/entities/policy.entity';
 import { NotificationModule } from '../notifications/notification.module';
 import { FcmModule } from '../fcm/fcm.module';
+import { WarehouseModule } from '../warehouse/warehouse.module';
 
 // ĐỀ XUẤT CHI (EXPENSE_REQUEST) — dùng chung SuggestService
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
@@ -24,6 +25,7 @@ import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entit
     imports: [
         forwardRef(() => NotificationModule),
         FcmModule,
+        WarehouseModule,
         TypeOrmModule.forFeature([
             Suggest,
             SuggestHistory,

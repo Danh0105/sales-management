@@ -19,6 +19,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "teacher:create": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/create-teacher-account.ts",
     "teaching:resync": "ts-node -r tsconfig-paths/register src/scripts/resync-sessions-to-schedule.ts",
     "teaching:slot-check": "ts-node -r tsconfig-paths/register src/scripts/session-slot-constraint.ts",
     "teaching:slot-apply": "ts-node -r tsconfig-paths/register src/scripts/session-slot-constraint.ts --apply",

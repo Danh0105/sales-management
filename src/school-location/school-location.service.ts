@@ -1,3 +1,4 @@
+import { TeachingScope } from '../teaching/teaching-roles';
 import {
     Injectable,
     NotFoundException,
@@ -55,7 +56,21 @@ export class SchoolLocationService {
         return this.locationRepo.save(location);
     }
 
-    async findBySchool(schoolId: number): Promise<SchoolLocation[]> {
+    /**
+     * Kinh doanh (`own-schools`) chỉ xem được điểm trường của trường mình
+     * phụ trách; trường khác trả rỗng như thể không có — không lộ dữ liệu,
+     * không 403 làm đỏ console ở trang thời khoá biểu.
+     */
+    async findBySchool(
+        schoolId: number,
+        scope: TeachingScope = { kind: 'manage' },
+    ): Promise<SchoolLocation[]> {
+        if (scope.kind === 'own-schools') {
+            const owned = await this.schoolRepo.count({
+                where: { id: schoolId, employee: { id: scope.employeeId } },
+            });
+            if (owned === 0) return [];
+        }
         return this.locationRepo.find({
             where: { schoolId },
             relations: ['ward'],

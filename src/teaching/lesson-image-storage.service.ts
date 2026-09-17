@@ -1,9 +1,10 @@
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { access, mkdir, rmdir, unlink, writeFile } from 'fs/promises';
 import { join, resolve, sep } from 'path';
 import sharp from 'sharp';
+import { LessonMediaArchiveService } from './lesson-media-archive.service';
 import {
   LessonImage,
   LessonImageResponse,
@@ -25,7 +26,12 @@ export class LessonImageStorageService {
   private readonly logger = new Logger(LessonImageStorageService.name);
   private readonly directory: string;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    // Optional để spec cũ khởi tạo bằng tay không phải truyền; thiếu thì chỉ
+    // mất khả năng tạo thumb cho ảnh đã chuyển sang NAS.
+    @Optional() private readonly archive?: LessonMediaArchiveService,
+  ) {
     this.directory = resolve(
       config.get('LESSON_IMAGE_UPLOAD_DIR') ||
         join(process.cwd(), 'uploads', 'lesson-images'),
@@ -83,7 +89,10 @@ export class LessonImageStorageService {
       throw imageError(HttpStatus.UNPROCESSABLE_ENTITY, 'LESSON_THUMBNAIL_UNAVAILABLE', 'Không thể tạo ảnh thu nhỏ');
     }
     const name = url.slice('/uploads/lesson-images/'.length);
-    const source = resolve(this.directory, name);
+    // Bản gốc có thể đã được chuyển sang NAS; tra qua tầng lưu trữ để tìm.
+    // NAS ngắt thì `locate` trả null ngay, không treo.
+    const source =
+      (await this.archive?.locate(name))?.path ?? resolve(this.directory, name);
     const targetName = fallback.slice('/uploads/lesson-images/thumb/'.length);
     const target = resolve(this.directory, 'thumb', targetName);
     try {

@@ -118,6 +118,14 @@ export class RevenueItem {
   })
   invoiceOther!: string | null;
 
+  /** Số hóa đơn — chỉ dùng khi xuất HĐ công ty */
+  @Column({
+    type: 'varchar',
+    length: 100,
+    nullable: true,
+  })
+  invoiceNumber!: string | null;
+
   @Column({
     type: 'date',
     nullable: true,

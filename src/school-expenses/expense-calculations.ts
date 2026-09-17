@@ -223,6 +223,10 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
       invoiceType === RevenueInvoiceType.Other
         ? item?.invoiceOther || null
         : null,
+    invoiceNumber:
+      invoiceType === RevenueInvoiceType.Company
+        ? item?.invoiceNumber || null
+        : null,
     invoiceDate: item?.invoiceDate || null,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),

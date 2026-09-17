@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -49,6 +50,7 @@ import {
 } from './expense-flow.state-machine';
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
+import { WarehouseService } from '../warehouse/warehouse.service';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
@@ -60,6 +62,8 @@ import {
   SuggestReminderSetting,
 } from './entities/suggest-reminder-setting.entity';
 import { CreatePaymentOrderDto } from './dto/expense/create-payment-order.dto';
+import { FundSource, FUND_SOURCE_LABEL } from './enums/expense-fund-source.enum';
+import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { vnToday, vnYearMonth, diffDays } from './utils/vn-date';
 import { isCronLeader } from '../utils/is-cron-leader';
@@ -101,6 +105,7 @@ export class SuggestService {
     private readonly notificationService: NotificationService,
     private readonly suggestGateway: SuggestGateway,
     private readonly fcmService: FcmService,
+    private readonly warehouseService: WarehouseService,
   ) {}
 
   private readonly logger = new Logger(SuggestService.name);
@@ -190,6 +195,9 @@ export class SuggestService {
           ...(school ? { schoolId: school.id, school } : {}),
           ...(dto.schoolYear ? { schoolYear: dto.schoolYear } : {}),
           ...(ward ? { wardId: ward.id, ward } : {}),
+          ...(kind === ExpenseRequestKind.EQUIPMENT && dto.items?.length
+            ? { requestedItems: dto.items }
+            : {}),
           fileUrl,
           code,
           version: 1,
@@ -1591,6 +1599,167 @@ export class SuggestService {
   }
 
   /**
+   * Chủ đề xuất (kinh doanh) sửa đề xuất đã gửi duyệt.
+   *
+   * Chỉ sửa được khi chưa phát sinh dòng tiền / xuất kho — tức còn ở
+   * PENDING_APPROVAL hoặc APPROVED. Đề xuất đã duyệt mà sửa thì nội dung Giám
+   * đốc đã chốt không còn đúng nữa, nên phải quay về PENDING_APPROVAL và xoá
+   * dấu duyệt (kể cả kiểm duyệt của Sales Admin) để duyệt lại từ đầu.
+   */
+  async updateExpense(
+    id: number,
+    dto: UpdateExpenseRequestDto,
+    fileUrl: string | undefined,
+    user: AuthUser,
+  ) {
+    const actor = this.ensureUser(user);
+
+    const EDITABLE_STATUSES: SuggestStatus[] = [
+      SuggestStatus.PENDING_APPROVAL,
+      SuggestStatus.APPROVED,
+    ];
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const suggest = await manager.findOne(Suggest, { where: { id } });
+
+      if (!suggest || suggest.type !== SuggestType.EXPENSE_REQUEST) {
+        throw new NotFoundException('Đề xuất chi không tồn tại');
+      }
+      if (suggest.createdBy !== actor.id) {
+        throw new ForbiddenException('Chỉ người tạo mới được sửa đề xuất');
+      }
+      if (!suggest.status || !EDITABLE_STATUSES.includes(suggest.status)) {
+        throw new ConflictException(
+          'Chỉ sửa được đề xuất đang chờ duyệt hoặc đã duyệt nhưng chưa lên lệnh chi/xuất kho',
+        );
+      }
+
+      // Gộp giá trị mới lên giá trị cũ rồi kiểm tra như lúc tạo — sửa xong
+      // đề xuất vẫn phải là một đề xuất hợp lệ.
+      const content = dto.content ?? suggest.content;
+      const expectedPaymentDate =
+        dto.expectedPaymentDate ?? suggest.expectedPaymentDate;
+      if (!content?.trim()) {
+        throw new BadRequestException('Thiếu tiêu đề/nội dung đề xuất');
+      }
+      if (!expectedPaymentDate) {
+        throw new BadRequestException('Thiếu ngày dự kiến chi');
+      }
+      // Chỉ siết "từ hôm nay" khi người dùng thật sự đổi ngày — đề xuất cũ có
+      // ngày đã qua vẫn phải sửa được các trường khác.
+      if (dto.expectedPaymentDate && dto.expectedPaymentDate < vnToday()) {
+        throw new BadRequestException(
+          'Ngày dự kiến chi phải từ hôm nay trở đi',
+        );
+      }
+
+      // Đổi trường ⇄ xã/phường: gửi cái nào thì chuyển sang cái đó, cái kia xoá.
+      const changesSchool = dto.schoolId !== undefined && dto.schoolId !== null;
+      const changesWard = dto.wardId !== undefined && dto.wardId !== null;
+      let schoolId = suggest.schoolId ?? null;
+      let schoolYear = dto.schoolYear ?? suggest.schoolYear ?? null;
+      let wardId = suggest.wardId ?? null;
+
+      if (changesSchool) {
+        schoolId = dto.schoolId!;
+        wardId = null;
+      } else if (changesWard) {
+        wardId = dto.wardId!;
+        schoolId = null;
+        schoolYear = null;
+      }
+
+      if (schoolId) {
+        const school = await manager.findOne(School, { where: { id: schoolId } });
+        if (!school) throw new BadRequestException('Trường không tồn tại');
+        if (!schoolYear) throw new BadRequestException('Thiếu năm học');
+        if (!this.isValidSchoolYear(schoolYear)) {
+          throw new BadRequestException('Năm học không hợp lệ');
+        }
+        const subjectCount = await manager.count(Subject, {
+          where: { schoolId, schoolYear },
+        });
+        if (subjectCount === 0) {
+          throw new BadRequestException(
+            'Trường không có môn học trong năm học đã chọn',
+          );
+        }
+      } else if (wardId) {
+        const ward = await manager.findOne(Ward, { where: { id: wardId } });
+        if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
+      } else {
+        throw new BadRequestException('Thiếu xã/phường');
+      }
+
+      const fromStatus = suggest.status;
+      const needsReapproval = fromStatus === SuggestStatus.APPROVED;
+
+      suggest.content = content;
+      if (dto.description !== undefined) suggest.description = dto.description;
+      if (dto.participants !== undefined) suggest.participants = dto.participants;
+      if (dto.beneficiaryInfo !== undefined) {
+        suggest.beneficiaryInfo = dto.beneficiaryInfo;
+      }
+      suggest.expectedPaymentDate = expectedPaymentDate;
+      suggest.schoolId = schoolId;
+      suggest.schoolYear = schoolYear;
+      suggest.wardId = wardId;
+      if (fileUrl) suggest.fileUrl = fileUrl;
+      suggest.version = (suggest.version ?? 1) + 1;
+
+      if (needsReapproval) {
+        suggest.status = SuggestStatus.PENDING_APPROVAL;
+        suggest.approvedBy = undefined;
+        suggest.approvedAt = null;
+        suggest.rejectReason = null;
+        suggest.saleadminReviewStatus = null;
+        suggest.saleadminNote = null;
+        suggest.saleadminReviewedBy = null;
+        suggest.saleadminReviewedAt = null;
+      }
+
+      const s = await manager.save(suggest);
+
+      if (fileUrl) {
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          [{ fileUrl, fileName: fileUrl.split('/').pop() || 'file' }],
+          actor.id,
+        );
+      }
+
+      await this.writeExpenseLog(manager, {
+        suggestId: s.id!,
+        userId: actor.id,
+        action: ExpenseAction.UPDATE,
+        fromStatus,
+        toStatus: s.status,
+        note: needsReapproval ? 'Sửa sau khi đã duyệt — cần duyệt lại' : null,
+      });
+
+      return { s, needsReapproval };
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.s.id!,
+        title: saved.needsReapproval
+          ? '🔁 Đề xuất chi cần duyệt lại'
+          : '✏️ Đề xuất chi đã được sửa',
+        message: saved.needsReapproval
+          ? `Đề xuất ${saved.s.code} đã được sửa sau khi duyệt, cần duyệt lại: ${saved.s.content}`
+          : `Đề xuất ${saved.s.code} đang chờ duyệt vừa được sửa: ${saved.s.content}`,
+        senderId: actor.id,
+        meta: { status: saved.s.status, reapproval: saved.needsReapproval },
+      },
+      { roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN] },
+    );
+
+    return this.findOneExpense(saved.s.id!);
+  }
+
+  /**
    * Giám đốc xoá hẳn một đề xuất chi. Khác `withdrawExpense` (chuyển trạng
    * thái, giữ lại audit trail): đây là xoá cứng khỏi DB, chỉ cho phép khi
    * tiền chưa phát sinh (chưa lên lệnh chi/xuất quỹ) để không phá vỡ lịch sử
@@ -1709,7 +1878,7 @@ export class SuggestService {
         title: '🧾 Lệnh chi mới',
         message:
           `Lệnh chi ${(paymentOrder as SuggestPaymentOrder | null)?.code} đã được lập` +
-          ` cho đề xuất ${saved.code}, vui lòng xuất tiền`,
+          ` cho đề xuất ${saved.code}, vui lòng xuất tiền và chọn nguồn tiền`,
         senderId: user.id,
         meta: {
           status: saved.status,
@@ -1729,6 +1898,7 @@ export class SuggestService {
     user: AuthUser,
     note?: string,
     files?: UploadedAttachment[],
+    fundSource?: FundSource,
   ) {
     const saved = await this.expenseTransition({
       id,
@@ -1741,6 +1911,13 @@ export class SuggestService {
       },
       extra: async (manager, s) => {
         await this.saveExpenseAttachments(manager, s.id!, files, user.id);
+        if (fundSource) {
+          await manager.update(
+            SuggestPaymentOrder,
+            { suggestId: s.id! },
+            { fundSource },
+          );
+        }
       },
     });
 
@@ -1749,10 +1926,13 @@ export class SuggestService {
         suggestId: saved.id!,
         title: '💵 Thủ quỹ đã xuất tiền',
         message:
-          `Thủ quỹ đã xuất tiền cho đề xuất ${saved.code},` +
+          `Thủ quỹ đã xuất tiền cho đề xuất ${saved.code}` +
+          (fundSource
+            ? ` từ ${FUND_SOURCE_LABEL[fundSource]},`
+            : ',') +
           ` vui lòng xác nhận nhận tiền`,
         senderId: user.id,
-        meta: { status: saved.status },
+        meta: { status: saved.status, fundSource: fundSource ?? null },
       },
       { userIds: saved.createdBy ? [saved.createdBy] : [] },
     );
@@ -1909,6 +2089,24 @@ export class SuggestService {
           note: dto.note ?? null,
           createdBy: user.id,
         });
+
+        // Thiết bị chọn từ kho có sẵn (`warehouseItemId`) sẽ tự trừ tồn ngay
+        // khi lệnh xuất kho được lập.
+        const warehouseLines = dto.items
+          .filter((it) => it.warehouseItemId != null)
+          .map((it) => ({
+            warehouseItemId: it.warehouseItemId!,
+            quantity: it.quantity,
+          }));
+
+        if (warehouseLines.length > 0) {
+          await this.warehouseService.exportForSuggestWithManager(
+            manager,
+            warehouseLines,
+            user.id,
+            s.id!,
+          );
+        }
       },
     });
 
@@ -1955,6 +2153,29 @@ export class SuggestService {
       mutate: (s) => {
         s.equipmentReturnedBy = user.id;
         s.equipmentReturnedAt = new Date();
+      },
+      extra: async (manager, s) => {
+        // Thiết bị đã xuất từ kho có sẵn (`warehouseItemId`) được nhập lại
+        // kho khi kinh doanh trả lại, để phòng kỹ thuật lập lại lệnh xuất kho
+        // từ đúng số tồn.
+        const order = await manager.findOne(SuggestStockIssueOrder, {
+          where: { suggestId: s.id! },
+        });
+        const lines = (order?.items ?? [])
+          .filter((it) => it.warehouseItemId != null)
+          .map((it) => ({
+            warehouseItemId: it.warehouseItemId!,
+            quantity: it.quantity,
+          }));
+
+        if (lines.length > 0) {
+          await this.warehouseService.importForSuggestWithManager(
+            manager,
+            lines,
+            user.id,
+            s.id!,
+          );
+        }
       },
     });
 
@@ -2193,7 +2414,17 @@ export class SuggestService {
       order: { snapshotAt: 'ASC' },
     });
 
-    return { ...s, logs };
+    const actorIds = [...new Set(logs.map((l) => l.userId).filter(Boolean))];
+    const actors = actorIds.length
+      ? await this.employeeRepo.findBy({ id: In(actorIds) })
+      : [];
+    const actorNameById = new Map(actors.map((a) => [a.id, a.name]));
+    const enrichedLogs = logs.map((l) => ({
+      ...l,
+      actorName: l.userId ? actorNameById.get(l.userId) : undefined,
+    }));
+
+    return { ...s, logs: enrichedLogs };
   }
 
   /**

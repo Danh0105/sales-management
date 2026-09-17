@@ -24,6 +24,7 @@ import { PlanNotificationController } from './controllers/plan-notification.cont
 
 // services
 import { NotificationService } from './services/notification.service';
+import { TeachingNotificationCleanupService } from './services/teaching-notification-cleanup.service';
 
 import { SuggestNotificationService } from './services/suggest-notification.service';
 
@@ -81,6 +82,7 @@ import { TeachingScheduleNotificationController } from './controllers/teaching-s
     providers: [
         // core
         NotificationService,
+        TeachingNotificationCleanupService,
 
         NotificationGateway,
 

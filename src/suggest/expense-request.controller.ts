@@ -33,10 +33,12 @@ import { RejectExpenseDto } from './dto/expense/reject-expense.dto';
 import { WithdrawExpenseDto } from './dto/expense/withdraw-expense.dto';
 import { SaleAdminReviewExpenseDto } from './dto/expense/sale-admin-review-expense.dto';
 import { ConfirmNoteDto } from './dto/expense/confirm-note.dto';
+import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto';
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
+import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 
 const singleUpload = FileInterceptor('file', {
@@ -96,6 +98,25 @@ export class ExpenseRequestController {
             fileUrl,
             req.user,
         );
+    }
+
+    /**
+     * Chủ đề xuất sửa đề xuất đã gửi duyệt. Đề xuất đã được duyệt sẽ quay về
+     * chờ duyệt để Giám đốc / Sales Admin duyệt lại (xem
+     * `SuggestService.updateExpense`).
+     */
+    @Patch(':id')
+    @Roles(ExpenseRole.SALES)
+    @UseInterceptors(singleUpload)
+    update(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: UpdateExpenseRequestDto,
+        @UploadedFile() file: Express.Multer.File,
+        @Req() req: any,
+    ) {
+        if (!req.user) throw new UnauthorizedException('Chưa đăng nhập');
+        const fileUrl = file ? `/uploads/suggest/${file.filename}` : undefined;
+        return this.service.updateExpense(id, dto, fileUrl, req.user);
     }
 
     @Post(':id/cash-received')
@@ -250,7 +271,7 @@ export class ExpenseRequestController {
     @UseInterceptors(multiUpload)
     cashReleased(
         @Param('id', ParseIntPipe) id: number,
-        @Body() dto: ConfirmNoteDto,
+        @Body() dto: ConfirmCashReleasedDto,
         @UploadedFiles() files: Express.Multer.File[],
         @Req() req: any,
     ) {
@@ -259,6 +280,7 @@ export class ExpenseRequestController {
             req.user,
             dto.note,
             toAttachments(files),
+            dto.fundSource,
         );
     }
 

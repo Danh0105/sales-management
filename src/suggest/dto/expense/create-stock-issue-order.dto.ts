@@ -17,6 +17,12 @@ export class StockIssueItemDto {
     @MaxLength(255)
     name!: string;
 
+    /** Nếu chọn từ thiết bị có sẵn trong kho — kho sẽ tự trừ tồn khi lệnh được lập. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    warehouseItemId?: number;
+
     @Type(() => Number)
     @IsInt({ message: 'Số lượng phải là số nguyên' })
     @IsPositive({ message: 'Số lượng phải lớn hơn 0' })

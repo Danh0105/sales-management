@@ -747,6 +747,41 @@ describe('TeachingScheduleService', () => {
       expect(inserted.map((row: any) => row.date)).toEqual(['2026-09-03']);
     });
 
+    it('kéo dài "hiệu lực đến" thì sinh thêm buổi tới mốc mới (lịch 1466, 14/09/2026)', async () => {
+      const made = syncSetup([
+        scheduledSession(11, '2026-09-01'),
+        scheduledSession(12, '2026-09-08'),
+      ]);
+      made.schedule.repo.findOne = jest
+        .fn()
+        .mockResolvedValue({ ...SYNCED_SCHEDULE, effectiveTo: '2026-09-08' });
+      // generateSessions tra buổi đã có qua query builder, không qua repo.find.
+      made.session.qb.getRawMany.mockResolvedValue([
+        { date: '2026-09-01' },
+        { date: '2026-09-08' },
+      ]);
+
+      const result = await made.service.update(1, { effectiveTo: '2026-09-22' });
+
+      expect(made.session.repo.delete).not.toHaveBeenCalled();
+      const inserted = made.session.repo.insert.mock.calls.flatMap((c: any[]) => c[0]);
+      expect(inserted.map((row: any) => row.date)).toEqual(['2026-09-15', '2026-09-22']);
+      expect(result.sessionSync.created).toBe(2);
+    });
+
+    it('đặt mốc kết thúc cho lịch đang mở vô hạn là thu hẹp, không sinh thêm', async () => {
+      const made = syncSetup([scheduledSession(11, '2026-09-01')]);
+      made.schedule.repo.findOne = jest
+        .fn()
+        .mockResolvedValue({ ...SYNCED_SCHEDULE, effectiveTo: null });
+      made.session.qb.getRawMany.mockResolvedValue([{ date: '2026-09-01' }]);
+
+      const result = await made.service.update(1, { effectiveTo: '2026-12-31' });
+
+      expect(made.session.repo.insert).not.toHaveBeenCalled();
+      expect(result.sessionSync.created).toBe(0);
+    });
+
     it('thu hẹp khoảng hiệu lực thì cắt các buổi văng ra ngoài', async () => {
       const { service, session } = syncSetup([
         scheduledSession(11, '2026-09-01'),
@@ -757,6 +792,56 @@ describe('TeachingScheduleService', () => {
 
       expect(session.repo.delete).toHaveBeenCalledWith({ id: In([12]) });
       expect(result.sessionSync).toMatchObject({ updated: 1, removed: 1 });
+    });
+
+    it('tắt lịch (isActive=false) thì xoá buổi tương lai chưa chấm, giữ buổi đã check-in', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(11, '2026-09-01'),
+        scheduledSession(12, '2026-09-08'),
+        { ...scheduledSession(13, '2026-09-15'), checkinAt: new Date('2026-09-15T01:00:00Z') },
+      ]);
+
+      const result = await service.update(1, { isActive: false });
+
+      expect(session.repo.delete).toHaveBeenCalledWith({ id: In([11, 12]) });
+      expect(session.repo.update).not.toHaveBeenCalled();
+      expect(result.sessionSync).toMatchObject({ removed: 2, skipped: 1, created: 0 });
+    });
+
+    it('áp hiệu lực cho toàn bộ tiết: sửa từng tiết qua update, bỏ qua tiết đã đúng, gom lỗi', async () => {
+      const made = syncSetup([]);
+      made.schedule.repo.find = jest.fn().mockResolvedValue([
+        { ...SYNCED_SCHEDULE, id: 1, effectiveFrom: '2026-08-01', effectiveTo: '2027-05-31' },
+        { ...SYNCED_SCHEDULE, id: 2, effectiveFrom: '2026-09-14', effectiveTo: '2026-09-30' },
+        { ...SYNCED_SCHEDULE, id: 3, effectiveFrom: '2026-08-01', effectiveTo: '2027-05-31' },
+      ]);
+      const update = jest
+        .spyOn(made.service, 'update')
+        .mockImplementation(async (id: number) => {
+          if (id === 3) throw new Error('Trùng ô lịch');
+          return { sessionSync: { updated: 1, removed: 2, created: 3, skipped: 0 } } as never;
+        });
+
+      const result = await made.service.applyEffectiveRange({
+        schoolId: 10, effectiveFrom: '2026-09-14', effectiveTo: '2026-09-30',
+      });
+
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(update).toHaveBeenCalledWith(1, { effectiveFrom: '2026-09-14', effectiveTo: '2026-09-30' });
+      expect(result).toMatchObject({ total: 3, applied: 1, unchanged: 1, failed: 1 });
+      expect(result.sessions).toEqual({ updated: 1, removed: 2, created: 3, skipped: 0 });
+      expect(result.results.find((r) => r.scheduleId === 3)).toMatchObject({ status: 'FAILED', message: 'Trùng ô lịch' });
+      // Mặc định chỉ tiết đang áp dụng.
+      expect(made.schedule.repo.find.mock.calls[0][0].where).toMatchObject({ schoolId: 10, isActive: true });
+    });
+
+    it('áp hiệu lực: từ > đến thì từ chối ngay, không đụng tiết nào', async () => {
+      const made = syncSetup([]);
+      made.schedule.repo.find = jest.fn();
+      await expect(made.service.applyEffectiveRange({
+        schoolId: 10, effectiveFrom: '2026-09-30', effectiveTo: '2026-09-14',
+      })).rejects.toThrow();
+      expect(made.schedule.repo.find).not.toHaveBeenCalled();
     });
 
     it('tiết đã qua ngày giữ nguyên giáo viên cũ, không bị ghi đè', async () => {
@@ -789,6 +874,19 @@ describe('TeachingScheduleService', () => {
 
       const inserted = session.repo.insert.mock.calls[0][0];
       expect(inserted.every((row: any) => row.date >= '2026-08-25')).toBe(true);
+    });
+
+    it('kéo "hiệu lực từ" sớm hơn thì sinh bù từ hôm nay, không lùi vào quá khứ', async () => {
+      const { service, session } = syncSetup([
+        scheduledSession(10, '2026-09-01'),
+      ]);
+
+      await service.update(1, { effectiveFrom: '2026-07-01' });
+
+      const inserted = session.repo.insert.mock.calls[0][0];
+      const dates = inserted.map((row: any) => row.date);
+      expect(dates).toContain('2026-08-25');
+      expect(dates.every((date: string) => date >= '2026-08-25')).toBe(true);
     });
 
     it('mẫu chưa sinh buổi nào thì sửa lịch không tự sinh buổi', async () => {
@@ -1492,6 +1590,126 @@ describe('TeachingSessionService', () => {
       (c: any[]) => c[0] === 'ss.status IN (:...statuses)',
     );
     expect(call[1].statuses).not.toContain(SessionStatus.CANCELLED);
+  });
+
+  describe('đổi thời gian buổi', () => {
+    /** Buổi chưa chấm công, giáo viên đã xác nhận lịch cũ. */
+    const setupUpdate = (extra: any = {}) => {
+      const ctx = makeSessionService();
+      const entity: any = {
+        id: 1,
+        teacherId: 5,
+        schoolId: 10,
+        schoolLocationId: 3,
+        classId: 7,
+        status: SessionStatus.SCHEDULED,
+        assignmentStatus: 'ASSIGNED',
+        date: '2026-09-01',
+        startTime: '07:30:00',
+        endTime: '09:00:00',
+        checkinAt: null,
+        checkoutAt: null,
+        lessonSubmittedAt: null,
+        confirmationStatus: 'CONFIRMED',
+        confirmedAt: new Date(),
+        ...extra,
+      };
+      ctx.session.repo.findOne = jest.fn().mockResolvedValue(entity);
+      // Các truy vấn trùng lịch trả undefined (không trùng); riêng truy vấn
+      // đọc lại buổi ở cuối `update()` mới cần một dòng dữ liệu.
+      ctx.session.qb.getRawOne.mockImplementation(async () => {
+        const calls = ctx.session.qb.andWhere.mock.calls;
+        const isReadBack = calls[calls.length - 1]?.[0] === 'ss.id = :id';
+        return isReadBack
+          ? { id: 1, date: '2026-09-01', status: 'SCHEDULED' }
+          : undefined;
+      });
+      return { ...ctx, entity };
+    };
+
+    it('buổi đã check-in thì không đổi được giờ (409)', async () => {
+      // check-in không đổi status, nên chỉ xét status là buổi này lọt lưới.
+      const { service } = setupUpdate({ checkinAt: new Date() });
+
+      await expect(
+        service.update(1, { startTime: '13:00', endTime: '14:30' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('buổi đã chấm công thì không đổi được ngày dạy (409)', async () => {
+      const { service } = setupUpdate({ status: SessionStatus.PRESENT });
+
+      await expect(
+        service.update(1, { date: '2026-09-02' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('gửi đúng giờ cũ thì không coi là đổi giờ, vẫn sửa được ghi chú', async () => {
+      const { service, session } = setupUpdate({
+        checkinAt: new Date(),
+      });
+
+      await service.update(1, { startTime: '07:30', note: 'Ghi chú mới' });
+
+      expect(session.repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ note: 'Ghi chú mới' }),
+      );
+    });
+
+    it('đổi giờ thì xác nhận của giáo viên về PENDING', async () => {
+      const { service, session } = setupUpdate();
+
+      await service.update(1, { startTime: '13:00', endTime: '14:30' });
+
+      expect(session.repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startTime: '13:00:00',
+          endTime: '14:30:00',
+          confirmationStatus: 'PENDING',
+          confirmedAt: null,
+        }),
+      );
+    });
+
+    it('đổi giờ thì báo giáo viên xác nhận lại lịch mới', async () => {
+      const { service } = setupUpdate();
+      const notify = jest
+        .spyOn(service as any, 'notifyConfirmationRequest')
+        .mockResolvedValue(undefined);
+
+      await service.update(1, { startTime: '13:00', endTime: '14:30' });
+
+      expect(notify).toHaveBeenCalledWith(
+        expect.objectContaining({ startTime: '13:00:00' }),
+        expect.objectContaining({ id: 5 }),
+        'rescheduled',
+      );
+    });
+
+    it('chỉ sửa ghi chú thì giữ nguyên xác nhận đã có', async () => {
+      const { service, session } = setupUpdate();
+
+      await service.update(1, { note: 'Đổi phòng học' });
+
+      expect(session.repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmationStatus: 'CONFIRMED' }),
+      );
+    });
+
+    it('buổi chưa có giáo viên thì không phải xác nhận lại', async () => {
+      const { service, session } = setupUpdate({
+        teacherId: null,
+        assignmentStatus: 'OPEN',
+        confirmationStatus: 'PENDING',
+        confirmedAt: null,
+      });
+
+      await service.update(1, { startTime: '13:00', endTime: '14:30' });
+
+      expect(session.repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmationStatus: 'PENDING' }),
+      );
+    });
   });
 
   describe('chấm công', () => {

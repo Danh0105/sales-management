@@ -17,6 +17,8 @@ export interface StockIssueItem {
     quantity: number;
     unit?: string | null;
     note?: string | null;
+    /** Nếu xuất từ thiết bị có sẵn trong kho — trỏ tới `WarehouseItem.id`. */
+    warehouseItemId?: number | null;
 }
 
 /**

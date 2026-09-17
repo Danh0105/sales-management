@@ -34,6 +34,10 @@ export class Employee {
   @Column({ unique: true, nullable: true })
   phone?: string;
 
+  /** Ảnh đại diện, đường dẫn tương đối `/uploads/avatars/...` — cùng kho với giáo viên. */
+  @Column({ name: 'avatar_url', type: 'varchar', length: 500, nullable: true })
+  avatarUrl?: string | null;
+
   @Column({ default: true })
   isActive?: boolean;
 
@@ -71,7 +75,7 @@ export class Employee {
   @OneToMany(() => DailyReport, (report) => report.employee)
   dailyReports!: DailyReport[];
 
-  @OneToMany(() => Notification, (noti) => noti.receiverId)
+  @OneToMany(() => Notification, (noti) => noti.receiver)
   notifications!: Notification[];
 
   @OneToMany(() => EmployeeRegion, (er) => er.employee)

@@ -11,6 +11,7 @@ import {
 import { Employee } from '../../employee/employee.entity';
 import { Suggest } from './suggest.entity';
 import { PaymentMethod } from '../enums/expense-payment-method.enum';
+import { FundSource } from '../enums/expense-fund-source.enum';
 
 const numericTransformer = {
     to: (value?: number | null) => value,
@@ -50,6 +51,19 @@ export class SuggestPaymentOrder {
         enum: PaymentMethod,
     })
     paymentMethod!: PaymentMethod;
+
+    /**
+     * Nguồn tiền: tiền mặt sẵn có ở công ty hay tiền trong tài khoản ngân
+     * hàng. Do Thủ quỹ chọn khi xác nhận đã xuất tiền (`confirmCashReleased`)
+     * — còn `null` từ lúc lập lệnh chi tới lúc đó, tránh hiểu nhầm giá trị
+     * mặc định là nguồn tiền đã được chọn thật.
+     */
+    @Column({
+        type: 'enum',
+        enum: FundSource,
+        nullable: true,
+    })
+    fundSource!: FundSource | null;
 
     @Column({ type: 'text', nullable: true })
     note?: string | null;

@@ -12,9 +12,12 @@ import {
     ValidationPipe,
     Query,
     Req,
+    UploadedFiles,
+    UseInterceptors,
 } from '@nestjs/common';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
-import { PolicyService } from './policy.service';
+import { MAX_CONTRACT_FILES, PolicyService } from './policy.service';
 import { CreatePolicyDto } from './dto/create-policy.dto';
 import { UpdatePolicyDto } from './dto/update-policy.dto';
 import { AdminUpdatePolicyDto } from './dto/admin-update.dto';
@@ -37,6 +40,43 @@ import { PolicyStatus } from './policy.enum';
 @Controller('policies')
 export class PolicyController {
     constructor(private readonly service: PolicyService) { }
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles('saleadmin', 'salesadmin', 'salesadmin_la')
+    /**
+     * Nhận nhiều PDF một lần. `AnyFilesInterceptor` để chấp nhận cả field
+     * `file` (FE cũ gửi một file) lẫn `files` (FE mới gửi nhiều) — không
+     * bắt FE đổi tên field để khỏi gãy bản đang chạy.
+     */
+    @UseInterceptors(AnyFilesInterceptor({
+        limits: { fileSize: 20 * 1024 * 1024, files: MAX_CONTRACT_FILES },
+    }))
+    @Post(':id/contract')
+    uploadContract(
+        @Param('id', ParseIntPipe) id: number,
+        @UploadedFiles() files: Express.Multer.File[] | undefined,
+        @Body('category') category: string | undefined,
+        @Req() req: Request,
+    ) {
+        return this.service.uploadContract(
+            id,
+            files,
+            {
+                id: req.user!.id,
+                name: req.user!.name,
+            },
+            category,
+        );
+    }
+
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles('saleadmin', 'salesadmin', 'salesadmin_la')
+    @Delete(':id/contract/:fileId')
+    removeContract(
+        @Param('id', ParseIntPipe) id: number,
+        @Param('fileId') fileId: string,
+    ) {
+        return this.service.removeContract(id, fileId);
+    }
     // ================= ADMIN =================
     @UseGuards(JwtAuthGuard, RolesGuard)
     @Roles('director', 'director_la', 'saleadmin', 'salesadmin_la')

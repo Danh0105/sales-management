@@ -130,12 +130,13 @@ export class QueryTeachingSchedulesDto {
 
     /**
      * Thu hẹp về một điểm trường (cơ sở) của trường đã chọn — trường nhiều cơ
-     * sở thì mỗi cơ sở có thời khoá biểu riêng.
+     * sở thì mỗi cơ sở có thời khoá biểu riêng. `0` = chỉ lịch của trường chính
+     * (lớp không gắn điểm trường).
      */
     @IsOptional()
     @Type(() => Number)
     @IsInt()
-    @Min(1)
+    @Min(0)
     schoolLocationId?: number;
 
     @IsOptional()
@@ -217,4 +218,42 @@ export class RemoveSchedulesBySchoolDto {
     @IsInt()
     @Min(1)
     subjectId?: number;
+}
+
+/**
+ * Áp một khoảng hiệu lực cho **mọi tiết** của một trường (tuỳ chọn: một
+ * điểm trường / một môn) trong một lần gọi — thay vì sửa từng tiết trên TKB.
+ */
+export class ApplyEffectiveRangeDto {
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    schoolId!: number;
+
+    /** Bỏ trống = mọi điểm trường; 0 = chỉ trường chính (tiết chưa gắn điểm). */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(0)
+    schoolLocationId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    subjectId?: number;
+
+    @IsCalendarDate()
+    effectiveFrom!: string;
+
+    /** Bỏ trống hoặc null = không thời hạn. */
+    @IsOptional()
+    @IsCalendarDate()
+    effectiveTo?: string | null;
+
+    /** Mặc định chỉ áp cho tiết đang áp dụng; bật để áp cả tiết đã tắt. */
+    @IsOptional()
+    @Transform(toBool)
+    @IsBoolean()
+    includeInactive?: boolean;
 }

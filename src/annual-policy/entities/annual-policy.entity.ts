@@ -53,6 +53,21 @@ export class AnnualPolicy {
     @Column({ nullable: true })
     reviewedByName?: string;
 
+    @Column({ name: 'contract_file_url', nullable: true })
+    contractFileUrl?: string;
+
+    @Column({ name: 'contract_file_name', nullable: true })
+    contractFileName?: string;
+
+    @Column({ name: 'contract_uploaded_by_id', nullable: true })
+    contractUploadedById?: number;
+
+    @Column({ name: 'contract_uploaded_by_name', nullable: true })
+    contractUploadedByName?: string;
+
+    @Column({ name: 'contract_uploaded_at', type: 'timestamptz', nullable: true })
+    contractUploadedAt?: Date;
+
     @CreateDateColumn({ name: 'created_at' })
     createdAt!: Date;
 

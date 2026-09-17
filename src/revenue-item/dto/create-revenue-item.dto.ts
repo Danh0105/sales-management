@@ -69,6 +69,11 @@ export class CreateRevenueItemDto {
   invoiceOther?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  invoiceNumber?: string;
+
+  @IsOptional()
   @IsDateString()
   invoiceDate?: string;
 

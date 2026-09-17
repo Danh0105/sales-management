@@ -344,31 +344,53 @@ export class SchoolsService {
             order: { id: 'DESC' },
         });
     }
+    /**
+     * Tìm trường "thông minh" hơn ILIKE đơn giản trước đây:
+     * - Không phân biệt dấu tiếng Việt (dùng extension `unaccent` của Postgres),
+     *   gõ "quang trung" vẫn ra "THCS Quang Trung".
+     * - Tách từ khoá thành nhiều từ, mỗi từ phải khớp ít nhất 1 cột (AND giữa
+     *   các từ, OR giữa các cột) — gõ "thcs trung" (thiếu chữ, sai thứ tự) vẫn
+     *   ra "THCS Quang Trung" thay vì phải gõ đúng liền một cụm.
+     * - Khớp trọn tên trường được xếp lên đầu danh sách.
+     */
     async search(keyword: string) {
-        return this.schoolRepo
+        const words = keyword.trim().split(/\s+/).filter(Boolean);
+        if (!words.length) {
+            return this.schoolRepo.find({
+                relations: ['employee', 'ward', 'subjects'],
+                order: { id: 'DESC' },
+            });
+        }
+
+        const qb = this.schoolRepo
             .createQueryBuilder('school')
             .leftJoinAndSelect('school.employee', 'employee')
             .leftJoinAndSelect('school.ward', 'ward')
-            .leftJoinAndSelect('school.subjects', 'subjects')
-            .where('school.name ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orWhere('school.tax_code ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orWhere('school.phone ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orWhere('school.address ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orWhere('school.representative ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orWhere('employee.name ILIKE :keyword', {
-                keyword: `%${keyword}%`,
-            })
-            .orderBy('school.id', 'DESC')
+            .leftJoinAndSelect('school.subjects', 'subjects');
+
+        words.forEach((word, i) => {
+            const p = `kw${i}`;
+            qb.andWhere(
+                new Brackets((sub) => {
+                    sub
+                        .where(`unaccent(school.name) ILIKE unaccent(:${p})`, { [p]: `%${word}%` })
+                        .orWhere(`unaccent(school.address) ILIKE unaccent(:${p})`, { [p]: `%${word}%` })
+                        .orWhere(`unaccent(school.representative) ILIKE unaccent(:${p})`, { [p]: `%${word}%` })
+                        .orWhere(`school.tax_code ILIKE :${p}`, { [p]: `%${word}%` })
+                        .orWhere(`school.phone ILIKE :${p}`, { [p]: `%${word}%` })
+                        .orWhere(`unaccent(employee.name) ILIKE unaccent(:${p})`, { [p]: `%${word}%` });
+                }),
+            );
+        });
+
+        return qb
+            .addSelect(
+                `CASE WHEN unaccent(school.name) ILIKE unaccent(:fullKeyword) THEN 0 ELSE 1 END`,
+                'name_match_rank',
+            )
+            .setParameter('fullKeyword', `%${keyword.trim()}%`)
+            .orderBy('name_match_rank', 'ASC')
+            .addOrderBy('school.id', 'DESC')
             .getMany();
     }
 

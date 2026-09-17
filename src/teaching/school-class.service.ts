@@ -1,3 +1,4 @@
+import { TeachingScope } from './teaching-roles';
 import {
     BadRequestException,
     ConflictException,
@@ -96,16 +97,29 @@ export class SchoolClassService {
         return this.findOne(saved.id);
     }
 
-    async findAll(query: QuerySchoolClassesDto) {
+    async findAll(
+        query: QuerySchoolClassesDto,
+        scope: TeachingScope = { kind: 'manage' },
+    ) {
         const page = query.page ?? 1;
         const limit = Math.min(query.limit ?? 50, MAX_LIMIT);
 
         const qb = this.buildClassQuery();
 
+        // Kinh doanh chỉ thấy lớp của trường mình phụ trách — dữ liệu tham
+        // chiếu để đọc thời khoá biểu, không phải toàn bộ danh mục lớp.
+        if (scope.kind === 'own-schools') {
+            qb.andWhere('sc.employee_id = :ownerId', { ownerId: scope.employeeId });
+        }
+
         if (query.schoolId) {
             qb.andWhere('c.schoolId = :schoolId', { schoolId: query.schoolId });
         }
-        if (query.schoolLocationId) {
+        // 0 = trường chính: lớp chưa gắn điểm trường. Lớp của các cơ sở là phạm
+        // vi riêng nên không được lọt vào khi đang xem trường chính.
+        if (query.schoolLocationId === 0) {
+            qb.andWhere('c.schoolLocationId IS NULL');
+        } else if (query.schoolLocationId) {
             qb.andWhere('c.schoolLocationId = :schoolLocationId', {
                 schoolLocationId: query.schoolLocationId,
             });

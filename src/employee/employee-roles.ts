@@ -3,6 +3,40 @@ import { AuthUser } from '../type/auth-user.type';
 import { HR_ROLE, TEACHER_ROLES } from '../teaching/teaching-roles';
 
 /**
+ * Role dành cho tài khoản dev/test — được TỰ chọn bất kỳ tổ hợp role nào
+ * trong `ALL_BUSINESS_ROLES` cho chính mình qua `PATCH /employees/me/dev-roles`
+ * (xem `EmployeeController.setDevRoles`). Không cấp role này cho tài khoản
+ * thật; đây không phải quyền "toàn năng" tách biệt khỏi hệ thống guard — tài
+ * khoản vẫn chỉ có đúng các role đang chọn, kiểm tra như mọi tài khoản khác.
+ */
+export const DEV_ROLE = 'dev';
+
+/** Toàn bộ role nghiệp vụ hợp lệ trong hệ thống — dùng làm whitelist khi tài
+ * khoản dev tự chọn role cho mình. Cập nhật danh sách này khi thêm role mới. */
+export const ALL_BUSINESS_ROLES = [
+  'director',
+  'director_la',
+  'nhansu',
+  'giaovu',
+  'saleadmin',
+  'salesadmin',
+  'salesadmin_la',
+  'ketoan_congno',
+  'ketoan_truong',
+  'thuquy',
+  'ky_thuat',
+  'sales',
+  'troly_gd',
+  'accountant',
+  'giaovien_congty',
+  'giaovien_ctv',
+];
+
+export function isDevAccount(user?: AuthUser): boolean {
+  return (user?.roles ?? []).includes(DEV_ROLE);
+}
+
+/**
  * Được tạo/sửa/xoá tài khoản nhân viên. Cố ý hẹp: tạo tài khoản là cấp quyền
  * đăng nhập, và `roles` gửi kèm quyết định người đó thấy được những gì — ai gọi
  * được endpoint này thì tự nâng quyền cho bất kỳ ai được.

@@ -13,6 +13,7 @@ import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-toke
 import { NotificationService } from '../notifications/services/notification.service';
 import { NotificationType } from '../notifications/enums/notification-type.enum';
 import fixVietnamese from '../utils/fixVietnamese';
+import { AnnualPolicyContractStorageService } from './annual-policy-contract-storage.service';
 
 @Injectable()
 export class AnnualPolicyService {
@@ -29,6 +30,7 @@ export class AnnualPolicyService {
         private readonly fcmService: FcmService,
         private readonly employeeFcmTokenService: EmployeeFcmTokenService,
         private readonly notificationService: NotificationService,
+        private readonly contractStorage: AnnualPolicyContractStorageService,
     ) { }
 
     async create(dto: CreateAnnualPolicyDto, creator: { id: number; name?: string }) {
@@ -101,6 +103,39 @@ export class AnnualPolicyService {
         });
 
         return saved;
+    }
+
+    async uploadContract(
+        id: number,
+        file: Express.Multer.File | undefined,
+        uploader: { id: number; name?: string },
+    ) {
+        const policy = await this.repo.findOne({
+            where: { id },
+            relations: ['school'],
+        });
+
+        if (!policy) {
+            throw new NotFoundException('Chính sách năm không tồn tại');
+        }
+
+        const previousUrl = policy.contractFileUrl;
+        const stored = await this.contractStorage.store(file);
+
+        try {
+            policy.contractFileUrl = stored.url;
+            policy.contractFileName = stored.originalName;
+            policy.contractUploadedById = uploader.id;
+            policy.contractUploadedByName = uploader.name;
+            policy.contractUploadedAt = new Date();
+
+            const saved = await this.repo.save(policy);
+            await this.contractStorage.remove(previousUrl);
+            return saved;
+        } catch (error) {
+            await this.contractStorage.remove(stored.url);
+            throw error;
+        }
     }
 
     async review(

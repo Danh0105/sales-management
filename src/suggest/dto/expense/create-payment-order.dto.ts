@@ -20,6 +20,9 @@ export class CreatePaymentOrderDto {
     @IsEnum(PaymentMethod)
     paymentMethod!: PaymentMethod;
 
+    // Nguồn tiền (fundSource) do Thủ quỹ chọn khi xác nhận xuất tiền, không
+    // còn chọn ở bước lập lệnh chi — xem ConfirmCashReleasedDto.
+
     @IsOptional()
     @IsString()
     note?: string;

@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+    BadRequestException,
+    ConflictException,
+    Injectable,
+    NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 
@@ -316,8 +321,35 @@ export class SubjectsService {
         return this.subjectRepo.save(subject);
     }
 
+    /**
+     * Xoá môn học — **chặn khi còn lịch dạy tham chiếu**.
+     *
+     * FK `teaching_schedules.subject_id` / `teaching_sessions.subject_id` là
+     * ON DELETE CASCADE: xoá môn là xoá sạch mẫu lịch và mọi buổi dạy (kể cả
+     * đã check-in, đã báo giảng) mà không có gì cản. Ngày 14/09/2026 một nhân
+     * viên kinh doanh xoá 2 môn của THCS Quang Trung để "làm lại" chính sách
+     * năm mới và kéo theo toàn bộ TKB + công của 2 giáo viên. Xoá mẫu lịch
+     * đã có chốt "đã chấm công thì không xoá" — xoá môn không được đi vòng
+     * qua chốt đó.
+     */
     async remove(id: number) {
         const subject = await this.findOne(id);
+
+        const [{ schedules, sessions }] = await this.subjectRepo.manager.query(
+            `SELECT
+               (SELECT count(*) FROM teaching_schedules WHERE subject_id = $1)::int AS schedules,
+               (SELECT count(*) FROM teaching_sessions  WHERE subject_id = $1)::int AS sessions`,
+            [id],
+        );
+
+        if (schedules > 0 || sessions > 0) {
+            throw new ConflictException(
+                `Môn "${subject.name}" đang có ${schedules} mẫu lịch dạy và ${sessions} buổi dạy. ` +
+                    'Xoá môn sẽ xoá theo toàn bộ lịch và công của giáo viên — ' +
+                    'hãy xoá/chuyển lịch dạy sang môn khác trước, hoặc dùng chức năng gộp môn.',
+            );
+        }
+
         return this.subjectRepo.remove(subject);
     }
 

@@ -1,10 +1,11 @@
 // dto/create-suggest.dto.ts
-import { IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches } from 'class-validator';
+import { IsArray, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
+import { RequestedEquipmentItemDto, parseJsonArray } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
     @IsString()
@@ -82,4 +83,13 @@ export class CreateSuggestDto {
     @IsString()
     @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
     schoolYear?: string;
+
+    /** Danh sách thiết bị mong muốn — chỉ áp dụng khi `requestKind = EQUIPMENT`. */
+    @IsOptional()
+    @Transform(parseJsonArray)
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({ each: true })
+    @Type(() => RequestedEquipmentItemDto)
+    items?: RequestedEquipmentItemDto[];
 }
