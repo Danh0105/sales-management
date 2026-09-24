@@ -24,6 +24,18 @@ export class ExpensePeriodsController {
         );
     }
 
+    // DUPLICATE — nhân bản kỳ chi phí kèm toàn bộ dữ liệu thu chi
+    @Post(':id/duplicate')
+    duplicate(
+        @Param('id') id: string,
+        @Body() body: { name?: string },
+    ) {
+        return this.expensePeriodsService.duplicate(
+            Number(id),
+            body,
+        );
+    }
+
     @Get()
     findAll(@Query() query: any) {
         return this.expensePeriodsService.findAll(

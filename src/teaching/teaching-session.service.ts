@@ -29,6 +29,7 @@ import { SchoolClassService } from './school-class.service';
 import { EntityManager } from 'typeorm';
 import {
   BulkCheckAttendanceDto,
+  BulkAssignTeachingSessionDto,
   ApplyTeachingSessionDto,
   AssignTeachingSessionDto,
   CheckAttendanceDto,
@@ -38,6 +39,7 @@ import {
   CreateTeachingSessionDto,
   DeclineTeachingSessionDto,
   QueryAttendanceSummaryDto,
+  QueryTravelReviewDto,
   QueryTeachingSessionsDto,
   NotifyTeachingScheduleDto,
   SubmitLessonDto,
@@ -107,20 +109,30 @@ import {
 } from '../notifications/constants/teaching-session-decline.constant';
 import { Employee } from '../employee/employee.entity';
 import { NotifyService } from '../notify-zalo/notify.service';
-import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
+import {
+  buildMissingAllowanceReport,
+  diagnoseGasAllowance,
+  FuelAllowanceTierService,
+  homeAtDate,
+  type MissingAllowanceEntry,
+} from './fuel-allowance-tier.service';
 import { effectiveRatePerPeriod } from './teaching-rate.util';
 import { findTeachingManagers as findTeachingManagersUtil } from './teaching-managers.util';
 import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
 import { haversineKm } from './teacher-matching.service';
+import {
+  buildTravelBlocks,
+  type LatLngPoint,
+} from './teacher-travel.util';
 import { LessonImage } from './lesson-image.type';
 import {
   LESSON_REPORT_IMAGE_TYPE,
   LessonImageEntity,
 } from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
-import { TeachingScope } from './teaching-roles';
+import { TEACHER_STAFF_ROLE, TeachingScope } from './teaching-roles';
 import {
   TEACHING_LESSON_REPORT_ALERT_KIND,
   TEACHING_LESSON_REPORT_ALERT_MANAGER_TITLE,
@@ -1002,6 +1014,142 @@ export class TeachingSessionService {
   }
 
   async assignTeacher(id: number, dto: AssignTeachingSessionDto) {
+    await this.assignTeacherCore(id, dto);
+    return this.findOne(id);
+  }
+
+  /**
+   * Đổi/gán giáo viên cho **nhiều buổi cùng lúc** — màn Chấm công chọn nhiều
+   * tiết rồi đổi giáo viên hàng loạt. Buổi nào lỗi bị bỏ qua và báo lại
+   * riêng, các buổi còn lại vẫn thực hiện — cùng cách làm với
+   * `applyEffectiveRange` của mẫu lịch, một tiết kẹt không nên chặn cả lượt đổi.
+   *
+   * Tự động **đổi chéo** khi giáo viên đích đang bận đúng khung giờ đó (ví
+   * dụ 2 giáo viên dạy song song cùng giờ ở 2 lớp khác nhau — rất phổ biến ở
+   * lịch công ty): thay vì chặn 409 "trùng lịch", buổi đang chiếm chỗ của
+   * giáo viên đích được đẩy ngược về giáo viên nguồn. Không có buổi nào
+   * chiếm chỗ thì chỉ là gán một chiều như cũ.
+   */
+  async bulkAssignTeacher(dto: BulkAssignTeachingSessionDto) {
+    const uniqueIds = [...new Set(dto.sessionIds)];
+
+    const results: {
+      sessionId: number;
+      status: 'UPDATED' | 'FAILED';
+      message?: string;
+      swapped?: boolean;
+    }[] = [];
+
+    for (const sessionId of uniqueIds) {
+      try {
+        const swapped = await this.assignOrSwapTeacher(
+          sessionId,
+          dto.teacherId,
+        );
+        results.push({ sessionId, status: 'UPDATED', swapped });
+      } catch (error) {
+        const message =
+          (error as any)?.response?.message ??
+          (error as Error)?.message ??
+          String(error);
+        results.push({
+          sessionId,
+          status: 'FAILED',
+          message: Array.isArray(message) ? message.join(', ') : message,
+        });
+      }
+    }
+
+    return {
+      total: uniqueIds.length,
+      updated: results.filter((r) => r.status === 'UPDATED').length,
+      failed: results.filter((r) => r.status === 'FAILED').length,
+      swapped: results.filter((r) => r.swapped).length,
+      results,
+    };
+  }
+
+  /**
+   * Gán 1 buổi cho giáo viên đích; nếu đích đang có buổi khác trùng đúng
+   * khung giờ đó thì đẩy buổi đó ngược về giáo viên nguồn trước (đổi chéo)
+   * rồi mới gán — tránh báo trùng lịch giả khi bản chất là 2 người tráo chỗ
+   * cho nhau. Trả về `true` nếu có đổi chéo, `false` nếu chỉ gán một chiều.
+   */
+  private async assignOrSwapTeacher(
+    id: number,
+    targetTeacherId: number,
+  ): Promise<boolean> {
+    const session = await this.getSessionWithSchool(id);
+    if (CHECKED_STATUSES.includes(session.status)) {
+      throw new ConflictException(
+        'Buổi đã chấm công, không thể đổi giáo viên hoặc đơn giá đã chốt',
+      );
+    }
+    if (session.teacherId === targetTeacherId) return false;
+
+    const targetTeacher = await this.teacherRepo.findOne({
+      where: { id: targetTeacherId },
+    });
+    if (!targetTeacher || !targetTeacher.isActive) {
+      throw new BadRequestException(
+        'Giáo viên không tồn tại hoặc đã ngừng hoạt động',
+      );
+    }
+
+    const conflictSession = await this.sessionRepo
+      .createQueryBuilder('c')
+      .where('c.teacherId = :teacherId', { teacherId: targetTeacherId })
+      .andWhere('c.id != :sessionId', { sessionId: id })
+      .andWhere('c.date = :date', { date: toDateString(session.date) })
+      .andWhere('c.assignmentStatus = :assigned', {
+        assigned: AssignmentStatus.ASSIGNED,
+      })
+      .andWhere('c.status IN (:...statuses)', {
+        statuses: ACTIVE_SESSION_STATUSES,
+      })
+      .andWhere('c.startTime < :endTime', { endTime: session.endTime })
+      .andWhere('c.endTime > :startTime', { startTime: session.startTime })
+      .getOne();
+
+    if (!conflictSession) {
+      await this.assignTeacherCore(id, { teacherId: targetTeacherId });
+      return false;
+    }
+
+    if (CHECKED_STATUSES.includes(conflictSession.status)) {
+      throw new ConflictException(
+        `${targetTeacher.name} đang bận buổi khác đã chấm công cùng khung giờ, không đổi chéo được`,
+      );
+    }
+
+    // Buổi OPEN (chưa có giáo viên) thì không có ai để nhận lại buổi đang
+    // chiếm chỗ của giáo viên đích — đây là trùng lịch thật, không tráo được.
+    if (session.teacherId == null) {
+      throw new ConflictException(
+        `${targetTeacher.name} bị trùng lịch dạy đã phân công`,
+      );
+    }
+
+    const sourceTeacherId = session.teacherId;
+    // `override: true` vì lúc này cả 2 buổi tạm thời vẫn đứng tên người cũ —
+    // kiểm tra trùng lịch bình thường sẽ thấy đúng cặp đang tráo và chặn
+    // nhầm; đã tự xác định đây là tráo chỗ hợp lệ ở bước tìm `conflictSession`.
+    await this.assignTeacherCore(conflictSession.id, {
+      teacherId: sourceTeacherId,
+      override: true,
+    });
+    await this.assignTeacherCore(id, {
+      teacherId: targetTeacherId,
+      override: true,
+    });
+    return true;
+  }
+
+  /** Logic gán/đổi giáo viên cho một buổi — dùng chung bởi `assignTeacher` và `bulkAssignTeacher`. */
+  private async assignTeacherCore(
+    id: number,
+    dto: { teacherId: number; override?: boolean },
+  ): Promise<void> {
     const session = await this.getSessionWithSchool(id);
     if (CHECKED_STATUSES.includes(session.status)) {
       throw new ConflictException(
@@ -1080,8 +1228,6 @@ export class TeachingSessionService {
     if (updated) {
       await this.notifyConfirmationRequest(updated, teacher);
     }
-
-    return this.findOne(id);
   }
 
   /**
@@ -1871,6 +2017,382 @@ export class TeachingSessionService {
   }
 
   /**
+   * Rà soát quãng đường di chuyển của giáo viên công ty: mỗi ngày đi những
+   * điểm nào, mỗi chặng bao nhiêu km, phụ cấp xăng bao nhiêu, và những điểm
+   * cần kiểm tra lại (không check-in, check-in/check-out ngoài bán kính, lượt
+   * không chốt được phụ cấp, chặng không tính được km).
+   *
+   * Tính cả buổi đã tới ngày mà chưa chấm công (đánh dấu `UNCHECKED`) để thấy
+   * đủ lộ trình trước khi chốt. Phần chỉ gồm buổi đã chấm (`checked*`) dùng
+   * chung `buildTravelBlocks` với bảng công nên luôn khớp tab Tổng hợp.
+   */
+  async travelReview(query: QueryTravelReviewDto) {
+    assertDateOrder(
+      query.fromDate,
+      query.toDate,
+      'fromDate phải nhỏ hơn hoặc bằng toDate',
+    );
+
+    const qb = this.sessionRepo
+      .createQueryBuilder('ss')
+      .innerJoin('ss.teacher', 't')
+      .leftJoin('t.employee', 'e')
+      .leftJoin('ss.school', 'sc')
+      .leftJoin('ss.schoolLocation', 'sl')
+      .leftJoin('ss.subject', 'sub')
+      .leftJoin('ss.class', 'cl')
+      .select([
+        'ss.id AS "id"',
+        'ss.teacherId AS "teacherId"',
+        't.name AS "teacherName"',
+        't.latitude AS "teacherLatitude"',
+        't.longitude AS "teacherLongitude"',
+        'ss.schoolId AS "schoolId"',
+        'sc.name AS "schoolName"',
+        'sc.latitude AS "schoolLatitude"',
+        'sc.longitude AS "schoolLongitude"',
+        'ss.schoolLocationId AS "schoolLocationId"',
+        'sl.name AS "locationName"',
+        'sl.latitude AS "locationLatitude"',
+        'sl.longitude AS "locationLongitude"',
+        'sub.name AS "subjectName"',
+        'cl.name AS "className"',
+        'ss.date AS "date"',
+        'ss.startTime AS "startTime"',
+        'ss.endTime AS "endTime"',
+        'ss.periods AS "periods"',
+        'ss.gasAllowance AS "gasAllowance"',
+        'ss.distanceToSchoolKm AS "distanceToSchoolKm"',
+        'ss.checkinAt AS "checkinAt"',
+        'ss.checkinLatitude AS "checkinLatitude"',
+        'ss.checkinLongitude AS "checkinLongitude"',
+        'ss.checkinAccuracy AS "checkinAccuracy"',
+        'ss.checkinDistance AS "checkinDistance"',
+        'ss.checkinOutOfRange AS "checkinOutOfRange"',
+        'ss.checkoutAt AS "checkoutAt"',
+        'ss.checkoutDistance AS "checkoutDistance"',
+        'ss.checkoutOutOfRange AS "checkoutOutOfRange"',
+        'ss.status AS "status"',
+      ])
+      .where('ss.date >= :fromDate', { fromDate: query.fromDate })
+      .andWhere('ss.date <= :toDate', { toDate: query.toDate })
+      // Buổi đã chấm Có mặt + buổi đã tới ngày mà chưa chấm công (giáo viên
+      // nhiều khả năng đã đi, chỉ là Nhân sự chưa chấm). Buổi tương lai chưa
+      // diễn ra nên không có quãng đường; vắng/nghỉ/huỷ thì không đi.
+      .andWhere(
+        `(ss.status = :present
+          OR (ss.status = :scheduled AND ss.date <= CURRENT_DATE))`,
+        {
+          present: SessionStatus.PRESENT,
+          scheduled: SessionStatus.SCHEDULED,
+        },
+      )
+      // Có phụ cấp = đang được trả tiền xăng; giáo viên công ty mà KHÔNG có
+      // phụ cấp là lượt bị sót tiền — cả hai đều phải hiện ra để rà soát.
+      .andWhere(
+        '(ss.gasAllowance IS NOT NULL OR :staffRole = ANY(e.roles))',
+        { staffRole: TEACHER_STAFF_ROLE },
+      )
+      .orderBy('ss.teacherId', 'ASC')
+      .addOrderBy('ss.date', 'ASC')
+      .addOrderBy('ss.startTime', 'ASC')
+      .addOrderBy('ss.id', 'ASC');
+
+    if (query.teacherId) {
+      qb.andWhere('ss.teacherId = :teacherId', { teacherId: query.teacherId });
+    }
+
+    const [rawRows, tiers] = await Promise.all([
+      qb.getRawMany(),
+      this.fuelAllowanceTierService.findAll(),
+    ]);
+    const rows = rawRows.map((row) => ({
+      ...row,
+      date: toDateString(row.date) as string,
+    }));
+    const coordsOf = await this.loadTravelPlaceCoords(rows);
+    // Nhà có hiệu lực theo từng ngày (đổi vị trí có hiệu lực từ ngày duyệt) —
+    // xem lại tháng cũ phải thấy lộ trình từ nhà cũ, không phải nhà hiện tại.
+    const timelines = await this.fuelAllowanceTierService.loadLocationTimelines([
+      ...new Set(rows.map((row) => Number(row.teacherId))),
+    ]);
+    const blocks = buildTravelBlocks(rows, coordsOf);
+
+    // Lộ trình riêng của các buổi ĐÃ chấm công — đúng con số bảng công đang
+    // trả (tab Tổng hợp). Phải dựng lại chứ không lọc từ `blocks`: bỏ bớt
+    // điểm dừng thì chặng liên trường phía sau cũng đổi điểm xuất phát.
+    const checkedTotals = new Map<number, { km: number; fuel: number }>();
+    for (const block of buildTravelBlocks(
+      rows.filter((row) => row.status === SessionStatus.PRESENT),
+      coordsOf,
+    )) {
+      if (!block.counted) continue;
+      const entry = checkedTotals.get(block.teacherId) ?? { km: 0, fuel: 0 };
+      entry.km += block.distanceKm ?? 0;
+      entry.fuel += block.gasAllowance ?? 0;
+      checkedTotals.set(block.teacherId, entry);
+    }
+
+    const round2 = (value: number) => Math.round(value * 100) / 100;
+    const homeOf = (row: {
+      teacherLatitude: unknown;
+      teacherLongitude: unknown;
+    }): LatLngPoint | null => {
+      const lat = this.nullableNumber(row.teacherLatitude);
+      const lng = this.nullableNumber(row.teacherLongitude);
+      if (lat == null || lng == null || (lat === 0 && lng === 0)) return null;
+      return { lat, lng };
+    };
+    const homeOnDate = (
+      row: Record<string, any>,
+      date: string,
+    ): LatLngPoint | null => {
+      const home = homeAtDate(
+        timelines.get(Number(row.teacherId)) ?? [],
+        { latitude: row.teacherLatitude, longitude: row.teacherLongitude },
+        date,
+      );
+      return homeOf({
+        teacherLatitude: home.latitude,
+        teacherLongitude: home.longitude,
+      });
+    };
+
+    type TravelStop = ReturnType<typeof toStop>;
+    type TravelDay = {
+      date: string;
+      /** Nhà có hiệu lực vào ngày này — điểm xuất phát của lộ trình. */
+      home: LatLngPoint | null;
+      totalDistanceKm: number;
+      fuelAllowanceAmount: number;
+      stops: TravelStop[];
+    };
+    type TravelTeacher = {
+      teacherId: number;
+      teacherName: string;
+      home: LatLngPoint | null;
+      totalDistanceKm: number;
+      fuelAllowanceAmount: number;
+      /** Phần đã chấm công — khớp tab Tổng hợp. */
+      checkedDistanceKm: number;
+      checkedFuelAllowanceAmount: number;
+      flaggedStops: number;
+      uncheckedSessions: number;
+      days: TravelDay[];
+    };
+
+    const missingEntries: MissingAllowanceEntry[] = [];
+    let needsRecomputeSessions = 0;
+
+    const toStop = (block: (typeof blocks)[number]) => {
+      const first = block.rows[0];
+      const last = block.rows[block.rows.length - 1];
+      const checkinRow = block.rows.find((row) => row.checkinAt);
+      const uncheckedCount = block.rows.filter(
+        (row) => row.status === SessionStatus.SCHEDULED,
+      ).length;
+      const flags: string[] = [];
+      if (uncheckedCount > 0) flags.push('UNCHECKED');
+      // Lượt không có phụ cấp: nói rõ thiếu gì để người dùng bổ sung đúng chỗ.
+      const diagnosis = block.counted
+        ? null
+        : diagnoseGasAllowance({
+            teacher: (() => {
+              const home = homeOnDate(first, block.date);
+              return { latitude: home?.lat ?? null, longitude: home?.lng ?? null };
+            })(),
+            school: {
+              latitude: first.schoolLatitude,
+              longitude: first.schoolLongitude,
+            },
+            location:
+              first.schoolLocationId != null
+                ? {
+                    latitude: first.locationLatitude,
+                    longitude: first.locationLongitude,
+                  }
+                : null,
+            tiers,
+          });
+      if (diagnosis) {
+        flags.push('NOT_COUNTED');
+        missingEntries.push({
+          teacherId: block.teacherId,
+          teacherName: String(first.teacherName ?? ''),
+          schoolId: Number(first.schoolId),
+          schoolName: first.schoolName ?? null,
+          schoolLocationId: this.nullableNumber(first.schoolLocationId),
+          locationName: first.locationName ?? null,
+          diagnosis,
+          sessions: block.rows.length,
+        });
+        // Đủ dữ liệu rồi, chỉ là buổi được tạo trước khi bổ sung → chạy tính lại.
+        if (diagnosis.missingReasons.length === 0) {
+          needsRecomputeSessions += block.rows.length;
+        }
+      }
+      if (block.counted && block.distanceKm == null) flags.push('NO_DISTANCE');
+      if (!checkinRow) flags.push('NO_CHECKIN');
+      if (block.rows.some((row) => row.checkinOutOfRange === true)) {
+        flags.push('CHECKIN_OUT_OF_RANGE');
+      }
+      if (block.rows.some((row) => row.checkoutOutOfRange === true)) {
+        flags.push('CHECKOUT_OUT_OF_RANGE');
+      }
+
+      return {
+        placeKey: block.placeKey,
+        schoolId: Number(first.schoolId),
+        schoolName: first.schoolName as string | null,
+        schoolLocationId: this.nullableNumber(first.schoolLocationId),
+        locationName: (first.locationName as string | null) ?? null,
+        coords: block.coords,
+        startTime: first.startTime as string,
+        endTime: last.endTime as string,
+        periods: block.rows.reduce(
+          (sum, row) => sum + (this.nullableNumber(row.periods) ?? 1),
+          0,
+        ),
+        sessions: block.rows.map((row) => ({
+          id: Number(row.id),
+          startTime: row.startTime as string,
+          endTime: row.endTime as string,
+          subjectName: (row.subjectName as string | null) ?? null,
+          className: (row.className as string | null) ?? null,
+        })),
+        /** Số tiết trong lượt chưa được chấm công. */
+        uncheckedSessions: uncheckedCount,
+        counted: block.counted,
+        gasAllowance: block.gasAllowance,
+        /**
+         * Chỉ có ở lượt không có phụ cấp. Rỗng = đã đủ dữ liệu, bấm "Tính lại
+         * phụ cấp" là điền được.
+         */
+        missingReasons: diagnosis?.missingReasons ?? null,
+        /** Km nhà → trường tính theo toạ độ hiện tại (để đối chiếu bậc). */
+        diagnosedDistanceKm: diagnosis?.distanceToSchoolKm ?? null,
+        distanceKm: block.distanceKm,
+        distanceSource: block.distanceSource,
+        checkin: checkinRow
+          ? {
+              at: checkinRow.checkinAt as Date,
+              latitude: this.nullableNumber(checkinRow.checkinLatitude),
+              longitude: this.nullableNumber(checkinRow.checkinLongitude),
+              accuracy: this.nullableNumber(checkinRow.checkinAccuracy),
+              distanceM: this.nullableNumber(checkinRow.checkinDistance),
+            }
+          : null,
+        flags,
+      };
+    };
+
+    const byTeacher = new Map<number, TravelTeacher>();
+    const teacherEntry = (row: {
+      teacherId: unknown;
+      teacherName: unknown;
+      teacherLatitude: unknown;
+      teacherLongitude: unknown;
+    }): TravelTeacher => {
+      const teacherId = Number(row.teacherId);
+      let entry = byTeacher.get(teacherId);
+      if (!entry) {
+        entry = {
+          teacherId,
+          teacherName: String(row.teacherName ?? ''),
+          home: homeOf(row),
+          totalDistanceKm: 0,
+          fuelAllowanceAmount: 0,
+          checkedDistanceKm: 0,
+          checkedFuelAllowanceAmount: 0,
+          flaggedStops: 0,
+          uncheckedSessions: 0,
+          days: [],
+        };
+        byTeacher.set(teacherId, entry);
+      }
+      return entry;
+    };
+
+    for (const block of blocks) {
+      const teacher = teacherEntry(block.rows[0]);
+      let day = teacher.days[teacher.days.length - 1];
+      if (!day || day.date !== block.date) {
+        day = {
+          date: block.date,
+          home: homeOnDate(block.rows[0], block.date),
+          totalDistanceKm: 0,
+          fuelAllowanceAmount: 0,
+          stops: [],
+        };
+        teacher.days.push(day);
+      }
+
+      const stop = toStop(block);
+      day.stops.push(stop);
+      if (stop.flags.length > 0) teacher.flaggedStops += 1;
+      teacher.uncheckedSessions += stop.uncheckedSessions;
+      if (block.counted) {
+        day.fuelAllowanceAmount += block.gasAllowance ?? 0;
+        day.totalDistanceKm = round2(
+          day.totalDistanceKm + (block.distanceKm ?? 0),
+        );
+      }
+    }
+
+    const teachers = [...byTeacher.values()]
+      .map((teacher) => {
+        // Lượt không tính tiền đi chuỗi riêng nên có thể nằm lệch giờ so với
+        // các lượt khác — sắp lại theo giờ để đọc đúng trình tự trong ngày.
+        for (const day of teacher.days) {
+          day.stops.sort((a, b) => a.startTime.localeCompare(b.startTime));
+        }
+        teacher.totalDistanceKm = round2(
+          teacher.days.reduce((sum, day) => sum + day.totalDistanceKm, 0),
+        );
+        teacher.fuelAllowanceAmount = teacher.days.reduce(
+          (sum, day) => sum + day.fuelAllowanceAmount,
+          0,
+        );
+        const checked = checkedTotals.get(teacher.teacherId);
+        teacher.checkedDistanceKm = round2(checked?.km ?? 0);
+        teacher.checkedFuelAllowanceAmount = checked?.fuel ?? 0;
+        return teacher;
+      })
+      .sort((a, b) => a.teacherName.localeCompare(b.teacherName, 'vi'));
+
+    return {
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      teachers,
+      /** Việc cần bổ sung để các lượt "Không có phụ cấp" có tiền. */
+      missing: buildMissingAllowanceReport(missingEntries),
+      /** Buổi đã đủ dữ liệu, chỉ cần bấm tính lại phụ cấp. */
+      needsRecomputeSessions,
+      grandTotal: {
+        totalDistanceKm: round2(
+          teachers.reduce((sum, t) => sum + t.totalDistanceKm, 0),
+        ),
+        fuelAllowanceAmount: teachers.reduce(
+          (sum, t) => sum + t.fuelAllowanceAmount,
+          0,
+        ),
+        checkedDistanceKm: round2(
+          teachers.reduce((sum, t) => sum + t.checkedDistanceKm, 0),
+        ),
+        checkedFuelAllowanceAmount: teachers.reduce(
+          (sum, t) => sum + t.checkedFuelAllowanceAmount,
+          0,
+        ),
+        flaggedStops: teachers.reduce((sum, t) => sum + t.flaggedStops, 0),
+        uncheckedSessions: teachers.reduce(
+          (sum, t) => sum + t.uncheckedSessions,
+          0,
+        ),
+      },
+    };
+  }
+
+  /**
    * Phụ cấp xăng gộp theo MỖI LẦN đến nơi dạy (block: chuỗi tiết liên tiếp
    * trong cùng ngày, cùng giáo viên, cùng ĐỊA ĐIỂM) — không cộng theo từng
    * tiết, tránh trả nhiều lần cho một lượt đi lại.
@@ -1917,14 +2439,44 @@ export class TeachingSessionService {
     }
 
     const rows = await qb.getRawMany();
+    const coordsOf = await this.loadTravelPlaceCoords(rows);
+    const blocks = buildTravelBlocks(
+      rows.map((row) => ({ ...row, date: toDateString(row.date) as string })),
+      coordsOf,
+    );
 
-    // Toạ độ từng điểm trường (trường hoặc cơ sở) xuất hiện trong dữ liệu,
-    // dùng để tính quãng đường LIÊN TRƯỜNG (trường trước -> trường sau) khi
-    // một giáo viên dạy nhiều điểm trong cùng ngày, thay vì chỉ hiển thị tổng
-    // (nhà->A)+(nhà->B) — không phản ánh đúng lộ trình di chuyển thật.
-    // Lưu ý: khoản TIỀN phụ cấp (gasAllowance) vẫn giữ nguyên theo bậc
-    // nhà->trường của từng lượt (đã tính sẵn khi sinh session, cố ý theo
-    // đúng lượt đi-về thật từ nhà — xem docstring hàm này).
+    const fuelAllowanceByTeacher = new Map<number, number>();
+    const distanceKmByTeacher = new Map<number, number>();
+    for (const block of blocks) {
+      if (!block.counted) continue;
+      fuelAllowanceByTeacher.set(
+        block.teacherId,
+        (fuelAllowanceByTeacher.get(block.teacherId) ?? 0) +
+          (block.gasAllowance ?? 0),
+      );
+      if (block.distanceKm != null) {
+        distanceKmByTeacher.set(
+          block.teacherId,
+          (distanceKmByTeacher.get(block.teacherId) ?? 0) + block.distanceKm,
+        );
+      }
+    }
+
+    return { fuelAllowanceByTeacher, distanceKmByTeacher };
+  }
+
+  /**
+   * Toạ độ từng điểm dừng (cơ sở nếu có, không thì trường) để nối chặng liên
+   * trường. Trả về hàm tra toạ độ theo dòng buổi dạy.
+   */
+  private async loadTravelPlaceCoords(
+    rows: { schoolId: number | string; schoolLocationId: number | string | null }[],
+  ): Promise<
+    (row: {
+      schoolId: number | string;
+      schoolLocationId: number | string | null;
+    }) => LatLngPoint | null
+  > {
     const schoolIds = [...new Set(rows.map((r) => Number(r.schoolId)))];
     const locationIds = [
       ...new Set(
@@ -1949,86 +2501,19 @@ export class TeachingSessionService {
       locations.map((l) => [l.id, { lat: l.latitude, lng: l.longitude }]),
     );
 
-    const coordsOfRow = (row: {
-      schoolId: number | string;
-      schoolLocationId: number | string | null;
-    }): { lat: number; lng: number } | null => {
+    return (row) => {
       if (row.schoolLocationId != null) {
         const c = locationCoordsById.get(Number(row.schoolLocationId));
-        if (c?.lat != null && c?.lng != null) return { lat: c.lat, lng: c.lng };
+        if (c?.lat != null && c?.lng != null) {
+          return { lat: Number(c.lat), lng: Number(c.lng) };
+        }
       }
       const c = schoolCoordsById.get(Number(row.schoolId));
-      if (c?.lat != null && c?.lng != null) return { lat: c.lat, lng: c.lng };
+      if (c?.lat != null && c?.lng != null) {
+        return { lat: Number(c.lat), lng: Number(c.lng) };
+      }
       return null;
     };
-
-    const fuelAllowanceByTeacher = new Map<number, number>();
-    const distanceKmByTeacher = new Map<number, number>();
-    let prevTeacherId: number | null = null;
-    let prevDate: string | null = null;
-    let prevPlaceKey: string | null = null;
-    let prevPlaceCoords: { lat: number; lng: number } | null = null;
-
-    for (const row of rows) {
-      // Phòng khi filter SQL không lọc hết (VD test dựng mock chung 1 query
-      // builder cho nhiều lần gọi) — bỏ qua dòng không có phụ cấp xăng.
-      if (row.gasAllowance == null) continue;
-
-      const teacherId = Number(row.teacherId);
-      // Tiền tố L/S là bắt buộc: id điểm trường và id trường đánh số độc lập
-      // nên so bằng số thuần sẽ nhầm cơ sở #1 với trường #1.
-      const placeKey = row.schoolLocationId
-        ? `L${Number(row.schoolLocationId)}`
-        : `S${Number(row.schoolId)}`;
-      const date = toDateString(row.date) as string;
-      const isNewDay = teacherId !== prevTeacherId || date !== prevDate;
-      const isNewBlock = isNewDay || placeKey !== prevPlaceKey;
-
-      if (isNewBlock) {
-        fuelAllowanceByTeacher.set(
-          teacherId,
-          (fuelAllowanceByTeacher.get(teacherId) ?? 0) +
-            Number(row.gasAllowance),
-        );
-
-        // Buổi đầu ngày (hoặc không xác định được toạ độ 2 điểm để nối lộ
-        // trình): dùng khoảng cách nhà->trường đã lưu sẵn trên session.
-        // Từ buổi thứ 2 trở đi trong cùng ngày: tính quãng đường điểm
-        // trường trước -> điểm trường này (đúng lộ trình di chuyển thật).
-        const currentCoords = coordsOfRow(row);
-        let distanceKm: number | null =
-          row.distanceToSchoolKm != null
-            ? Number(row.distanceToSchoolKm)
-            : null;
-
-        if (!isNewDay && prevPlaceCoords && currentCoords) {
-          distanceKm =
-            Math.round(
-              haversineKm(
-                prevPlaceCoords.lat,
-                prevPlaceCoords.lng,
-                currentCoords.lat,
-                currentCoords.lng,
-              ) * 100,
-            ) / 100;
-        }
-
-        if (distanceKm != null) {
-          distanceKmByTeacher.set(
-            teacherId,
-            (distanceKmByTeacher.get(teacherId) ?? 0) + distanceKm,
-          );
-        }
-
-        prevPlaceCoords = currentCoords;
-      }
-
-      prevTeacherId = teacherId;
-      prevDate = date;
-      prevPlaceKey = placeKey;
-    }
-
-    return { fuelAllowanceByTeacher, distanceKmByTeacher };
   }
 
   // ==================== INTERNAL ====================

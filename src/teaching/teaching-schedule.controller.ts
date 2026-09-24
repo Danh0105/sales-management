@@ -28,6 +28,7 @@ import {
     RemoveSchedulesBySchoolDto,
     UpdateTeachingScheduleDto,
     ApplyEffectiveRangeDto,
+    SwapTeacherSchedulesDto,
 } from './dto/teaching-schedule.dto';
 import { BulkCreateSchedulesDto } from './dto/teaching-bulk.dto';
 import {
@@ -125,6 +126,15 @@ export class TeachingScheduleController {
     applyEffectiveRange(@Body() dto: ApplyEffectiveRangeDto, @Req() req: Request) {
         assertCanManageTeaching(req.user);
         return this.service.applyEffectiveRange(dto);
+    }
+
+    /** Đổi chéo lịch dạy 2 chiều giữa 2 giáo viên trong một lần gọi. */
+    @Roles(...TEACHING_MANAGE_ROLES)
+    @Post('swap-teachers')
+    @HttpCode(200)
+    swapTeachers(@Body() dto: SwapTeacherSchedulesDto, @Req() req: Request) {
+        assertCanManageTeaching(req.user);
+        return this.service.swapTeachers(dto);
     }
 
     @Roles(...TEACHING_MANAGE_ROLES)

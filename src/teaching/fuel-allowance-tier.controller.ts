@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   ParseIntPipe,
   Patch,
@@ -18,6 +19,7 @@ import { Roles } from '../auth/roles.decorator';
 import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
 import {
   CreateFuelAllowanceTierDto,
+  RecomputeGasAllowanceDto,
   UpdateFuelAllowanceTierDto,
 } from './dto/fuel-allowance-tier.dto';
 import { TEACHING_RATE_ROLES, TEACHING_VIEW_ROLES } from './teaching-roles';
@@ -36,6 +38,17 @@ export class FuelAllowanceTierController {
   @Get()
   findAll() {
     return this.service.findAll();
+  }
+
+  /**
+   * Điền phụ cấp cho các buổi đang trống. Không sửa buổi đã có phụ cấp, bỏ
+   * qua tháng đã gửi phiếu lương.
+   */
+  @Roles(...TEACHING_RATE_ROLES)
+  @Post('recompute')
+  @HttpCode(200)
+  recompute(@Body() dto: RecomputeGasAllowanceDto) {
+    return this.service.recomputeMissingGasAllowances(dto);
   }
 
   @Roles(...TEACHING_RATE_ROLES)

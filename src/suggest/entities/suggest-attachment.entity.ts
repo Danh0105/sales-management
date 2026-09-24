@@ -36,6 +36,15 @@ export class SuggestAttachment {
     @Column()
     uploadedBy!: number;
 
+    /**
+     * Action (`ExpenseAction`) đã tạo ra tệp này (VD `CONFIRM_CASH_RELEASED`).
+     * Dùng để lọc đúng tệp của từng bước khi hiện lại trong form — không thể
+     * dựa vào các mốc thời gian như `cashReleasedBy` trên `Suggest` vì các
+     * trường đó bị xoá về `null` mỗi khi lên lại/sửa lệnh chi.
+     */
+    @Column({ nullable: true })
+    action?: string;
+
     @ManyToOne(() => Employee)
     @JoinColumn({ name: 'uploadedBy' })
     uploader?: Employee;

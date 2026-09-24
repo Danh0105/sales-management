@@ -103,6 +103,38 @@ export class SchoolExpense {
     )
     managementExpenseItems!: ManagementExpenseItem[];
 
+    /**
+     * Sales admin xác nhận bảng "Chi Ngoài" (management_expense_items) →
+     * khoá chỉnh sửa; sau khi khoá chỉ kế toán trưởng (ketoan_truong) được sửa.
+     */
+    @Column({
+        type: 'boolean',
+        name: 'management_expense_confirmed',
+        default: false,
+    })
+    managementExpenseConfirmed!: boolean;
+
+    @Column({
+        type: 'int',
+        name: 'management_expense_confirmed_by',
+        nullable: true,
+    })
+    managementExpenseConfirmedBy?: number | null;
+
+    @Column({
+        type: 'varchar',
+        name: 'management_expense_confirmed_by_name',
+        nullable: true,
+    })
+    managementExpenseConfirmedByName?: string | null;
+
+    @Column({
+        type: 'timestamptz',
+        name: 'management_expense_confirmed_at',
+        nullable: true,
+    })
+    managementExpenseConfirmedAt?: Date | null;
+
     @CreateDateColumn()
     createdAt!: Date;
 

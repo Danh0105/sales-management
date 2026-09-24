@@ -1,16 +1,13 @@
 import { Transform, Type } from 'class-transformer';
 import {
-  ArrayMinSize,
-  IsArray,
+  IsBoolean,
   IsDateString,
-  IsEnum,
   IsInt,
   IsOptional,
   IsPositive,
   IsString,
   Matches,
   MaxLength,
-  ValidateNested,
 } from 'class-validator';
 
 /** Endpoint gửi multipart/form-data (kèm file) nên `items` tới dưới dạng chuỗi JSON. */
@@ -24,7 +21,13 @@ export const parseJsonArray = ({ value }: { value: unknown }) => {
   }
 };
 
-import { ExpenseRequestKind } from '../../enums/expense-request-kind.enum';
+/** Endpoint gửi multipart/form-data nên boolean tới dưới dạng chuỗi "true"/"false". */
+export const parseBoolean = ({ value }: { value: unknown }) => {
+  if (typeof value !== 'string') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+};
 
 export class RequestedEquipmentItemDto {
   @IsString()
@@ -52,14 +55,6 @@ export class CreateExpenseRequestDto {
   @IsString()
   content!: string;
 
-  /**
-   * CASH (mặc định) → kế toán lên lệnh chi.
-   * EQUIPMENT       → phòng kỹ thuật lên lệnh xuất kho.
-   */
-  @IsOptional()
-  @IsEnum(ExpenseRequestKind)
-  requestKind?: ExpenseRequestKind;
-
   @IsOptional()
   @IsString()
   description?: string;
@@ -78,6 +73,7 @@ export class CreateExpenseRequestDto {
   @IsInt()
   schoolId?: number;
 
+  /** Không bắt buộc — bỏ trống thì server tự điền năm học hiện tại. */
   @IsOptional()
   @IsString()
   @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
@@ -94,16 +90,11 @@ export class CreateExpenseRequestDto {
   beneficiaryInfo?: string;
 
   /**
-   * Danh sách thiết bị mong muốn — chỉ áp dụng khi `requestKind = EQUIPMENT`.
-   * Kinh doanh có thể chọn thiết bị có sẵn trong kho (`warehouseItemId`) hoặc
-   * để trống nếu cần mua mới; phòng kỹ thuật chốt danh sách thật khi lập lệnh
-   * xuất kho.
+   * Kinh doanh tự đánh dấu: đề xuất này nên trừ vào chính sách liên quan.
+   * Chỉ để hiển thị/thống kê, không có logic trừ tiền tự động kèm theo.
    */
   @IsOptional()
-  @Transform(parseJsonArray)
-  @IsArray()
-  @ArrayMinSize(1)
-  @ValidateNested({ each: true })
-  @Type(() => RequestedEquipmentItemDto)
-  items?: RequestedEquipmentItemDto[];
+  @Transform(parseBoolean)
+  @IsBoolean()
+  deductPolicy?: boolean;
 }

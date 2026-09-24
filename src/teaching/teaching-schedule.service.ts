@@ -23,6 +23,7 @@ import {
   RemoveSchedulesBySchoolDto,
   UpdateTeachingScheduleDto,
   ApplyEffectiveRangeDto,
+  SwapTeacherSchedulesDto,
 } from './dto/teaching-schedule.dto';
 import {
   ACTIVE_SESSION_STATUSES,
@@ -673,6 +674,172 @@ export class TeachingScheduleService {
       sessions: totals,
       results,
     };
+  }
+
+  /**
+   * Đổi chéo lịch dạy 2 chiều giữa 2 giáo viên: toàn bộ tiết (đang áp dụng,
+   * chưa bị từ chối) của A thoả bộ lọc chuyển sang B, và ngược lại, cùng lúc.
+   *
+   * Khác với `update({ teacherId })` — vốn chỉ chuyển một chiều và sẽ báo
+   * "trùng lịch" nếu giáo viên đích đang bận đúng khung giờ đó — swap kiểm
+   * tra trùng lịch với phần lịch **còn lại** của mỗi người sau khi đổi (bỏ
+   * qua hai bộ đang hoán đổi cho nhau), vì bản thân khung giờ đang tráo đổi
+   * không phải là xung đột thật.
+   */
+  async swapTeachers(dto: SwapTeacherSchedulesDto) {
+    if (dto.teacherAId === dto.teacherBId) {
+      throw new BadRequestException('Hai giáo viên phải khác nhau');
+    }
+
+    const [teacherA, teacherB] = await Promise.all([
+      this.assertTeacherActive(dto.teacherAId),
+      this.assertTeacherActive(dto.teacherBId),
+    ]);
+
+    const where: FindOptionsWhere<TeachingSchedule> = { isActive: true };
+    if (dto.schoolId) where.schoolId = dto.schoolId;
+    if (dto.schoolLocationId === 0) where.schoolLocationId = IsNull();
+    else if (dto.schoolLocationId) where.schoolLocationId = dto.schoolLocationId;
+    if (dto.subjectId) where.subjectId = dto.subjectId;
+    if (dto.dayOfWeek) where.dayOfWeek = dto.dayOfWeek;
+
+    const [schedulesA, schedulesB] = await Promise.all([
+      this.scheduleRepo.find({
+        where: { ...where, teacherId: dto.teacherAId },
+      }),
+      this.scheduleRepo.find({
+        where: { ...where, teacherId: dto.teacherBId },
+      }),
+    ]);
+
+    if (!schedulesA.length && !schedulesB.length) {
+      throw new BadRequestException(
+        'Không có lịch nào phù hợp bộ lọc để đổi chéo',
+      );
+    }
+
+    const swappedIds = [...schedulesA, ...schedulesB].map((s) => s.id);
+
+    await this.assertNoSwapConflict(schedulesA, dto.teacherBId, swappedIds);
+    await this.assertNoSwapConflict(schedulesB, dto.teacherAId, swappedIds);
+
+    const resetConfirmation = (schedule: TeachingSchedule) => {
+      schedule.confirmationStatus = ConfirmationStatus.PENDING;
+      schedule.confirmedAt = null;
+      schedule.rejectionReason = null;
+      schedule.confirmationAlertAt = null;
+    };
+
+    for (const schedule of schedulesA) {
+      schedule.teacherId = dto.teacherBId;
+      resetConfirmation(schedule);
+    }
+    for (const schedule of schedulesB) {
+      schedule.teacherId = dto.teacherAId;
+      resetConfirmation(schedule);
+    }
+
+    const savedA = schedulesA.length
+      ? await this.scheduleRepo.save(schedulesA)
+      : [];
+    const savedB = schedulesB.length
+      ? await this.scheduleRepo.save(schedulesB)
+      : [];
+
+    const sessionTotals = { updated: 0, removed: 0, created: 0, skipped: 0 };
+
+    for (const schedule of savedA) {
+      const before = {
+        dayOfWeek: schedule.dayOfWeek,
+        effectiveFrom: toDateString(schedule.effectiveFrom) as string,
+        effectiveTo: toDateString(schedule.effectiveTo),
+      };
+      const sync = await this.syncSessionsToSchedule(schedule, before, teacherB);
+      sessionTotals.updated += sync.updated;
+      sessionTotals.removed += sync.removed;
+      sessionTotals.created += sync.created;
+      sessionTotals.skipped += sync.skipped;
+    }
+    for (const schedule of savedB) {
+      const before = {
+        dayOfWeek: schedule.dayOfWeek,
+        effectiveFrom: toDateString(schedule.effectiveFrom) as string,
+        effectiveTo: toDateString(schedule.effectiveTo),
+      };
+      const sync = await this.syncSessionsToSchedule(schedule, before, teacherA);
+      sessionTotals.updated += sync.updated;
+      sessionTotals.removed += sync.removed;
+      sessionTotals.created += sync.created;
+      sessionTotals.skipped += sync.skipped;
+    }
+
+    for (const schedule of savedA) {
+      await this.notifyConfirmationRequest(schedule, teacherB);
+    }
+    for (const schedule of savedB) {
+      await this.notifyConfirmationRequest(schedule, teacherA);
+    }
+
+    return {
+      teacherA: { id: teacherA.id, name: teacherA.name, movedTo: teacherB.id },
+      teacherB: { id: teacherB.id, name: teacherB.name, movedTo: teacherA.id },
+      swapped: { fromA: savedA.length, fromB: savedB.length },
+      sessions: sessionTotals,
+    };
+  }
+
+  /**
+   * Kiểm tra `candidates` (đã đổi sang `targetTeacherId`) có trùng khung giờ
+   * với lịch **hiện có** của người đó không — bỏ qua toàn bộ `excludeIds`
+   * (hai bộ đang hoán đổi cho nhau), vì bản thân các khung giờ đó không phải
+   * là xung đột thật, chúng đang tráo chủ chứ không cộng dồn.
+   */
+  private async assertNoSwapConflict(
+    candidates: TeachingSchedule[],
+    targetTeacherId: number,
+    excludeIds: number[],
+  ) {
+    for (const candidate of candidates) {
+      const qb = this.scheduleRepo
+        .createQueryBuilder('s')
+        .innerJoin('s.school', 'sc')
+        .select([
+          's.id AS "id"',
+          's.startTime AS "startTime"',
+          's.endTime AS "endTime"',
+          'sc.name AS "schoolName"',
+        ])
+        .where('s.teacherId = :teacherId', { teacherId: targetTeacherId })
+        .andWhere('s.dayOfWeek = :dayOfWeek', {
+          dayOfWeek: candidate.dayOfWeek,
+        })
+        .andWhere('s.isActive = true')
+        .andWhere('s.confirmationStatus != :rejectedStatus', {
+          rejectedStatus: ConfirmationStatus.REJECTED,
+        })
+        .andWhere('s.id NOT IN (:...excludeIds)', {
+          excludeIds: excludeIds.length ? excludeIds : [0],
+        })
+        .andWhere('s.effectiveFrom <= :candidateTo', {
+          candidateTo: toDateString(candidate.effectiveTo) ?? '9999-12-31',
+        })
+        .andWhere(
+          '(s.effectiveTo IS NULL OR s.effectiveTo >= :candidateFrom)',
+          { candidateFrom: toDateString(candidate.effectiveFrom) as string },
+        )
+        .andWhere('s.startTime < :endTime', { endTime: candidate.endTime })
+        .andWhere('s.endTime > :startTime', { startTime: candidate.startTime });
+
+      const conflict = await qb.getRawOne();
+
+      if (conflict) {
+        throw new ConflictException(
+          `Giáo viên đích đã có lịch ${DAY_OF_WEEK_LABELS[candidate.dayOfWeek]} ` +
+            `${toDisplayTime(conflict.startTime)}–${toDisplayTime(conflict.endTime)} ` +
+            `tại ${conflict.schoolName} trùng khung giờ đang đổi chéo`,
+        );
+      }
+    }
   }
 
   async removeBySchool(dto: RemoveSchedulesBySchoolDto) {

@@ -9,6 +9,7 @@ import { SchoolClass } from '../teaching/entities/school-class.entity';
 import { Teacher } from '../teaching/entities/teacher.entity';
 import { TeachingSchedule } from '../teaching/entities/teaching-schedule.entity';
 import { TeachingSession } from '../teaching/entities/teaching-session.entity';
+import { Payroll } from '../payroll/entities/payroll.entity';
 
 /**
  * Bảng nào so được "trước / sau" khi Giáo vụ hoặc Nhân sự sửa.
@@ -27,6 +28,7 @@ export const AUDITED_ENTITIES: Record<string, EntityTarget<ObjectLiteral>> = {
   subjects: Subject,
   schools: School,
   'fuel-allowance-tiers': FuelAllowanceTier,
+  payrolls: Payroll,
 };
 
 /**

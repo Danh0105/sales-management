@@ -16,6 +16,8 @@ import { WarehouseModule } from '../warehouse/warehouse.module';
 // ĐỀ XUẤT CHI (EXPENSE_REQUEST) — dùng chung SuggestService
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
+import { SuggestStockInOrder } from './entities/suggest-stock-in-order.entity';
+import { SuggestAssignment } from './entities/suggest-assignment.entity';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
 import { SuggestReminderSetting } from './entities/suggest-reminder-setting.entity';
 import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entity';
@@ -33,6 +35,8 @@ import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entit
             Policy,
             SuggestPaymentOrder,
             SuggestStockIssueOrder,
+            SuggestStockInOrder,
+            SuggestAssignment,
             SuggestAttachment,
             SuggestReminderSetting,
             EmployeeFcmToken,

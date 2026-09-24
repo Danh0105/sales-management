@@ -286,6 +286,31 @@ export class AssignTeachingSessionDto {
   override?: boolean;
 }
 
+/**
+ * Đổi/gán giáo viên cho nhiều buổi đã chọn trên bảng Chấm công cùng lúc.
+ * Mỗi buổi vẫn qua đủ kiểm tra của gán 1 buổi (khoá chấm công, trùng lịch,
+ * định mức tuần) — buổi nào lỗi bị bỏ qua và báo lại riêng.
+ */
+export class BulkAssignTeachingSessionDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200, { message: 'Mỗi lần đổi tối đa 200 buổi' })
+  @Type(() => Number)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  sessionIds!: number[];
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  teacherId!: number;
+
+  @IsOptional()
+  @Transform(toBool)
+  @IsBoolean()
+  override?: boolean;
+}
+
 /** Giáo viên xác nhận hoặc từ chối buổi dạy được giao. */
 export class ConfirmTeachingSessionDto {
   @IsIn([ConfirmationStatus.CONFIRMED, ConfirmationStatus.REJECTED], {
@@ -455,6 +480,24 @@ export class QueryTeachingSessionsDto {
 }
 
 /** Bảng tổng hợp chấm công theo giáo viên trong khoảng ngày. */
+/**
+ * Rà soát quãng đường di chuyển. Cố ý không có lọc trường/lớp: lọc bớt điểm
+ * dừng là cắt đứt lộ trình trong ngày, số km liên trường sẽ sai.
+ */
+export class QueryTravelReviewDto {
+  @IsCalendarDate()
+  fromDate!: string;
+
+  @IsCalendarDate()
+  toDate!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  teacherId?: number;
+}
+
 export class QueryAttendanceSummaryDto {
   @IsCalendarDate()
   fromDate!: string;

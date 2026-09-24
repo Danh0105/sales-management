@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -45,13 +44,26 @@ import { SuggestType } from './enums/suggest-type.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
 import { ExpenseRole } from './constants/expense-roles';
 import {
+  EXPENSE_TRANSITIONS,
   assertExpenseTransition,
   expenseActorForStatus,
 } from './expense-flow.state-machine';
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
+import {
+  StockInItem,
+  SuggestStockInOrder,
+} from './entities/suggest-stock-in-order.entity';
+import { CreateStockInReceiptDto } from './dto/expense/create-stock-in-receipt.dto';
+import {
+  AssignmentRole,
+  AssignmentStatus,
+  SuggestAssignment,
+} from './entities/suggest-assignment.entity';
 import { WarehouseService } from '../warehouse/warehouse.service';
+import { WarehouseReceipt } from '../warehouse/entities/warehouse-receipt.entity';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
+import { EquipmentSource } from './enums/equipment-source.enum';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
 import {
@@ -65,7 +77,8 @@ import { CreatePaymentOrderDto } from './dto/expense/create-payment-order.dto';
 import { FundSource, FUND_SOURCE_LABEL } from './enums/expense-fund-source.enum';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
-import { vnToday, vnYearMonth, diffDays } from './utils/vn-date';
+import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
+import { vnToday, vnYearMonth, diffDays, currentSchoolYear, isValidSchoolYear } from './utils/vn-date';
 import { isCronLeader } from '../utils/is-cron-leader';
 
 export interface AuthUser {
@@ -100,6 +113,9 @@ export class SuggestService {
     @InjectRepository(SuggestReminderSetting)
     private readonly settingRepo: Repository<SuggestReminderSetting>,
 
+    @InjectRepository(SuggestAttachment)
+    private readonly attachmentRepo: Repository<SuggestAttachment>,
+
     private readonly eventEmitter: EventEmitter2,
 
     private readonly notificationService: NotificationService,
@@ -129,8 +145,14 @@ export class SuggestService {
         throw new BadRequestException('Thiếu ngày dự kiến chi');
       }
       const hasSchool = dto.schoolId !== undefined && dto.schoolId !== null;
-      if (hasSchool && !dto.schoolYear) {
-        throw new BadRequestException('Thiếu năm học');
+      // Năm học mặc định theo kỳ hiện tại để người tạo không cần tự chọn,
+      // nhưng vẫn cho chọn năm khác — trường có thể chưa có môn học khai báo
+      // cho năm hiện tại (chỉ có năm trước/sau), lúc đó phải tự đổi được.
+      const schoolYear = hasSchool
+        ? dto.schoolYear ?? currentSchoolYear()
+        : null;
+      if (hasSchool && schoolYear && !isValidSchoolYear(schoolYear)) {
+        throw new BadRequestException('Năm học không hợp lệ');
       }
       if (!hasSchool && (dto.wardId === undefined || dto.wardId === null)) {
         throw new BadRequestException('Thiếu xã/phường');
@@ -140,8 +162,6 @@ export class SuggestService {
           'Ngày dự kiến chi phải từ hôm nay trở đi',
         );
       }
-
-      const kind = dto.requestKind ?? ExpenseRequestKind.CASH;
 
       const saved = await this.dataSource.transaction(async (manager) => {
         let school: School | undefined;
@@ -155,14 +175,10 @@ export class SuggestService {
             throw new BadRequestException('Trường không tồn tại');
           }
 
-          if (!this.isValidSchoolYear(dto.schoolYear!)) {
-            throw new BadRequestException('Năm học không hợp lệ');
-          }
-
           const subjectCount = await manager.count(Subject, {
             where: {
               schoolId: dto.schoolId,
-              schoolYear: dto.schoolYear,
+              schoolYear: schoolYear!,
             },
           });
           if (subjectCount === 0) {
@@ -183,7 +199,9 @@ export class SuggestService {
 
         const suggest = manager.create(Suggest, {
           type: SuggestType.EXPENSE_REQUEST,
-          requestKind: kind,
+          // Nhân viên không quyết định loại đề xuất. Để trống đến khi Giám
+          // đốc/Sales Admin chốt CASH/EQUIPMENT/REPAIR lúc duyệt.
+          requestKind: null,
           content: dto.content,
           description: dto.description,
           // Số tiền được xác định khi kế toán lập lệnh chi, không thuộc bước
@@ -192,12 +210,10 @@ export class SuggestService {
           expectedPaymentDate: dto.expectedPaymentDate,
           beneficiaryInfo: dto.beneficiaryInfo ?? null,
           participants: dto.participants ?? null,
+          deductPolicy: dto.deductPolicy ?? false,
           ...(school ? { schoolId: school.id, school } : {}),
-          ...(dto.schoolYear ? { schoolYear: dto.schoolYear } : {}),
+          ...(schoolYear ? { schoolYear } : {}),
           ...(ward ? { wardId: ward.id, ward } : {}),
-          ...(kind === ExpenseRequestKind.EQUIPMENT && dto.items?.length
-            ? { requestedItems: dto.items }
-            : {}),
           fileUrl,
           code,
           version: 1,
@@ -213,6 +229,7 @@ export class SuggestService {
             s.id!,
             [{ fileUrl, fileName: fileUrl.split('/').pop() || 'file' }],
             actor.id,
+            ExpenseAction.CREATE,
           );
         }
 
@@ -222,6 +239,7 @@ export class SuggestService {
           action: ExpenseAction.CREATE,
           fromStatus: null,
           toStatus: SuggestStatus.PENDING_APPROVAL,
+          details: await this.expenseNextStepDetails(manager, s),
         });
 
         return s;
@@ -230,13 +248,8 @@ export class SuggestService {
       await this.notifyExpense(
         {
           suggestId: saved.id!,
-          title:
-            kind === ExpenseRequestKind.EQUIPMENT
-              ? '🧰 Đề xuất thiết bị mới'
-              : '💰 Đề xuất chi mới',
-          message:
-            `Có ${kind === ExpenseRequestKind.EQUIPMENT ? 'đề xuất thiết bị' : 'đề xuất chi'} mới cần duyệt: ` +
-            `${saved.code} - ${saved.content}`,
+          title: '📋 Đề xuất mới chờ phân loại',
+          message: `Có đề xuất mới cần duyệt và phân loại: ${saved.code} - ${saved.content}`,
           senderId: actor.id,
           meta: { status: saved.status },
         },
@@ -1056,9 +1069,13 @@ export class SuggestService {
    */
   private async generateCode(
     manager: EntityManager,
-    table: 'suggest' | 'suggest_payment_order' | 'suggest_stock_issue_order',
+    table:
+      | 'suggest'
+      | 'suggest_payment_order'
+      | 'suggest_stock_issue_order'
+      | 'suggest_stock_in_order',
     column: 'code',
-    prefixLetter: 'DX' | 'LC' | 'XK',
+    prefixLetter: 'DX' | 'LC' | 'XK' | 'NK',
   ): Promise<string> {
     const prefix = `${prefixLetter}-${vnYearMonth()}-`;
 
@@ -1107,6 +1124,8 @@ export class SuggestService {
       fromStatus?: SuggestStatus | null;
       toStatus?: SuggestStatus | null;
       note?: string | null;
+      /** Ảnh chụp thông tin của bước tại thời điểm thực hiện — hiện ở Lịch sử. */
+      details?: Record<string, unknown> | null;
     },
   ) {
     await manager.save(SuggestHistory, {
@@ -1116,8 +1135,91 @@ export class SuggestService {
       fromStatus: data.fromStatus ?? null,
       toStatus: data.toStatus ?? null,
       note: data.note ?? null,
-      data: {},
+      data: data.details ?? {},
     });
+  }
+
+  /** Tên tiếng Việt của role giữ bước — hiện ở "Người xử lý tiếp theo" trong lịch sử. */
+  private static readonly EXPENSE_ROLE_LABEL: Record<string, string> = {
+    [ExpenseRole.DIRECTOR]: 'Giám đốc',
+    [ExpenseRole.SALES_ADMIN]: 'Sales Admin',
+    [ExpenseRole.CHIEF_ACCOUNTANT]: 'Kế toán trưởng',
+    [ExpenseRole.DEBT_ACCOUNTANT]: 'Kế toán công nợ',
+    [ExpenseRole.TREASURER]: 'Thủ quỹ',
+    [ExpenseRole.TECHNICAL]: 'Phòng kỹ thuật',
+    [ExpenseRole.SALES]: 'Kinh doanh',
+  };
+
+  /**
+   * Ai xử lý bước kế tiếp + ai là người nghiệm thu, chụp ngay sau mỗi bước để
+   * lịch sử ghi rõ việc đang nằm ở ai. Người cụ thể (chủ đơn, người được chỉ
+   * định) thì ghi tên; còn lại ghi theo bộ phận.
+   */
+  private async expenseNextStepDetails(
+    manager: EntityManager,
+    s: Suggest,
+  ): Promise<Record<string, unknown>> {
+    const kind = s.requestKind ?? ExpenseRequestKind.CASH;
+    const holder = expenseActorForStatus(
+      s.status as SuggestStatus,
+      kind,
+      s.equipmentSource,
+    );
+
+    let personIds: number[] = [];
+    let roles: string[] = [];
+    if (holder?.owner && s.createdBy) {
+      personIds = [s.createdBy];
+    } else if (holder?.assignee) {
+      const id = this.expenseAssigneeId(s, holder.assignee);
+      if (id) personIds = [id];
+    } else if (holder) {
+      // Đã chỉ định người bàn giao thì chỉ người đó giữ bước kỹ thuật.
+      if (holder.roles.includes(ExpenseRole.TECHNICAL) && s.assignedTechnicianId) {
+        personIds = [s.assignedTechnicianId];
+      } else {
+        roles = holder.roles;
+      }
+    } else if (s.status === SuggestStatus.REPAIR_REJECTED) {
+      roles = [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN];
+    }
+
+    const people = await this.employeeRefs(manager, [...personIds, s.acceptorId]);
+    return {
+      next:
+        personIds.length || roles.length
+          ? {
+              people: personIds.map((id) => people.get(id) ?? { id }),
+              departments: roles.map(
+                (r) => SuggestService.EXPENSE_ROLE_LABEL[r] ?? r,
+              ),
+            }
+          : null,
+      acceptor: s.acceptorId ? people.get(s.acceptorId) ?? { id: s.acceptorId } : null,
+    };
+  }
+
+  /** Tên + SĐT nhân viên để ghi vào lịch sử (không phụ thuộc dữ liệu về sau bị đổi). */
+  private async employeeRefs(
+    manager: EntityManager,
+    ids: (number | null | undefined)[],
+  ): Promise<Map<number, { id: number; name: string | null; phone: string | null }>> {
+    const unique = [...new Set(ids.filter((id): id is number => !!id))];
+    if (unique.length === 0) return new Map();
+    const rows = await manager.find(Employee, {
+      where: { id: In(unique) },
+      select: { id: true, name: true, phone: true },
+    });
+    return new Map(
+      rows.map((e) => [
+        e.id!,
+        {
+          id: e.id!,
+          name: e.name ? fixVietnamese(e.name) : null,
+          phone: e.phone ?? null,
+        },
+      ]),
+    );
   }
 
   private async saveExpenseAttachments(
@@ -1125,6 +1227,7 @@ export class SuggestService {
     suggestId: number,
     files: UploadedAttachment[] | undefined,
     uploadedBy: number,
+    action?: ExpenseAction,
   ) {
     if (!files?.length) return;
 
@@ -1135,6 +1238,7 @@ export class SuggestService {
         fileUrl: f.fileUrl,
         fileName: f.fileName,
         uploadedBy,
+        action,
       })),
     );
   }
@@ -1260,6 +1364,11 @@ export class SuggestService {
     note?: string;
     mutate?: (s: Suggest) => void;
     extra?: (manager: EntityManager, s: Suggest) => Promise<void>;
+    /** Thông tin của bước ghi vào lịch sử — tính sau `extra` (đã có mã phiếu…). */
+    logData?: (
+      manager: EntityManager,
+      s: Suggest,
+    ) => Promise<Record<string, unknown>> | Record<string, unknown>;
   }): Promise<Suggest> {
     const user = this.ensureUser(opts.user);
 
@@ -1279,14 +1388,51 @@ export class SuggestService {
         );
       }
 
+      const technicalActions: ExpenseAction[] = [
+        ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+        ExpenseAction.CONFIRM_EQUIPMENT_RETURNED,
+        ExpenseAction.ACCEPT_REPAIR,
+        ExpenseAction.REJECT_REPAIR,
+      ];
+      if (
+        technicalActions.includes(opts.action) &&
+        s.assignedTechnicianId != null &&
+        s.assignedTechnicianId !== user.id
+      ) {
+        throw new ForbiddenException(
+          'Đề xuất này đã được giao cho một nhân viên kỹ thuật khác',
+        );
+      }
+      if (
+        technicalActions.includes(opts.action) &&
+        opts.action !== ExpenseAction.CONFIRM_EQUIPMENT_RETURNED &&
+        (await manager.count(SuggestAssignment, {
+          where: {
+            suggestId: opts.id,
+            employeeId: user.id,
+            role: AssignmentRole.HANDOVER,
+            status: AssignmentStatus.DECLINED,
+          },
+        })) > 0
+      ) {
+        throw new ForbiddenException(
+          'Bạn đã từ chối bàn giao đề xuất này, chờ Giám đốc chọn người thay thế',
+        );
+      }
+
       const fromStatus = s.status as SuggestStatus;
+      const assignee = EXPENSE_TRANSITIONS[opts.action]?.assignee;
 
       s.status = assertExpenseTransition(opts.action, fromStatus, {
         actorRoles: user.roles ?? [],
         kind: s.requestKind ?? ExpenseRequestKind.CASH,
+        equipmentSource: s.equipmentSource,
         isOwner: s.createdBy === user.id,
         actorId: user.id,
         previousActorId: await this.lastExpenseActorId(manager, opts.id),
+        isAssignee: assignee
+          ? this.expenseAssigneeId(s, assignee) === user.id
+          : false,
       });
 
       opts.mutate?.(s);
@@ -1304,6 +1450,10 @@ export class SuggestService {
         fromStatus,
         toStatus: saved.status as SuggestStatus,
         note: opts.note ?? null,
+        details: {
+          ...(opts.logData ? await opts.logData(manager, saved) : {}),
+          ...(await this.expenseNextStepDetails(manager, saved)),
+        },
       });
 
       // Bước vừa xong thì lời nhắc "đến lượt bạn" của những người CÙNG giữ
@@ -1316,6 +1466,16 @@ export class SuggestService {
 
       return saved;
     });
+  }
+
+  /** Id người được Giám đốc chỉ định giữ bước (đề xuất thiết bị mới). */
+  private expenseAssigneeId(
+    s: Suggest,
+    assignee: 'stockInHandler' | 'acceptor',
+  ): number | null {
+    return (
+      (assignee === 'acceptor' ? s.acceptorId : s.stockInHandlerId) ?? null
+    );
   }
 
   /**
@@ -1332,7 +1492,11 @@ export class SuggestService {
     actor: AuthUser,
   ) {
     try {
-      const holder = expenseActorForStatus(fromStatus, suggest.requestKind);
+      const holder = expenseActorForStatus(
+        fromStatus,
+        suggest.requestKind ?? ExpenseRequestKind.CASH,
+        suggest.equipmentSource,
+      );
       const receiverIds = [actor.id];
 
       if (holder?.owner && suggest.createdBy) {
@@ -1341,6 +1505,10 @@ export class SuggestService {
       if (holder && !holder.owner) {
         receiverIds.push(...(await this.getEmployeeIdsByRoles(holder.roles)));
       }
+      const assigneeId = holder?.assignee
+        ? this.expenseAssigneeId(suggest, holder.assignee)
+        : null;
+      if (assigneeId) receiverIds.push(assigneeId);
 
       await this.notificationService.markAsReadByTypeEntityForReceivers(
         NotificationType.SUGGEST,
@@ -1485,22 +1653,295 @@ export class SuggestService {
    * "giám đốc" nữa vì Sales Admin cũng duyệt được cùng chốt này.
    */
   private expenseApproverLabel(user: AuthUser) {
-    return user.roles?.includes(ExpenseRole.DIRECTOR)
-      ? 'giám đốc'
-      : 'Sales Admin';
+    if (user.roles?.includes(ExpenseRole.DIRECTOR)) return 'giám đốc';
+    if (user.roles?.includes(ExpenseRole.CHIEF_ACCOUNTANT))
+      return 'kế toán trưởng';
+    return 'Sales Admin';
   }
 
-  async approveExpense(id: number, user: AuthUser) {
+  /**
+   * Kiểm tra dữ liệu Giám đốc gửi khi duyệt thiết bị mua từ nhà cung cấp: phiếu nhập
+   * dự kiến, người xử lý và người nghiệm thu. Người xử lý, người nghiệm thu
+   * và người duyệt phải là ba người khác nhau — mỗi bước kiểm soát một người
+   * (xem ràng buộc "hai bước liên tiếp" ở `assertExpenseTransition`).
+   */
+  private async validatePurchaseApproval(dto: ApproveExpenseDto, user: AuthUser) {
+    if (!dto.stockInItems?.length) {
+      throw new BadRequestException(
+        'Phiếu nhập kho phải có ít nhất 1 thiết bị',
+      );
+    }
+    if (!dto.stockInHandlerId) {
+      throw new BadRequestException('Vui lòng chọn nhân viên xử lý phiếu nhập');
+    }
+    if (!dto.acceptorId) {
+      throw new BadRequestException('Vui lòng chọn người nghiệm thu bàn giao');
+    }
+    if (dto.stockInHandlerId === dto.acceptorId) {
+      throw new BadRequestException(
+        'Người xử lý phiếu nhập và người nghiệm thu phải là hai người khác nhau',
+      );
+    }
+    if (dto.stockInHandlerId === user.id) {
+      throw new BadRequestException(
+        'Người duyệt không được tự nhận xử lý phiếu nhập kho',
+      );
+    }
+
+    const [handler, acceptor] = await Promise.all(
+      [dto.stockInHandlerId, dto.acceptorId].map((id) =>
+        this.employeeRepo.findOne({ where: { id, isActive: true } }),
+      ),
+    );
+    if (!handler) {
+      throw new NotFoundException('Nhân viên xử lý không tồn tại hoặc đã nghỉ');
+    }
+    if (!acceptor) {
+      throw new NotFoundException('Người nghiệm thu không tồn tại hoặc đã nghỉ');
+    }
+
+    const items = this.normalizeStockInItems(dto.stockInItems);
+    return { items, total: this.stockInTotal(items), handler, acceptor };
+  }
+
+  private normalizeStockInItems(
+    items: CreateStockInReceiptDto['items'],
+  ): StockInItem[] {
+    return items.map((it) => {
+      const name = it.name?.trim();
+      if (!name) {
+        throw new BadRequestException('Tên thiết bị không được để trống');
+      }
+      return {
+        name,
+        quantity: it.quantity,
+        unit: it.unit?.trim() || null,
+        unitPrice: it.unitPrice ?? null,
+        note: it.note?.trim() || null,
+        warehouseItemId: it.warehouseItemId ?? null,
+      };
+    });
+  }
+
+  private stockInTotal(items: StockInItem[]): number {
+    return items.reduce(
+      (sum, it) => sum + (Number(it.unitPrice) || 0) * it.quantity,
+      0,
+    );
+  }
+
+  async approveExpense(
+    id: number,
+    user: AuthUser,
+    dto: ApproveExpenseDto,
+  ) {
+    const existing = await this.repo.findOne({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('Đề xuất chi không tồn tại');
+    }
+
+    if (!dto?.requestKind) {
+      throw new BadRequestException(
+        'Giám đốc phải chọn loại đề xuất khi duyệt',
+      );
+    }
+
+    const nextKind = dto.requestKind;
+    const isEquipment = nextKind === ExpenseRequestKind.EQUIPMENT;
+    if (dto.equipmentSource && !isEquipment) {
+      throw new BadRequestException(
+        'Chỉ chọn nguồn thiết bị cho đề xuất thiết bị',
+      );
+    }
+    const equipmentSource = isEquipment
+      ? dto.equipmentSource ?? EquipmentSource.STOCK
+      : null;
+    const fromSupplier = equipmentSource === EquipmentSource.SUPPLIER;
+    // Thiết bị từ nhà cung cấp đi theo người xử lý/nghiệm thu do Giám đốc
+    // chỉ định, không qua phòng kỹ thuật.
+    const needsTechnical =
+      (isEquipment && !fromSupplier) ||
+      nextKind === ExpenseRequestKind.REPAIR;
+
+    const purchase = fromSupplier
+      ? await this.validatePurchaseApproval(dto, user)
+      : null;
+    if (
+      !fromSupplier &&
+      (dto.stockInItems?.length || dto.stockInHandlerId || dto.acceptorId)
+    ) {
+      throw new BadRequestException(
+        'Phiếu nhập kho, người xử lý và người nghiệm thu chỉ dùng cho thiết bị mua từ nhà cung cấp',
+      );
+    }
+
+    if (dto.assignedTechnicianId && !needsTechnical) {
+      throw new BadRequestException(
+        'Chỉ chỉ định nhân viên kỹ thuật cho đề xuất thiết bị lấy từ kho hoặc sửa chữa',
+      );
+    }
+
+    // Lấy từ kho thì cần biết kinh doanh muốn thiết bị gì; mua từ nhà cung
+    // cấp thì danh sách đã nằm trong phiếu nhập kho Giám đốc vừa lập.
+    if (
+      isEquipment &&
+      !fromSupplier &&
+      !(existing.requestedItems && existing.requestedItems.length > 0)
+    ) {
+      throw new BadRequestException(
+        'Vui lòng chọn ít nhất một thiết bị trước khi duyệt đề xuất',
+      );
+    }
+
+    let technician: Employee | null = null;
+    if (dto.assignedTechnicianId) {
+      technician = await this.employeeRepo.findOne({
+        where: { id: dto.assignedTechnicianId },
+      });
+      if (!technician) {
+        throw new NotFoundException('Người bàn giao không tồn tại');
+      }
+      if (!technician.roles?.includes(ExpenseRole.TECHNICAL)) {
+        throw new BadRequestException(
+          'Người bàn giao phải thuộc phòng kỹ thuật',
+        );
+      }
+    }
+
+    const supporterIds = [...new Set(dto.supporterIds ?? [])];
+    if (supporterIds.length > 0) {
+      if (!needsTechnical || !dto.assignedTechnicianId) {
+        throw new BadRequestException(
+          'Chỉ chọn người hỗ trợ khi đã chọn người bàn giao',
+        );
+      }
+      await this.assertAssignableEmployees(supporterIds, [
+        dto.assignedTechnicianId,
+      ]);
+    }
+
+    let stockInCode: string | null = null;
+
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.APPROVE,
       user,
+      note: dto.note?.trim() || undefined,
+      logData: async (manager, s) => {
+        const people = await this.employeeRefs(manager, [
+          s.assignedTechnicianId,
+          ...supporterIds,
+          purchase?.handler.id,
+          purchase?.acceptor.id,
+        ]);
+        return {
+          requestKind: s.requestKind,
+          amount: s.amount != null ? Number(s.amount) : null,
+          equipmentSource: s.equipmentSource ?? null,
+          handover: s.assignedTechnicianId
+            ? people.get(s.assignedTechnicianId) ?? null
+            : null,
+          supporters: s.assignedTechnicianId
+            ? supporterIds.map((sid) => people.get(sid) ?? { id: sid })
+            : [],
+          stockIn: purchase
+            ? {
+                code: stockInCode,
+                items: purchase.items,
+                total: purchase.total,
+                note: dto.stockInNote?.trim() || null,
+                handler: people.get(purchase.handler.id!) ?? null,
+                acceptor: people.get(purchase.acceptor.id!) ?? null,
+              }
+            : null,
+        };
+      },
       mutate: (s) => {
         s.approvedBy = user.id;
         s.approvedAt = new Date();
         s.rejectReason = null;
+        // Mua từ nhà cung cấp: số tiền luôn tự tính = tổng thành tiền các
+        // thiết bị trong phiếu nhập dự kiến, không lấy số gõ tay.
+        if (purchase) s.amount = purchase.total;
+        else if (dto.amount !== undefined) s.amount = dto.amount;
+        s.requestKind = dto.requestKind;
+        // Khi đổi về tiền phải xoá người kỹ thuật của vòng duyệt trước.
+        s.assignedTechnicianId = needsTechnical
+          ? dto.assignedTechnicianId ?? null
+          : null;
+        s.equipmentSource = equipmentSource;
+        s.stockInHandlerId = purchase ? purchase.handler.id : null;
+        s.acceptorId = purchase ? purchase.acceptor.id : null;
+        if (dto.note !== undefined) s.approveNote = dto.note || null;
+      },
+      extra: async (manager, s) => {
+        // Duyệt lại thì giao việc lại từ đầu: người được giao ở vòng trước
+        // (kể cả người đã từ chối) không còn giá trị.
+        await manager.delete(SuggestAssignment, { suggestId: s.id! });
+        if (s.assignedTechnicianId) {
+          await manager.save(SuggestAssignment, [
+            {
+              suggestId: s.id!,
+              employeeId: s.assignedTechnicianId,
+              role: AssignmentRole.HANDOVER,
+              assignedBy: user.id,
+            },
+            ...supporterIds.map((employeeId) => ({
+              suggestId: s.id!,
+              employeeId,
+              role: AssignmentRole.SUPPORT,
+              assignedBy: user.id,
+            })),
+          ]);
+        }
+
+        // Phiếu dự kiến của vòng duyệt trước (nếu có) không còn giá trị.
+        await manager.delete(SuggestStockInOrder, { suggestId: s.id! });
+        if (!purchase) return;
+
+        const code = await this.generateCode(
+          manager,
+          'suggest_stock_in_order',
+          'code',
+          'NK',
+        );
+        stockInCode = code;
+        await manager.save(SuggestStockInOrder, {
+          code,
+          suggestId: s.id!,
+          draftItems: purchase.items,
+          draftNote: dto.stockInNote?.trim() || null,
+          createdBy: user.id,
+        });
       },
     });
+
+    if (purchase) {
+      await this.notifyExpense(
+        {
+          suggestId: saved.id!,
+          title: '📥 Bạn được giao xử lý phiếu nhập kho',
+          message:
+            `Đề xuất ${saved.code} (thiết bị mua từ nhà cung cấp) đã được duyệt,` +
+            ` bạn được chỉ định lập phiếu nhập kho`,
+          senderId: user.id,
+          meta: { status: saved.status },
+        },
+        { userIds: [purchase.handler.id!] },
+      );
+      await this.notifyExpense(
+        {
+          suggestId: saved.id!,
+          title: '📋 Bạn được chỉ định nghiệm thu bàn giao',
+          message:
+            `Bạn là người nghiệm thu bàn giao đề xuất ${saved.code},` +
+            ` sẽ được báo khi thiết bị đã nhập kho`,
+          senderId: user.id,
+          meta: { status: saved.status },
+        },
+        { userIds: [purchase.acceptor.id!] },
+      );
+    }
 
     await this.notifyExpense(
       {
@@ -1518,10 +1959,57 @@ export class SuggestService {
           ExpenseRole.SALES_ADMIN,
           ExpenseRole.DIRECTOR,
           ExpenseRole.DEBT_ACCOUNTANT,
+          ExpenseRole.CHIEF_ACCOUNTANT,
         ],
         userIds: saved.createdBy ? [saved.createdBy] : [],
       },
     );
+
+    if (technician?.id) {
+      await this.notifyExpense(
+        {
+          suggestId: saved.id!,
+          title:
+            saved.requestKind === ExpenseRequestKind.REPAIR
+              ? '🛠️ Bạn được chỉ định đảm nhận sửa chữa'
+              : '🛠️ Bạn được chỉ định bàn giao đề xuất',
+          message:
+            saved.requestKind === ExpenseRequestKind.REPAIR
+              ? `Bạn là người đảm nhận chính đề xuất sửa chữa ${saved.code}`
+              : `Bạn là người bàn giao đề xuất thiết bị ${saved.code}`,
+          senderId: user.id,
+          meta: { status: saved.status },
+        },
+        { userIds: [technician.id] },
+      );
+      if (supporterIds.length > 0) {
+        await this.notifyExpense(
+          {
+            suggestId: saved.id!,
+            title: '🤝 Bạn được chỉ định hỗ trợ',
+            message:
+              `Bạn được chỉ định hỗ trợ ${fixVietnamese(technician.name ?? '')}` +
+              (saved.requestKind === ExpenseRequestKind.REPAIR
+                ? ` sửa chữa theo đề xuất ${saved.code}`
+                : ` bàn giao đề xuất ${saved.code}`),
+            senderId: user.id,
+            meta: { status: saved.status },
+          },
+          { userIds: supporterIds },
+        );
+      }
+    } else if (needsTechnical) {
+      await this.notifyExpense(
+        {
+          suggestId: saved.id!,
+          title: '🛠️ Đề xuất mới của phòng kỹ thuật',
+          message: `Đề xuất ${saved.code} (${saved.requestKind === ExpenseRequestKind.REPAIR ? 'sửa chữa' : 'thiết bị'}) cần phòng kỹ thuật xử lý`,
+          senderId: user.id,
+          meta: { status: saved.status },
+        },
+        { roles: [ExpenseRole.TECHNICAL] },
+      );
+    }
 
     return saved;
   }
@@ -1548,8 +2036,12 @@ export class SuggestService {
         meta: { status: saved.status, reason },
       },
       {
-        // Người còn lại trong hai người giữ chốt duyệt vẫn cần biết kết quả.
-        roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+        // Người còn lại trong nhóm giữ chốt duyệt vẫn cần biết kết quả.
+        roles: [
+          ExpenseRole.DIRECTOR,
+          ExpenseRole.SALES_ADMIN,
+          ExpenseRole.CHIEF_ACCOUNTANT,
+        ],
         userIds: saved.createdBy ? [saved.createdBy] : [],
       },
     );
@@ -1599,12 +2091,13 @@ export class SuggestService {
   }
 
   /**
-   * Chủ đề xuất (kinh doanh) sửa đề xuất đã gửi duyệt.
-   *
-   * Chỉ sửa được khi chưa phát sinh dòng tiền / xuất kho — tức còn ở
-   * PENDING_APPROVAL hoặc APPROVED. Đề xuất đã duyệt mà sửa thì nội dung Giám
-   * đốc đã chốt không còn đúng nữa, nên phải quay về PENDING_APPROVAL và xoá
-   * dấu duyệt (kể cả kiểm duyệt của Sales Admin) để duyệt lại từ đầu.
+   * Chủ đề xuất (kinh doanh) sửa đề xuất — sửa được ở mọi trạng thái, kể cả
+   * đã duyệt/đã lên lệnh chi/xuất kho. Sửa xong mà đề xuất không còn ở
+   * PENDING_APPROVAL thì coi như nội dung đã chốt trước đó không còn đúng
+   * nữa, nên quay lại PENDING_APPROVAL và xoá dấu duyệt (kể cả kiểm duyệt của
+   * Sales Admin) để duyệt lại từ đầu. Chứng từ/tiến độ đã phát sinh (lệnh
+   * chi, phiếu xuất kho, mốc đã chi/đã nhận...) không bị xoá — chỉ trạng thái
+   * duyệt được đưa về ban đầu.
    */
   async updateExpense(
     id: number,
@@ -1613,11 +2106,6 @@ export class SuggestService {
     user: AuthUser,
   ) {
     const actor = this.ensureUser(user);
-
-    const EDITABLE_STATUSES: SuggestStatus[] = [
-      SuggestStatus.PENDING_APPROVAL,
-      SuggestStatus.APPROVED,
-    ];
 
     const saved = await this.dataSource.transaction(async (manager) => {
       const suggest = await manager.findOne(Suggest, { where: { id } });
@@ -1628,9 +2116,16 @@ export class SuggestService {
       if (suggest.createdBy !== actor.id) {
         throw new ForbiddenException('Chỉ người tạo mới được sửa đề xuất');
       }
-      if (!suggest.status || !EDITABLE_STATUSES.includes(suggest.status)) {
-        throw new ConflictException(
-          'Chỉ sửa được đề xuất đang chờ duyệt hoặc đã duyệt nhưng chưa lên lệnh chi/xuất kho',
+      // Thiết bị từ nhà cung cấp đã nhập kho thật: duyệt lại sẽ khiến người xử
+      // lý nhập kho lần nữa, tồn kho bị cộng hai lần.
+      if (
+        suggest.equipmentSource === EquipmentSource.SUPPLIER &&
+        [SuggestStatus.STOCK_IN_COMPLETED, SuggestStatus.SPENT].includes(
+          suggest.status as SuggestStatus,
+        )
+      ) {
+        throw new BadRequestException(
+          'Thiết bị của đề xuất này đã nhập kho nên không sửa được nữa',
         );
       }
 
@@ -1654,6 +2149,8 @@ export class SuggestService {
       }
 
       // Đổi trường ⇄ xã/phường: gửi cái nào thì chuyển sang cái đó, cái kia xoá.
+      // Năm học mặc định theo kỳ hiện tại nhưng vẫn chọn lại được — trường có
+      // thể chỉ có môn học khai báo cho năm khác.
       const changesSchool = dto.schoolId !== undefined && dto.schoolId !== null;
       const changesWard = dto.wardId !== undefined && dto.wardId !== null;
       let schoolId = suggest.schoolId ?? null;
@@ -1663,6 +2160,7 @@ export class SuggestService {
       if (changesSchool) {
         schoolId = dto.schoolId!;
         wardId = null;
+        schoolYear = dto.schoolYear ?? currentSchoolYear();
       } else if (changesWard) {
         wardId = dto.wardId!;
         schoolId = null;
@@ -1673,7 +2171,7 @@ export class SuggestService {
         const school = await manager.findOne(School, { where: { id: schoolId } });
         if (!school) throw new BadRequestException('Trường không tồn tại');
         if (!schoolYear) throw new BadRequestException('Thiếu năm học');
-        if (!this.isValidSchoolYear(schoolYear)) {
+        if (!isValidSchoolYear(schoolYear)) {
           throw new BadRequestException('Năm học không hợp lệ');
         }
         const subjectCount = await manager.count(Subject, {
@@ -1692,7 +2190,7 @@ export class SuggestService {
       }
 
       const fromStatus = suggest.status;
-      const needsReapproval = fromStatus === SuggestStatus.APPROVED;
+      const needsReapproval = fromStatus !== SuggestStatus.PENDING_APPROVAL;
 
       suggest.content = content;
       if (dto.description !== undefined) suggest.description = dto.description;
@@ -1700,12 +2198,22 @@ export class SuggestService {
       if (dto.beneficiaryInfo !== undefined) {
         suggest.beneficiaryInfo = dto.beneficiaryInfo;
       }
+      if (dto.deductPolicy !== undefined) {
+        suggest.deductPolicy = dto.deductPolicy;
+      }
       suggest.expectedPaymentDate = expectedPaymentDate;
       suggest.schoolId = schoolId;
       suggest.schoolYear = schoolYear;
       suggest.wardId = wardId;
       if (fileUrl) suggest.fileUrl = fileUrl;
       suggest.version = (suggest.version ?? 1) + 1;
+      // Mỗi lần nhân viên sửa/gửi lại, loại đề xuất phải do người duyệt chốt
+      // lại; không giữ một lựa chọn cũ như thể nhân viên đã quyết định.
+      suggest.requestKind = null;
+      suggest.assignedTechnicianId = null;
+      suggest.equipmentSource = null;
+      suggest.stockInHandlerId = null;
+      suggest.acceptorId = null;
 
       if (needsReapproval) {
         suggest.status = SuggestStatus.PENDING_APPROVAL;
@@ -1719,6 +2227,9 @@ export class SuggestService {
       }
 
       const s = await manager.save(suggest);
+      // Người được giao của vòng duyệt cũ không còn giá trị — duyệt lại sẽ
+      // giao việc lại từ đầu.
+      await manager.delete(SuggestAssignment, { suggestId: s.id! });
 
       if (fileUrl) {
         await this.saveExpenseAttachments(
@@ -1726,6 +2237,7 @@ export class SuggestService {
           s.id!,
           [{ fileUrl, fileName: fileUrl.split('/').pop() || 'file' }],
           actor.id,
+          ExpenseAction.UPDATE,
         );
       }
 
@@ -1736,6 +2248,7 @@ export class SuggestService {
         fromStatus,
         toStatus: s.status,
         note: needsReapproval ? 'Sửa sau khi đã duyệt — cần duyệt lại' : null,
+        details: await this.expenseNextStepDetails(manager, s),
       });
 
       return { s, needsReapproval };
@@ -1788,12 +2301,13 @@ export class SuggestService {
       SuggestStatus.STOCK_ISSUE_ORDERED,
       SuggestStatus.EQUIPMENT_RECEIVED,
       SuggestStatus.EQUIPMENT_RETURNED,
+      SuggestStatus.STOCK_IN_COMPLETED,
     ];
 
     if (suggest.status && RESOURCE_MOVED_STATUSES.includes(suggest.status)) {
       throw new BadRequestException(
-        'Không thể xoá đề xuất đã phát sinh dòng tiền/xuất kho ' +
-          '(đã lên lệnh chi, xuất quỹ hoặc lên lệnh xuất kho)',
+        'Không thể xoá đề xuất đã phát sinh dòng tiền/xuất nhập kho ' +
+          '(đã lên lệnh chi, xuất quỹ, lên lệnh xuất kho hoặc nhập kho)',
       );
     }
 
@@ -1836,6 +2350,13 @@ export class SuggestService {
       action: ExpenseAction.CREATE_PAYMENT_ORDER,
       user,
       note: dto.note,
+      logData: () => ({
+        paymentOrder: {
+          code: (paymentOrder as SuggestPaymentOrder | null)?.code ?? null,
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod,
+        },
+      }),
       mutate: (s) => {
         // Một đề xuất có thể được chi lại sau khi đã hoàn quỹ.
         // Xóa dấu vết trạng thái của vòng chi trước trước khi mở vòng mới.
@@ -1885,7 +2406,78 @@ export class SuggestService {
           paymentOrderId: (paymentOrder as SuggestPaymentOrder | null)?.id,
         },
       },
-      { roles: [ExpenseRole.TREASURER] },
+      { roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT] },
+    );
+
+    return { suggest: saved, paymentOrder };
+  }
+
+  /**
+   * Kế toán công nợ sửa lệnh chi đã lập. Cho phép sửa kể cả khi thủ quỹ đã
+   * xuất tiền hoặc kinh doanh đã nhận tiền — quay đề xuất về `PAYMENT_ORDERED`
+   * và xoá dấu vết các bước sau (giống hệt cách `createExpensePaymentOrder`
+   * xử lý khi lập lại lệnh chi sau hoàn quỹ) để buộc thủ quỹ xuất tiền lại và
+   * kinh doanh xác nhận nhận tiền lại theo số liệu mới.
+   */
+  async editExpensePaymentOrder(
+    id: number,
+    dto: CreatePaymentOrderDto,
+    user: AuthUser,
+  ) {
+    let paymentOrder: SuggestPaymentOrder | null = null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.EDIT_PAYMENT_ORDER,
+      user,
+      note: dto.note,
+      logData: () => ({
+        paymentOrder: {
+          code: (paymentOrder as SuggestPaymentOrder | null)?.code ?? null,
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod,
+        },
+      }),
+      mutate: (s) => {
+        s.cashReleasedBy = null;
+        s.cashReleasedAt = null;
+        s.cashReceivedAt = null;
+        s.spentAt = null;
+        s.notSpentReason = null;
+        s.fundReturnedBy = null;
+        s.fundReturnedAt = null;
+      },
+      extra: async (manager, s) => {
+        const existing = await manager.findOne(SuggestPaymentOrder, {
+          where: { suggestId: s.id! },
+        });
+
+        paymentOrder = await manager.save(SuggestPaymentOrder, {
+          ...(existing ?? {}),
+          suggestId: s.id!,
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod,
+          note: dto.note ?? null,
+          // Nguồn tiền do thủ quỹ chọn lại khi xuất tiền lần này.
+          fundSource: null,
+        });
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '✏️ Lệnh chi đã được sửa',
+        message:
+          `Lệnh chi ${(paymentOrder as SuggestPaymentOrder | null)?.code} của đề xuất ${saved.code}` +
+          ` vừa được kế toán công nợ sửa lại, vui lòng xuất tiền lại theo số liệu mới`,
+        senderId: user.id,
+        meta: {
+          status: saved.status,
+          paymentOrderId: (paymentOrder as SuggestPaymentOrder | null)?.id,
+        },
+      },
+      { roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT] },
     );
 
     return { suggest: saved, paymentOrder };
@@ -1905,12 +2497,19 @@ export class SuggestService {
       action: ExpenseAction.CONFIRM_CASH_RELEASED,
       user,
       note,
+      logData: () => ({ fundSource: fundSource ?? null }),
       mutate: (s) => {
         s.cashReleasedBy = user.id;
         s.cashReleasedAt = new Date();
       },
       extra: async (manager, s) => {
-        await this.saveExpenseAttachments(manager, s.id!, files, user.id);
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          files,
+          user.id,
+          ExpenseAction.CONFIRM_CASH_RELEASED,
+        );
         if (fundSource) {
           await manager.update(
             SuggestPaymentOrder,
@@ -1938,6 +2537,33 @@ export class SuggestService {
     );
 
     return saved;
+  }
+
+  /**
+   * Xoá 1 tệp đính kèm — dùng ở form "Xác nhận xuất tiền" để thủ quỹ gỡ
+   * chứng từ đã up nhầm trước khi nộp. Chỉ người đã up hoặc kế toán trưởng
+   * (giám sát chung) được xoá, tránh xoá nhầm tệp của người khác.
+   */
+  async deleteExpenseAttachment(
+    id: number,
+    attachmentId: number,
+    user: AuthUser,
+  ) {
+    const attachment = await this.attachmentRepo.findOne({
+      where: { id: attachmentId, suggestId: id },
+    });
+    if (!attachment) {
+      throw new NotFoundException('Tệp đính kèm không tồn tại');
+    }
+    if (
+      attachment.uploadedBy !== user.id &&
+      !user.roles?.includes(ExpenseRole.CHIEF_ACCOUNTANT)
+    ) {
+      throw new ForbiddenException('Chỉ người đã tải lên mới được xoá tệp này');
+    }
+
+    await this.attachmentRepo.delete({ id: attachmentId });
+    return { success: true };
   }
 
   // ================= BƯỚC 5 — SALES xác nhận đã nhận tiền =================
@@ -1971,7 +2597,13 @@ export class SuggestService {
         s.spentAt = new Date();
       },
       extra: async (manager, s) => {
-        await this.saveExpenseAttachments(manager, s.id!, files, user.id);
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          files,
+          user.id,
+          ExpenseAction.CONFIRM_SPENT,
+        );
       },
     });
   }
@@ -2004,7 +2636,9 @@ export class SuggestService {
         meta: { status: saved.status, reason },
       },
       {
-        roles: [isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.TREASURER],
+        roles: isEquipment
+          ? [ExpenseRole.TECHNICAL]
+          : [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       },
     );
 
@@ -2035,7 +2669,7 @@ export class SuggestService {
         senderId: user.id,
         meta: { status: saved.status },
       },
-      { roles: [ExpenseRole.DEBT_ACCOUNTANT] },
+      { roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT] },
     );
 
     return saved;
@@ -2059,6 +2693,14 @@ export class SuggestService {
       action: ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
       user,
       note: dto.note,
+      logData: () => ({
+        stockIssueOrder: {
+          code: (stockIssueOrder as SuggestStockIssueOrder | null)?.code ?? null,
+          items: dto.items,
+          warehouse: dto.warehouse ?? null,
+          expectedDeliveryDate: dto.expectedDeliveryDate ?? null,
+        },
+      }),
       mutate: (s) => {
         // Thiết bị có thể được xuất lại sau khi đã nhập kho trở lại — xoá dấu
         // vết của vòng trước, giống `createExpensePaymentOrder` ở nhánh tiền.
@@ -2195,6 +2837,635 @@ export class SuggestService {
     return saved;
   }
 
+  // ============================================================
+  // ===== ĐỀ XUẤT THIẾT BỊ mua từ NHÀ CUNG CẤP =====
+  // ============================================================
+
+  /**
+   * Người xử lý được Giám đốc chỉ định lập phiếu nhập kho thật: thiết bị chưa
+   * có mã trong kho được tạo mới, tồn kho tăng qua phiếu PNK. Nếu có đơn giá,
+   * tổng tiền phiếu thành số tiền đề xuất — số chạy về Quản lý thu chi.
+   */
+  async createStockInReceipt(
+    id: number,
+    dto: CreateStockInReceiptDto,
+    user: AuthUser,
+  ) {
+    const items = this.normalizeStockInItems(dto.items);
+    const total = this.stockInTotal(items);
+    let order: SuggestStockInOrder | null = null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CREATE_STOCK_IN_RECEIPT,
+      user,
+      note: dto.note,
+      logData: async (manager) => {
+        const o = order as SuggestStockInOrder | null;
+        const receipt = o?.warehouseReceiptId
+          ? await manager.findOne(WarehouseReceipt, {
+              where: { id: o.warehouseReceiptId },
+            })
+          : null;
+        return {
+          stockIn: {
+            code: o?.code ?? null,
+            warehouseReceiptCode: receipt?.code ?? null,
+            items: o?.items ?? items,
+            total,
+          },
+        };
+      },
+      mutate: (s) => {
+        if (total > 0) s.amount = total;
+      },
+      extra: async (manager, s) => {
+        order = await manager.findOne(SuggestStockInOrder, {
+          where: { suggestId: s.id! },
+        });
+        if (!order) {
+          throw new BadRequestException(
+            'Đề xuất chưa có phiếu nhập kho dự kiến của Giám đốc',
+          );
+        }
+
+        const { receipt, itemIds } =
+          await this.warehouseService.importPurchaseForSuggestWithManager(
+            manager,
+            items,
+            user.id,
+            s.id!,
+            `Nhập kho theo phiếu ${order.code} của đề xuất ${s.code}`,
+          );
+
+        order.items = items.map((it, i) => ({
+          ...it,
+          warehouseItemId: itemIds[i],
+        }));
+        order.note = dto.note?.trim() || null;
+        order.warehouseReceiptId = receipt.id;
+        order.stockedBy = user.id;
+        order.stockedAt = new Date();
+        order = await manager.save(order);
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '📦 Thiết bị đã nhập kho, chờ nghiệm thu',
+        message:
+          `Đề xuất ${saved.code} đã nhập kho,` +
+          ` vui lòng nghiệm thu bàn giao và xác nhận hoàn thành`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      { userIds: saved.acceptorId ? [saved.acceptorId] : [] },
+    );
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '📦 Thiết bị đã nhập kho',
+        message: `Thiết bị của đề xuất ${saved.code} đã nhập kho, đang chờ nghiệm thu`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      {
+        userIds: [saved.createdBy, saved.approvedBy].filter(
+          (v): v is number => !!v && v !== saved.acceptorId,
+        ),
+      },
+    );
+
+    return { suggest: saved, stockInOrder: order };
+  }
+
+  /**
+   * Người nghiệm thu xác nhận đã bàn giao — kết thúc ở `SPENT` để đề xuất
+   * được tính vào Quản lý thu chi như mọi đề xuất đã chi khác.
+   */
+  async confirmStockInAccepted(
+    id: number,
+    user: AuthUser,
+    note?: string,
+    files?: UploadedAttachment[],
+  ) {
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
+      user,
+      note,
+      logData: (_manager, s) => ({
+        amount: s.amount != null ? Number(s.amount) : null,
+      }),
+      mutate: (s) => {
+        s.spentAt = new Date();
+      },
+      extra: async (manager, s) => {
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          files,
+          user.id,
+          ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
+        );
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '✅ Đề xuất thiết bị mới đã hoàn thành',
+        message:
+          `Đề xuất ${saved.code} đã nghiệm thu bàn giao xong,` +
+          ` đã chuyển về Quản lý thu chi`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      {
+        roles: [
+          ExpenseRole.DIRECTOR,
+          ExpenseRole.DEBT_ACCOUNTANT,
+          ExpenseRole.CHIEF_ACCOUNTANT,
+          ExpenseRole.ACCOUNTANT,
+        ],
+        userIds: [saved.createdBy, saved.stockInHandlerId].filter(
+          (v): v is number => !!v,
+        ),
+      },
+    );
+
+    return saved;
+  }
+
+  // ================= NHÁNH SỬA CHỮA =================
+
+  /** Phòng kỹ thuật chỉ cần xác nhận nhận việc; đây là trạng thái kết thúc. */
+  async acceptRepair(id: number, user: AuthUser) {
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.ACCEPT_REPAIR,
+      user,
+      mutate: (s) => {
+        s.technicalRespondedBy = user.id;
+        s.technicalRespondedAt = new Date();
+        s.technicalRejectReason = null;
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '✅ Phòng kỹ thuật đã nhận việc',
+        message: `Phòng kỹ thuật đã nhận xử lý đề xuất sửa chữa ${saved.code}`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      {
+        roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+        userIds: saved.createdBy ? [saved.createdBy] : [],
+      },
+    );
+
+    return saved;
+  }
+
+  /** Phòng kỹ thuật từ chối nhận việc sửa chữa và bắt buộc lưu lý do. */
+  async rejectRepair(id: number, user: AuthUser, reason: string) {
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.REJECT_REPAIR,
+      user,
+      note: reason,
+      mutate: (s) => {
+        s.technicalRespondedBy = user.id;
+        s.technicalRespondedAt = new Date();
+        s.technicalRejectReason = reason;
+      },
+      extra: async (manager, s) => {
+        // Từ chối việc sửa chữa chính là người bàn giao từ chối việc được giao.
+        await manager.update(
+          SuggestAssignment,
+          {
+            suggestId: s.id!,
+            employeeId: user.id,
+            role: AssignmentRole.HANDOVER,
+            status: AssignmentStatus.ASSIGNED,
+          },
+          {
+            status: AssignmentStatus.DECLINED,
+            declineReason: reason,
+            declinedAt: new Date(),
+          },
+        );
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '❌ Phòng kỹ thuật từ chối nhận việc',
+        message: `Phòng kỹ thuật từ chối đề xuất sửa chữa ${saved.code}: ${reason}`,
+        senderId: user.id,
+        meta: { status: saved.status, reason },
+      },
+      {
+        roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+        userIds: saved.createdBy ? [saved.createdBy] : [],
+      },
+    );
+
+    return saved;
+  }
+
+  /**
+   * Giám đốc/Sales Admin chỉ định nhân viên kỹ thuật khác sau khi người
+   * trước từ chối nhận việc — quay lại `APPROVED` với người phụ trách mới,
+   * xoá dấu vết phản hồi (chấp nhận/từ chối) của vòng trước.
+   */
+  async reassignRepair(
+    id: number,
+    user: AuthUser,
+    assignedTechnicianId: number,
+  ) {
+    const technician = await this.employeeRepo.findOne({
+      where: { id: assignedTechnicianId },
+    });
+    if (!technician) {
+      throw new NotFoundException('Nhân viên kỹ thuật không tồn tại');
+    }
+    if (!technician.roles?.includes(ExpenseRole.TECHNICAL)) {
+      throw new BadRequestException(
+        'Nhân viên được chỉ định không thuộc phòng kỹ thuật',
+      );
+    }
+    const isSupporter = await this.dataSource
+      .getRepository(SuggestAssignment)
+      .count({
+        where: {
+          suggestId: id,
+          employeeId: assignedTechnicianId,
+          role: AssignmentRole.SUPPORT,
+          status: In([AssignmentStatus.ASSIGNED, AssignmentStatus.DECLINED]),
+        },
+      });
+    if (isSupporter > 0) {
+      throw new BadRequestException(
+        'Người này đang là người hỗ trợ của đề xuất, chọn người khác',
+      );
+    }
+
+    const before = await this.repo.findOne({ where: { id } });
+    const previousTechnicianId = before?.assignedTechnicianId ?? null;
+    const previousRejectReason = before?.technicalRejectReason ?? null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.REASSIGN_REPAIR,
+      user,
+      logData: async (manager, s) => {
+        const people = await this.employeeRefs(manager, [
+          previousTechnicianId,
+          assignedTechnicianId,
+        ]);
+        return {
+          assignment: {
+            role: AssignmentRole.HANDOVER,
+            from: previousTechnicianId
+              ? people.get(previousTechnicianId) ?? null
+              : null,
+            fromReason: previousRejectReason,
+            to: people.get(assignedTechnicianId) ?? null,
+          },
+        };
+      },
+      mutate: (s) => {
+        s.assignedTechnicianId = assignedTechnicianId;
+        s.technicalRespondedBy = null;
+        s.technicalRespondedAt = null;
+        s.technicalRejectReason = null;
+      },
+      extra: async (manager, s) => {
+        await this.replaceHandoverAssignment(
+          manager,
+          s.id!,
+          assignedTechnicianId,
+          user.id,
+        );
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '🛠️ Bạn được chỉ định phụ trách đề xuất sửa chữa',
+        message: `Bạn được chỉ định phụ trách đề xuất sửa chữa ${saved.code} (giao lại)`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      { userIds: [assignedTechnicianId] },
+    );
+
+    return saved;
+  }
+
+  // ============================================================
+  // ===== GIAO VIỆC: người bàn giao + người hỗ trợ =====
+  // ============================================================
+
+  /**
+   * Trạng thái còn được từ chối / thay người: việc chưa bắt đầu (đã duyệt mà
+   * chưa xuất kho) — đã xuất kho hay đã sửa xong thì không còn nghĩa.
+   */
+  private static readonly ASSIGNMENT_OPEN_STATUSES: SuggestStatus[] = [
+    SuggestStatus.APPROVED,
+    SuggestStatus.EQUIPMENT_RETURNED,
+  ];
+
+  /** Người được giao phải còn làm việc và chưa có mặt trong danh sách giao việc. */
+  private async assertAssignableEmployees(
+    employeeIds: number[],
+    alreadyAssignedIds: number[],
+  ) {
+    const duplicated = employeeIds.find((id) => alreadyAssignedIds.includes(id));
+    if (duplicated) {
+      throw new BadRequestException(
+        'Người hỗ trợ không được trùng với người bàn giao hoặc người đã được giao',
+      );
+    }
+    const found = await this.employeeRepo.find({
+      where: { id: In(employeeIds), isActive: true },
+      select: { id: true },
+    });
+    if (found.length !== employeeIds.length) {
+      throw new NotFoundException('Có người hỗ trợ không tồn tại hoặc đã nghỉ');
+    }
+  }
+
+  /** Đánh dấu người bàn giao cũ đã được thay và tạo dòng giao việc cho người mới. */
+  private async replaceHandoverAssignment(
+    manager: EntityManager,
+    suggestId: number,
+    newEmployeeId: number,
+    actorId: number,
+  ) {
+    const created = await manager.save(SuggestAssignment, {
+      suggestId,
+      employeeId: newEmployeeId,
+      role: AssignmentRole.HANDOVER,
+      assignedBy: actorId,
+    });
+    await manager.update(
+      SuggestAssignment,
+      {
+        suggestId,
+        role: AssignmentRole.HANDOVER,
+        status: In([AssignmentStatus.ASSIGNED, AssignmentStatus.DECLINED]),
+        id: Not(created.id),
+      },
+      { status: AssignmentStatus.REPLACED, replacedById: created.id },
+    );
+    return created;
+  }
+
+  /** Khoá đề xuất chi trong transaction để thao tác giao việc không chạy chồng nhau. */
+  private async lockExpense(manager: EntityManager, id: number) {
+    const s = await manager.findOne(Suggest, {
+      where: { id, type: SuggestType.EXPENSE_REQUEST },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!s) throw new NotFoundException('Đề xuất chi không tồn tại');
+    return s;
+  }
+
+  /**
+   * Người bàn giao / người hỗ trợ từ chối việc được giao, lý do gửi về Giám
+   * đốc. Không đổi trạng thái đề xuất — Giám đốc chọn người thay thế bằng
+   * `replaceAssignment`. Người bàn giao của đề xuất sửa chữa dùng
+   * `rejectRepair` (đã có trạng thái riêng REPAIR_REJECTED).
+   */
+  async declineAssignment(id: number, user: AuthUser, reason: string) {
+    const actor = this.ensureUser(user);
+    const trimmed = reason?.trim();
+    if (!trimmed) throw new BadRequestException('Vui lòng nhập lý do từ chối');
+
+    const { suggest, assignment } = await this.dataSource.transaction(
+      async (manager) => {
+        const s = await this.lockExpense(manager, id);
+        const a = await manager.findOne(SuggestAssignment, {
+          where: {
+            suggestId: id,
+            employeeId: actor.id,
+            status: AssignmentStatus.ASSIGNED,
+          },
+        });
+        if (!a) {
+          throw new ForbiddenException(
+            'Bạn không được giao việc trên đề xuất này hoặc đã từ chối rồi',
+          );
+        }
+        if (
+          a.role === AssignmentRole.HANDOVER &&
+          s.requestKind === ExpenseRequestKind.REPAIR
+        ) {
+          throw new BadRequestException(
+            'Người bàn giao đề xuất sửa chữa dùng nút "Từ chối" việc sửa chữa',
+          );
+        }
+        if (
+          !SuggestService.ASSIGNMENT_OPEN_STATUSES.includes(
+            s.status as SuggestStatus,
+          )
+        ) {
+          throw new BadRequestException(
+            'Việc đã bắt đầu thực hiện nên không từ chối được nữa',
+          );
+        }
+
+        a.status = AssignmentStatus.DECLINED;
+        a.declineReason = trimmed;
+        a.declinedAt = new Date();
+        await manager.save(a);
+
+        await this.writeExpenseLog(manager, {
+          suggestId: id,
+          userId: actor.id,
+          action: ExpenseAction.DECLINE_ASSIGNMENT,
+          fromStatus: s.status,
+          toStatus: s.status,
+          note: trimmed,
+          details: {
+            assignment: {
+              role: a.role,
+              from: (await this.employeeRefs(manager, [actor.id])).get(actor.id) ?? null,
+              fromReason: trimmed,
+            },
+            // Có người từ chối thì việc tiếp theo là Giám đốc chọn người thay.
+            next: { people: [], departments: ['Giám đốc', 'Sales Admin'] },
+            acceptor: s.acceptorId
+              ? (await this.employeeRefs(manager, [s.acceptorId])).get(s.acceptorId) ?? null
+              : null,
+          },
+        });
+
+        return { suggest: s, assignment: a };
+      },
+    );
+
+    const roleLabel =
+      assignment.role === AssignmentRole.SUPPORT
+        ? 'hỗ trợ'
+        : suggest.requestKind === ExpenseRequestKind.REPAIR
+          ? 'đảm nhận'
+          : 'bàn giao';
+    await this.notifyExpense(
+      {
+        suggestId: id,
+        title: `❌ Người ${roleLabel} từ chối nhận việc`,
+        message:
+          `${fixVietnamese(actor.name ?? 'Nhân viên')} từ chối ${roleLabel} đề xuất` +
+          ` ${suggest.code}: ${trimmed}. Vui lòng chọn người thay thế`,
+        senderId: actor.id,
+        meta: { status: suggest.status, reason: trimmed, assignmentId: assignment.id },
+      },
+      {
+        roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+        userIds: suggest.approvedBy ? [suggest.approvedBy] : [],
+      },
+    );
+
+    return this.findOneExpense(id, actor);
+  }
+
+  /**
+   * Giám đốc/Sales Admin chọn người thay thế cho một người đã từ chối. Thay
+   * người bàn giao thì người mới cũng thành người giữ bước kỹ thuật.
+   */
+  async replaceAssignment(
+    id: number,
+    assignmentId: number,
+    user: AuthUser,
+    employeeId: number,
+  ) {
+    const actor = this.ensureUser(user);
+
+    const { suggest, created } = await this.dataSource.transaction(
+      async (manager) => {
+        const s = await this.lockExpense(manager, id);
+        const old = await manager.findOne(SuggestAssignment, {
+          where: { id: assignmentId, suggestId: id },
+        });
+        if (!old) throw new NotFoundException('Không tìm thấy người được giao');
+        if (old.status !== AssignmentStatus.DECLINED) {
+          throw new BadRequestException(
+            'Chỉ chọn người thay thế cho người đã từ chối',
+          );
+        }
+        if (
+          old.role === AssignmentRole.HANDOVER &&
+          s.requestKind === ExpenseRequestKind.REPAIR
+        ) {
+          throw new BadRequestException(
+            'Đề xuất sửa chữa dùng "Chỉ định người khác" để thay người bàn giao',
+          );
+        }
+        const openStatuses: SuggestStatus[] = [
+          ...SuggestService.ASSIGNMENT_OPEN_STATUSES,
+          // Người bàn giao từ chối sửa chữa thì người hỗ trợ vẫn cần thay được.
+          SuggestStatus.REPAIR_REJECTED,
+        ];
+        if (!openStatuses.includes(s.status as SuggestStatus)) {
+          throw new BadRequestException(
+            'Việc đã bắt đầu thực hiện nên không thay người được nữa',
+          );
+        }
+
+        const active = await manager.find(SuggestAssignment, {
+          where: {
+            suggestId: id,
+            status: In([AssignmentStatus.ASSIGNED, AssignmentStatus.DECLINED]),
+          },
+        });
+        await this.assertAssignableEmployees(
+          [employeeId],
+          active.map((a) => a.employeeId),
+        );
+
+        let createdRow: SuggestAssignment;
+        if (old.role === AssignmentRole.HANDOVER) {
+          const employee = await manager.findOne(Employee, {
+            where: { id: employeeId },
+          });
+          if (!employee?.roles?.includes(ExpenseRole.TECHNICAL)) {
+            throw new BadRequestException(
+              'Người bàn giao phải thuộc phòng kỹ thuật',
+            );
+          }
+          createdRow = await this.replaceHandoverAssignment(
+            manager,
+            id,
+            employeeId,
+            actor.id,
+          );
+          s.assignedTechnicianId = employeeId;
+          await manager.save(s);
+        } else {
+          createdRow = await manager.save(SuggestAssignment, {
+            suggestId: id,
+            employeeId,
+            role: AssignmentRole.SUPPORT,
+            assignedBy: actor.id,
+          });
+          old.status = AssignmentStatus.REPLACED;
+          old.replacedById = createdRow.id;
+          await manager.save(old);
+        }
+
+        const people = await this.employeeRefs(manager, [
+          old.employeeId,
+          employeeId,
+        ]);
+        await this.writeExpenseLog(manager, {
+          suggestId: id,
+          userId: actor.id,
+          action: ExpenseAction.REPLACE_ASSIGNMENT,
+          fromStatus: s.status,
+          toStatus: s.status,
+          details: {
+            assignment: {
+              role: old.role,
+              from: people.get(old.employeeId) ?? null,
+              fromReason: old.declineReason ?? null,
+              to: people.get(employeeId) ?? null,
+            },
+            ...(await this.expenseNextStepDetails(manager, s)),
+          },
+        });
+
+        return { suggest: s, created: createdRow };
+      },
+    );
+
+    await this.notifyExpense(
+      {
+        suggestId: id,
+        title:
+          created.role === AssignmentRole.HANDOVER
+            ? '🛠️ Bạn được chỉ định bàn giao đề xuất'
+            : '🤝 Bạn được chỉ định hỗ trợ',
+        message:
+          created.role === AssignmentRole.HANDOVER
+            ? `Bạn được chỉ định thay người bàn giao đề xuất ${suggest.code}`
+            : `Bạn được chỉ định thay người hỗ trợ đề xuất ${suggest.code}`,
+        senderId: actor.id,
+        meta: { status: suggest.status },
+      },
+      { userIds: [employeeId] },
+    );
+
+    return this.findOneExpense(id, actor);
+  }
+
   // ================= QUERY =================
 
   /** Áp các bộ lọc chung của đề xuất chi lên query builder (alias 's'). */
@@ -2229,11 +3500,7 @@ export class SuggestService {
     return qb;
   }
 
-  /**
-   * Phòng kỹ thuật chỉ phụ trách nhánh THIẾT BỊ — nếu tài khoản chỉ có role
-   * `ky_thuat` (không kiêm role nào khác của luồng đề xuất chi) thì mọi truy
-   * vấn đều bị ép về `requestKind = EQUIPMENT`, không xem được đề xuất tiền.
-   */
+  /** Tài khoản chỉ thuộc phòng kỹ thuật, không kiêm vai trò ở nhánh khác. */
   private isTechnicalOnly(actor?: AuthUser): boolean {
     const roles = actor?.roles ?? [];
     if (!roles.includes(ExpenseRole.TECHNICAL)) return false;
@@ -2243,23 +3510,44 @@ export class SuggestService {
       ExpenseRole.DEBT_ACCOUNTANT,
       ExpenseRole.TREASURER,
       ExpenseRole.SALES_ADMIN,
+      ExpenseRole.CHIEF_ACCOUNTANT,
+      ExpenseRole.ACCOUNTANT,
     ];
     return !roles.some((r) => otherExpenseRoles.includes(r));
   }
 
-  /** Ép bộ lọc theo phạm vi role của người gọi. */
-  private scopeExpenseFilter(
-    filter: FilterExpenseDto,
+  /**
+   * Phòng kỹ thuật chỉ xem đề xuất thiết bị/sửa chữa. Nếu Giám đốc đã chỉ
+   * định người phụ trách thì chỉ kỹ thuật viên đó nhìn thấy đề xuất.
+   */
+  private applyExpenseAccessScope(
+    qb: SelectQueryBuilder<Suggest>,
     actor?: AuthUser,
-  ): FilterExpenseDto {
-    if (this.isTechnicalOnly(actor)) {
-      return { ...filter, requestKind: ExpenseRequestKind.EQUIPMENT };
-    }
-    return filter;
+  ) {
+    if (!this.isTechnicalOnly(actor)) return qb;
+
+    return qb
+      .andWhere('s.requestKind IN (:...technicalKinds)', {
+        technicalKinds: [
+          ExpenseRequestKind.EQUIPMENT,
+          ExpenseRequestKind.REPAIR,
+        ],
+      })
+      .andWhere(
+        `(
+          s.assignedTechnicianId IS NULL
+          OR s.assignedTechnicianId = :technicalActorId
+          OR EXISTS (
+            SELECT 1 FROM suggest_assignment sa
+            WHERE sa."suggestId" = s.id AND sa."employeeId" = :technicalActorId
+          )
+        )`,
+        { technicalActorId: actor!.id },
+      );
   }
 
   async findAllExpense(rawFilter: FilterExpenseDto, actor?: AuthUser) {
-    const filter = this.scopeExpenseFilter(rawFilter, actor);
+    const filter = rawFilter;
     const { page = 1, limit = 20 } = filter;
 
     const qb = this.repo
@@ -2267,10 +3555,12 @@ export class SuggestService {
       .leftJoinAndSelect('s.createdByUser', 'creator')
       .leftJoinAndSelect('s.paymentOrder', 'po')
       .leftJoinAndSelect('s.stockIssueOrder', 'sio')
+      .leftJoinAndSelect('s.stockInOrder', 'sino')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST });
 
     this.applyExpenseFilters(qb, filter);
+    this.applyExpenseAccessScope(qb, actor);
 
     const [data, total] = await qb
       .orderBy('s.createdAt', 'DESC')
@@ -2296,7 +3586,7 @@ export class SuggestService {
     rawFilter: FilterExpenseDto,
     actor?: AuthUser,
   ) {
-    const filter = this.scopeExpenseFilter(rawFilter, actor);
+    const filter = rawFilter;
     const { page = 1, limit = 20 } = filter;
 
     // Bước 1: tổng hợp theo nhân viên, sắp xếp theo đề xuất gần nhất
@@ -2310,6 +3600,7 @@ export class SuggestService {
       .andWhere('s.createdBy IS NOT NULL');
 
     this.applyExpenseFilters(groupQb, filter);
+    this.applyExpenseAccessScope(groupQb, actor);
 
     const groupsRaw = await groupQb
       .groupBy('s.createdBy')
@@ -2337,11 +3628,13 @@ export class SuggestService {
       .createQueryBuilder('s')
       .leftJoinAndSelect('s.paymentOrder', 'po')
       .leftJoinAndSelect('s.stockIssueOrder', 'sio')
+      .leftJoinAndSelect('s.stockInOrder', 'sino')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST })
       .andWhere('s.createdBy IN (:...employeeIds)', { employeeIds });
 
     this.applyExpenseFilters(itemsQb, filter);
+    this.applyExpenseAccessScope(itemsQb, actor);
 
     const items = await itemsQb.orderBy('s.createdAt', 'DESC').getMany();
 
@@ -2393,7 +3686,13 @@ export class SuggestService {
         stockIssueOrder: { creator: true },
         attachments: true,
         school: true,
+        assignedTechnician: true,
+        stockInOrder: { creator: true, stocker: true, warehouseReceipt: true },
+        stockInHandler: true,
+        acceptor: true,
+        assignments: { employee: true },
       },
+      order: { assignments: { id: 'ASC' } },
     });
 
     if (!s) {
@@ -2402,10 +3701,23 @@ export class SuggestService {
 
     if (
       this.isTechnicalOnly(actor) &&
-      s.requestKind !== ExpenseRequestKind.EQUIPMENT
+      ![ExpenseRequestKind.EQUIPMENT, ExpenseRequestKind.REPAIR].includes(
+        s.requestKind as ExpenseRequestKind,
+      )
     ) {
       throw new ForbiddenException(
-        'Phòng kỹ thuật chỉ xem được đề xuất thiết bị',
+        'Phòng kỹ thuật chỉ xem được đề xuất thiết bị hoặc sửa chữa',
+      );
+    }
+
+    if (
+      this.isTechnicalOnly(actor) &&
+      s.assignedTechnicianId != null &&
+      s.assignedTechnicianId !== actor!.id &&
+      !(s.assignments ?? []).some((a) => a.employeeId === actor!.id)
+    ) {
+      throw new ForbiddenException(
+        'Đề xuất này đã được giao cho một nhân viên kỹ thuật khác',
       );
     }
 
@@ -2433,9 +3745,11 @@ export class SuggestService {
    * - saleadmin:      PENDING_APPROVAL (chưa kiểm duyệt)
    * - ketoan_congno:  APPROVED, FUND_RETURNED
    * - thuquy:         PAYMENT_ORDERED, NOT_SPENT (đề xuất tiền)
-   * - ky_thuat:       APPROVED, NOT_SPENT, EQUIPMENT_RETURNED (đề xuất thiết bị)
+   * - ky_thuat:       việc thiết bị và đề xuất sửa chữa chờ phản hồi
    * - sales (chủ):    DRAFT, CASH_RELEASED, CASH_RECEIVED,
    *                   STOCK_ISSUE_ORDERED, EQUIPMENT_RECEIVED
+   * - bất kỳ ai:      thiết bị từ nhà cung cấp mình được chỉ định xử lý (APPROVED) hoặc
+   *                   nghiệm thu (STOCK_IN_COMPLETED)
    */
   async myExpenseTasks(user: AuthUser) {
     const actor = this.ensureUser(user);
@@ -2446,6 +3760,7 @@ export class SuggestService {
       .leftJoinAndSelect('s.createdByUser', 'creator')
       .leftJoinAndSelect('s.paymentOrder', 'po')
       .leftJoinAndSelect('s.stockIssueOrder', 'sio')
+      .leftJoinAndSelect('s.stockInOrder', 'sino')
       .leftJoinAndSelect('s.school', 'school')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST });
 
@@ -2466,6 +3781,17 @@ export class SuggestService {
       conditions.push(notMine('s.status = :dirStatus'));
       params.dirStatus = SuggestStatus.PENDING_APPROVAL;
     }
+    // Có người bàn giao/hỗ trợ từ chối, chờ chọn người thay thế.
+    if (
+      roles.includes(ExpenseRole.DIRECTOR) ||
+      roles.includes(ExpenseRole.SALES_ADMIN)
+    ) {
+      conditions.push(`EXISTS (
+        SELECT 1 FROM suggest_assignment sa
+        WHERE sa."suggestId" = s.id AND sa.status = :declinedAssignment
+      )`);
+      params.declinedAssignment = AssignmentStatus.DECLINED;
+    }
     if (roles.includes(ExpenseRole.SALES_ADMIN)) {
       // Sales Admin giờ duyệt/từ chối được ngang quyền Giám đốc nên vẫn còn
       // việc kể cả khi đã kiểm duyệt chính sách xong — không lọc theo
@@ -2473,14 +3799,25 @@ export class SuggestService {
       conditions.push(notMine('s.status = :saStatus'));
       params.saStatus = SuggestStatus.PENDING_APPROVAL;
     }
+    if (roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)) {
+      // Kế toán trưởng cũng duyệt/từ chối được ngang Giám đốc & Sales Admin.
+      conditions.push(notMine('s.status = :caStatus'));
+      params.caStatus = SuggestStatus.PENDING_APPROVAL;
+    }
     // Kế toán & thủ quỹ chỉ giữ nhánh tiền, phòng kỹ thuật chỉ giữ nhánh
     // thiết bị. `APPROVED` và `NOT_SPENT` dùng chung cho cả hai nhánh nên
     // phải lọc thêm theo `requestKind`, không thì kế toán thấy cả đề xuất
     // thiết bị rồi bấm vào nhận 409.
     params.cashKind = ExpenseRequestKind.CASH;
     params.equipmentKind = ExpenseRequestKind.EQUIPMENT;
+    params.repairKind = ExpenseRequestKind.REPAIR;
 
-    if (roles.includes(ExpenseRole.DEBT_ACCOUNTANT)) {
+    // Kế toán trưởng có toàn quyền kế toán công nợ + thủ quỹ nên phải thấy
+    // việc của cả hai nhánh, không chỉ nhánh khớp đúng role của mình.
+    if (
+      roles.includes(ExpenseRole.DEBT_ACCOUNTANT) ||
+      roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)
+    ) {
       conditions.push(
         notMine(
           's.requestKind = :cashKind AND s.status IN (:...accStatuses)',
@@ -2491,7 +3828,10 @@ export class SuggestService {
         SuggestStatus.FUND_RETURNED,
       ];
     }
-    if (roles.includes(ExpenseRole.TREASURER)) {
+    if (
+      roles.includes(ExpenseRole.TREASURER) ||
+      roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)
+    ) {
       conditions.push(
         notMine(
           's.requestKind = :cashKind AND s.status IN (:...treStatuses)',
@@ -2505,14 +3845,29 @@ export class SuggestService {
     if (roles.includes(ExpenseRole.TECHNICAL)) {
       conditions.push(
         notMine(
-          's.requestKind = :equipmentKind AND s.status IN (:...techStatuses)',
+          `(
+            (
+              s.requestKind = :equipmentKind
+              AND s.status IN (:...techEquipmentStatuses)
+              AND (s.equipmentSource IS NULL OR s.equipmentSource = :stockSource)
+            )
+            OR (
+              s.requestKind = :repairKind
+              AND s.status = :techRepairStatus
+            )
+          ) AND (
+            s.assignedTechnicianId IS NULL
+            OR s.assignedTechnicianId = :meId
+          )`,
         ),
       );
-      params.techStatuses = [
+      params.techEquipmentStatuses = [
         SuggestStatus.APPROVED,
         SuggestStatus.EQUIPMENT_RETURNED,
         SuggestStatus.NOT_SPENT,
       ];
+      params.techRepairStatus = SuggestStatus.APPROVED;
+      params.stockSource = EquipmentSource.STOCK;
     }
     if (roles.includes(ExpenseRole.SALES)) {
       conditions.push(
@@ -2525,6 +3880,24 @@ export class SuggestService {
         SuggestStatus.EQUIPMENT_RECEIVED,
       ];
     }
+
+    // Thiết bị từ nhà cung cấp: việc theo người được Giám đốc chỉ định, không
+    // theo role — ai được chọn làm người xử lý/nghiệm thu đều thấy, kể cả chủ
+    // đề xuất.
+    conditions.push(
+      `(
+        s.requestKind = :equipmentKind
+        AND s.equipmentSource = :supplierSource
+        AND (
+          (s.status = :purchaseHandlerStatus AND s.stockInHandlerId = :meId)
+          OR (s.status = :purchaseAcceptorStatus AND s.acceptorId = :meId)
+        )
+      )`,
+    );
+    params.equipmentKind = ExpenseRequestKind.EQUIPMENT;
+    params.supplierSource = EquipmentSource.SUPPLIER;
+    params.purchaseHandlerStatus = SuggestStatus.APPROVED;
+    params.purchaseAcceptorStatus = SuggestStatus.STOCK_IN_COMPLETED;
 
     if (conditions.length === 0) return [];
 
@@ -2590,13 +3963,6 @@ export class SuggestService {
     return this.getExpenseReminderSettings();
   }
 
-  private isValidSchoolYear(schoolYear: string): boolean {
-    const match = /^(\d{4})-(\d{4})$/.exec(schoolYear);
-    if (!match) return false;
-
-    return Number(match[2]) === Number(match[1]) + 1;
-  }
-
   // ================= CRON BÁO ĐỘNG (08:00 giờ VN) =================
 
   @Cron('0 8 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -2652,6 +4018,7 @@ export class SuggestService {
 
   private async remindUpcoming(s: Suggest, daysLeft: number) {
     let roles: string[] = [];
+    let userIds: number[] = [];
     let message = '';
 
     if (s.status === SuggestStatus.PENDING_APPROVAL) {
@@ -2660,15 +4027,37 @@ export class SuggestService {
         `Đề xuất ${s.code} dự kiến chi trong ${daysLeft} ngày` +
         ` (${s.expectedPaymentDate}) nhưng chưa được duyệt`;
     } else if (s.status === SuggestStatus.APPROVED) {
-      // Đã duyệt nhưng chưa sang bước kế: đề xuất tiền chờ kế toán lên lệnh
-      // chi, đề xuất thiết bị chờ kỹ thuật lên lệnh xuất kho.
+      // Đã duyệt nhưng chưa sang bước kế: tiền chờ kế toán; thiết bị/sửa chữa
+      // chờ phòng kỹ thuật (hoặc đúng người được chỉ định).
       const isEquipment = s.requestKind === ExpenseRequestKind.EQUIPMENT;
-      roles = [
-        isEquipment ? ExpenseRole.TECHNICAL : ExpenseRole.DEBT_ACCOUNTANT,
-      ];
+      const isRepair = s.requestKind === ExpenseRequestKind.REPAIR;
+      const isPurchase =
+        isEquipment && s.equipmentSource === EquipmentSource.SUPPLIER;
+      const needsTechnical = (isEquipment && !isPurchase) || isRepair;
+      roles = isPurchase
+        ? []
+        : needsTechnical
+        ? s.assignedTechnicianId
+          ? []
+          : [ExpenseRole.TECHNICAL]
+        : [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT];
+      userIds = isPurchase
+        ? s.stockInHandlerId
+          ? [s.stockInHandlerId]
+          : []
+        : needsTechnical && s.assignedTechnicianId
+          ? [s.assignedTechnicianId]
+          : [];
+      const expectedAction = isRepair
+        ? 'phản hồi nhận việc'
+        : isPurchase
+          ? 'phiếu nhập kho'
+          : isEquipment
+          ? 'lệnh xuất kho'
+          : 'lệnh chi';
       message =
-        `Đề xuất ${s.code} dự kiến ${isEquipment ? 'giao thiết bị' : 'chi'} trong ${daysLeft} ngày` +
-        ` (${s.expectedPaymentDate}) nhưng chưa lên ${isEquipment ? 'lệnh xuất kho' : 'lệnh chi'}`;
+        `Đề xuất ${s.code} đến hạn trong ${daysLeft} ngày` +
+        ` (${s.expectedPaymentDate}) nhưng chưa có ${expectedAction}`;
     } else {
       return 0;
     }
@@ -2680,7 +4069,7 @@ export class SuggestService {
         message,
         meta: { kind: 'reminder', status: s.status },
       },
-      { roles },
+      { roles, userIds },
     );
 
     return 1;
@@ -2689,22 +4078,38 @@ export class SuggestService {
   private async remindDueToday(s: Suggest) {
     const actor = expenseActorForStatus(
       s.status as SuggestStatus,
-      s.requestKind,
+      s.requestKind ?? ExpenseRequestKind.CASH,
+      s.equipmentSource,
     );
     if (!actor) return 0;
+    const assignedTechnical =
+      !actor.owner &&
+      actor.roles.includes(ExpenseRole.TECHNICAL) &&
+      s.assignedTechnicianId
+        ? s.assignedTechnicianId
+        : null;
 
     await this.notifyExpense(
       {
         suggestId: s.id!,
-        title: '📅 Hôm nay là ngày dự kiến chi',
+        title: '📅 Hôm nay là ngày mong muốn',
         message:
-          `Hôm nay là ngày dự kiến chi của đề xuất ${s.code}` +
+          `Hôm nay là ngày mong muốn của đề xuất ${s.code}` +
           ` (đang ở bước ${s.status})`,
         meta: { kind: 'due_today', status: s.status },
       },
       {
-        roles: [...(actor.owner ? [] : actor.roles), ExpenseRole.DIRECTOR],
-        userIds: actor.owner && s.createdBy ? [s.createdBy] : [],
+        roles: [
+          ...(!actor.owner && !assignedTechnical ? actor.roles : []),
+          ExpenseRole.DIRECTOR,
+        ],
+        userIds: [
+          ...(actor.owner && s.createdBy ? [s.createdBy] : []),
+          ...(assignedTechnical ? [assignedTechnical] : []),
+          ...(actor.assignee && this.expenseAssigneeId(s, actor.assignee)
+            ? [this.expenseAssigneeId(s, actor.assignee)!]
+            : []),
+        ],
       },
     );
 
@@ -2722,22 +4127,38 @@ export class SuggestService {
 
     const actor = expenseActorForStatus(
       s.status as SuggestStatus,
-      s.requestKind,
+      s.requestKind ?? ExpenseRequestKind.CASH,
+      s.equipmentSource,
     );
     if (!actor) return 0;
+    const assignedTechnical =
+      !actor.owner &&
+      actor.roles.includes(ExpenseRole.TECHNICAL) &&
+      s.assignedTechnicianId
+        ? s.assignedTechnicianId
+        : null;
 
     await this.notifyExpense(
       {
         suggestId: s.id!,
-        title: '🚨 Đề xuất chi quá hạn',
+        title: '🚨 Đề xuất quá hạn',
         message:
-          `Đề xuất ${s.code} đã quá ngày dự kiến chi ${daysLate} ngày` +
+          `Đề xuất ${s.code} đã quá ngày mong muốn ${daysLate} ngày` +
           ` (${s.expectedPaymentDate}), đang ở bước ${s.status}`,
         meta: { kind: 'overdue', status: s.status, daysLate },
       },
       {
-        roles: [...(actor.owner ? [] : actor.roles), ExpenseRole.DIRECTOR],
-        userIds: actor.owner && s.createdBy ? [s.createdBy] : [],
+        roles: [
+          ...(!actor.owner && !assignedTechnical ? actor.roles : []),
+          ExpenseRole.DIRECTOR,
+        ],
+        userIds: [
+          ...(actor.owner && s.createdBy ? [s.createdBy] : []),
+          ...(assignedTechnical ? [assignedTechnical] : []),
+          ...(actor.assignee && this.expenseAssigneeId(s, actor.assignee)
+            ? [this.expenseAssigneeId(s, actor.assignee)!]
+            : []),
+        ],
       },
     );
 

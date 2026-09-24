@@ -3,13 +3,16 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, JoinColumn, M
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
+import { EquipmentSource } from '../enums/equipment-source.enum';
 import { Policy } from '../../policy/entities/policy.entity';
 import { Employee } from '../../employee/employee.entity';
 import { School } from '../../school/schools.entity';
 import { Ward } from '../../ward/ward.entity';
 import { SuggestPaymentOrder } from './suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
+import { SuggestStockInOrder } from './suggest-stock-in-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
+import { SuggestAssignment } from './suggest-assignment.entity';
 
 /** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
 export interface RequestedEquipmentItem {
@@ -39,16 +42,16 @@ export class Suggest {
 
     /**
      * Loại đề xuất chi: tiền (về kế toán lên lệnh chi) hay thiết bị (về phòng
-     * kỹ thuật lên lệnh xuất kho). Chỉ có nghĩa khi `type = EXPENSE_REQUEST`;
-     * mặc định `CASH` để mọi đề xuất cũ giữ nguyên luồng tiền.
+     * kỹ thuật lên lệnh xuất kho). Chỉ có nghĩa khi `type = EXPENSE_REQUEST`.
+     * Để trống trong lúc chờ duyệt vì Giám đốc là người quyết định loại.
      */
     @Column({
         type: 'enum',
         enum: ExpenseRequestKind,
         name: 'request_kind',
-        default: ExpenseRequestKind.CASH,
+        nullable: true,
     })
-    requestKind?: ExpenseRequestKind;
+    requestKind?: ExpenseRequestKind | null;
 
     @Column({ type: 'text' })
     content?: string;
@@ -81,6 +84,14 @@ export class Suggest {
     @Column({ nullable: true })
     policyId?: number | null;
 
+    /**
+     * Cờ đánh dấu do kinh doanh tự chọn khi tạo đề xuất chi: đề xuất này nên
+     * trừ vào chính sách liên quan. Chỉ để hiển thị/thống kê, không có logic
+     * tính toán trừ tiền tự động kèm theo.
+     */
+    @Column({ name: 'deduct_policy', type: 'boolean', default: false })
+    deductPolicy?: boolean;
+
     /** Xã/phường gửi đề xuất; độc lập với policyId để đề xuất có thể tạo trước chính sách. */
     @ManyToOne(() => Ward, { nullable: true, onDelete: 'SET NULL' })
     @JoinColumn({ name: 'wardId' })
@@ -104,6 +115,23 @@ export class Suggest {
 
     @Column({ type: 'text', nullable: true })
     rejectReason?: string | null;
+
+    /** Ghi chú chung của Giám đốc/Sales Admin khi duyệt đề xuất (không bắt buộc). */
+    @Column({ type: 'text', name: 'approve_note', nullable: true })
+    approveNote?: string | null;
+
+    /**
+     * Nhân viên phòng kỹ thuật (role `ky_thuat`) được Giám đốc/Sales Admin chỉ
+     * định phụ trách xử lý khi duyệt đề xuất `EQUIPMENT`/`REPAIR`. Không bắt
+     * buộc — nếu bỏ trống thì cả phòng kỹ thuật cùng thấy đề xuất như trước.
+     */
+    @Index('IDX_suggest_assigned_technician')
+    @Column({ type: 'int', name: 'assigned_technician_id', nullable: true })
+    assignedTechnicianId?: number | null;
+
+    @ManyToOne(() => Employee, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'assigned_technician_id' })
+    assignedTechnician?: Employee | null;
 
     @ManyToOne(() => Employee, { nullable: true, onDelete: 'SET NULL' })
     @JoinColumn({ name: 'createdBy' })
@@ -218,6 +246,53 @@ export class Suggest {
     @Column({ type: 'timestamptz', name: 'equipment_returned_at', nullable: true })
     equipmentReturnedAt?: Date | null;
 
+    // ===== phản hồi của PHÒNG KỸ THUẬT cho đề xuất SỬA CHỮA =====
+
+    @Column({ type: 'int', name: 'technical_responded_by', nullable: true })
+    technicalRespondedBy?: number | null;
+
+    @Column({ type: 'timestamptz', name: 'technical_responded_at', nullable: true })
+    technicalRespondedAt?: Date | null;
+
+    /** Bắt buộc khi phòng kỹ thuật từ chối nhận việc sửa chữa. */
+    @Column({ type: 'text', name: 'technical_reject_reason', nullable: true })
+    technicalRejectReason?: string | null;
+
+    // ===== ĐỀ XUẤT THIẾT BỊ mua từ NHÀ CUNG CẤP =====
+
+    /**
+     * Nguồn thiết bị Giám đốc chọn khi duyệt đề xuất thiết bị: kho công ty hay
+     * nhà cung cấp. Chỉ có nghĩa khi `requestKind = EQUIPMENT`; để trống = kho.
+     */
+    @Column({
+        type: 'varchar',
+        length: 20,
+        name: 'equipment_source',
+        nullable: true,
+    })
+    equipmentSource?: EquipmentSource | null;
+
+    /** Người xử lý phiếu nhập kho — Giám đốc chỉ định khi duyệt. */
+    @Index('IDX_suggest_stock_in_handler')
+    @Column({ type: 'int', name: 'stock_in_handler_id', nullable: true })
+    stockInHandlerId?: number | null;
+
+    @ManyToOne(() => Employee, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'stock_in_handler_id' })
+    stockInHandler?: Employee | null;
+
+    /** Người nghiệm thu bàn giao — xác nhận hoàn thành đề xuất. */
+    @Index('IDX_suggest_acceptor')
+    @Column({ type: 'int', name: 'acceptor_id', nullable: true })
+    acceptorId?: number | null;
+
+    @ManyToOne(() => Employee, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'acceptor_id' })
+    acceptor?: Employee | null;
+
+    @OneToOne(() => SuggestStockInOrder, (o) => o.suggest)
+    stockInOrder?: SuggestStockInOrder;
+
     @OneToOne(() => SuggestPaymentOrder, (po) => po.suggest)
     paymentOrder?: SuggestPaymentOrder;
 
@@ -226,4 +301,8 @@ export class Suggest {
 
     @OneToMany(() => SuggestAttachment, (att) => att.suggest)
     attachments?: SuggestAttachment[];
+
+    /** Người bàn giao + người hỗ trợ Giám đốc giao khi duyệt (kể cả người đã từ chối). */
+    @OneToMany(() => SuggestAssignment, (a) => a.suggest)
+    assignments?: SuggestAssignment[];
 }

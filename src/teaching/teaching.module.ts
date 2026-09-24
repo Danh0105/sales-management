@@ -15,6 +15,7 @@ import { TeachingScheduleNotificationLog } from './entities/teaching-schedule-no
 import { TeacherLocationChange } from './entities/teacher-location-change.entity';
 import { TeacherAccountRequest } from './entities/teacher-account-request.entity';
 import { FuelAllowanceTier } from './entities/fuel-allowance-tier.entity';
+import { Payroll } from '../payroll/entities/payroll.entity';
 import { Ward } from '../ward/ward.entity';
 import { NotificationModule } from '../notifications/notification.module';
 import { SchoolsModule } from '../school/schools.module';
@@ -69,6 +70,8 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
       TeacherLocationChange,
       TeacherAccountRequest,
       FuelAllowanceTier,
+      // Chỉ đọc: biết tháng nào đã gửi phiếu lương để không điền lại phụ cấp.
+      Payroll,
       LessonImageEntity,
       Ward,
     ]),

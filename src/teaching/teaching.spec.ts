@@ -252,6 +252,9 @@ function makeSessionService(
 
   session.qb.getRawOne.mockResolvedValue(opts.conflict);
 
+  const school = makeRepo();
+  const schoolLocation = makeRepo();
+
   const classService = makeClassService(opts.schoolClass);
   const fuelAllowanceTierService = {
     computeForTeacherSchool: jest
@@ -274,9 +277,11 @@ function makeSessionService(
     undefined as any,
     undefined as any,
     fuelAllowanceTierService as any,
+    schoolLocation.repo,
+    school.repo,
   );
 
-  return { service, session, teacher, subject, classService };
+  return { service, session, teacher, subject, classService, school, schoolLocation };
 }
 
 const validSchedule: CreateTeachingScheduleDto = {
@@ -2052,6 +2057,7 @@ describe('TeachingSessionService', () => {
         payableAmount: 1400000,
         otherCostsAmount: 300000,
         fuelAllowanceAmount: 0,
+        totalDistanceKm: 0,
         totalPayableAmount: 1700000,
         missingRateSessions: 0,
       });
@@ -3808,6 +3814,7 @@ describe('Đơn giá mỗi tiết', () => {
         payableAmount: 2_100_000,
         otherCostsAmount: 250_000,
         fuelAllowanceAmount: 0,
+        totalDistanceKm: 0,
         totalPayableAmount: 2_350_000,
         missingRateSessions: 2,
       });

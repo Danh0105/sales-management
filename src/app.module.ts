@@ -43,6 +43,7 @@ import { VirtualTryOnModule } from './virtual-tryon/virtual-tryon.module';
 import { SchoolLocationModule } from './school-location/school-location.module';
 import { ActivityLogModule } from './activity-log/activity-log.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
+import { PayrollModule } from './payroll/payroll.module';
 
 @Module({
   imports: [
@@ -104,6 +105,7 @@ import { WarehouseModule } from './warehouse/warehouse.module';
     ZaloOaModule,
     SchoolLocationModule,
     WarehouseModule,
+    PayrollModule,
   ],
 })
 export class AppModule {}

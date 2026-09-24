@@ -65,6 +65,7 @@ export const AUDITED_ROLES = [
   'director_la',
   TEACHER_STAFF_ROLE,
   TEACHER_COLLABORATOR_ROLE,
+  'ketoan_truong',
 ];
 
 const MUTATING_METHODS = ['POST', 'PATCH', 'PUT', 'DELETE'];
@@ -339,7 +340,8 @@ export class ActivityLogInterceptor implements NestInterceptor {
 
     const path = (req.originalUrl ?? req.url ?? '').split('?')[0];
     if (SKIPPED_RESOURCES.includes(resourceOf(path))) return false;
-    if (LOOKUP_PATH_SUFFIXES.some((suffix) => path.endsWith(suffix))) return false;
+    if (LOOKUP_PATH_SUFFIXES.some((suffix) => path.endsWith(suffix)))
+      return false;
 
     const roles = user.roles ?? (user.role ? [user.role] : []);
     return roles.some((r) => AUDITED_ROLES.includes(r));

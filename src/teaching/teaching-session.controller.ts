@@ -30,6 +30,7 @@ import {
     BulkCheckAttendanceDto,
     ApplyTeachingSessionDto,
     AssignTeachingSessionDto,
+    BulkAssignTeachingSessionDto,
     CheckAttendanceDto,
     CheckinTeachingSessionDto,
     CheckoutTeachingSessionDto,
@@ -37,6 +38,7 @@ import {
     CreateTeachingSessionDto,
     DeclineTeachingSessionDto,
     QueryAttendanceSummaryDto,
+    QueryTravelReviewDto,
     QueryTeachingSessionsDto,
     NotifyTeachingScheduleDto,
     SubmitLessonDto,
@@ -176,6 +178,18 @@ export class TeachingSessionController {
     ) {
         assertCanManageTeaching(req.user);
         return this.service.assignTeacher(id, dto);
+    }
+
+    /**
+     * Đổi/gán giáo viên cho nhiều buổi đã chọn trên bảng Chấm công cùng lúc.
+     * Khai trước `:id/assign` không bắt buộc (segment thứ hai khác nhau) nhưng
+     * để gần cho dễ tìm — cùng cách làm với `attendance/bulk`.
+     */
+    @Roles(...TEACHING_MANAGE_ROLES)
+    @Patch('assign/bulk')
+    bulkAssignTeacher(@Body() dto: BulkAssignTeachingSessionDto, @Req() req: Request) {
+        assertCanManageTeaching(req.user);
+        return this.service.bulkAssignTeacher(dto);
     }
 
     /** Giáo viên xác nhận hoặc từ chối buổi dạy được giao. */
@@ -331,6 +345,13 @@ export class TeachingSessionController {
     @Get('attendance/summary')
     attendanceSummary(@Query() query: QueryAttendanceSummaryDto) {
         return this.service.attendanceSummary(query);
+    }
+
+    /** Rà soát quãng đường di chuyển từng ngày của giáo viên công ty. */
+    @Roles(...TEACHING_VIEW_ROLES)
+    @Get('attendance/travel-review')
+    travelReview(@Query() query: QueryTravelReviewDto) {
+        return this.service.travelReview(query);
     }
 
     /** Thư viện ảnh báo giảng, phân trang theo từng ảnh trong SQL. */

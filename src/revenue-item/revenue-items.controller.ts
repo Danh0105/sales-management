@@ -18,9 +18,20 @@ import { AuthUser } from '../type/auth-user.type';
 
 type RequestWithUser = Request & { user: AuthUser };
 
+const WRITE_ROLES = [
+  'accountant',
+  'ketoan_congno',
+  'ketoan_truong',
+  'troly_gd',
+  'director',
+];
+// Sales admin chỉ được xem (đọc) — chỉnh sửa duy nhất bảng "Chi Ngoài" qua
+// ManagementExpenseItemsController.
+const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
+
 @Controller('revenue-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('accountant', 'ketoan_congno', 'ketoan_truong', 'troly_gd', 'director')
+@Roles(...WRITE_ROLES)
 export class RevenueItemsController {
   constructor(private readonly revenueItemsService: RevenueItemsService) {}
 
@@ -30,11 +41,13 @@ export class RevenueItemsController {
   }
 
   @Get()
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   findAll(@Query() query: any) {
     return this.revenueItemsService.findAll(query);
   }
 
   @Get(':id')
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   findOne(@Param('id') id: string) {
     return this.revenueItemsService.findOne(Number(id));
   }

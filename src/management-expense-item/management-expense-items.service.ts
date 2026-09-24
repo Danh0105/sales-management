@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -37,6 +38,21 @@ export class ManagementExpenseItemsService {
 
     private readonly dataSource: DataSource,
   ) {}
+
+  /**
+   * Bảng "Chi Ngoài" bị khoá sau khi sales admin xác nhận
+   * (`SchoolExpense.managementExpenseConfirmed`) — chỉ kế toán trưởng còn sửa
+   * được sau khi khoá.
+   */
+  private assertNotLocked(schoolExpense: SchoolExpense, user?: AuthUser) {
+    if (!schoolExpense.managementExpenseConfirmed) return;
+    const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
+    if (!isChiefAccountant) {
+      throw new ForbiddenException(
+        'Bảng "Chi Ngoài" đã được xác nhận và khoá — chỉ kế toán trưởng được sửa',
+      );
+    }
+  }
 
   /** Map "Chi khác" → response (decimal → number). */
   private mapOtherCost(oc: ManagementExpenseOtherCost) {
@@ -113,6 +129,8 @@ export class ManagementExpenseItemsService {
     if (subject.schoolId !== schoolExpense.school?.id) {
       throw new BadRequestException('Subject does not belong to school');
     }
+
+    this.assertNotLocked(schoolExpense, user);
 
     const shared = normalizeSharedFields(body);
     const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
@@ -223,6 +241,8 @@ export class ManagementExpenseItemsService {
     }
 
     const oldData = { ...data };
+
+    this.assertNotLocked(data.schoolExpense, user);
 
     if (body.subjectId && Number(body.subjectId) !== data.subject?.id) {
       const subject = await this.subjectRepository.findOne({
@@ -335,6 +355,8 @@ export class ManagementExpenseItemsService {
     if (!data) {
       throw new NotFoundException('ManagementExpenseItem not found');
     }
+
+    this.assertNotLocked(data.schoolExpense, user);
 
     await this.historyRepository.save({
       schoolExpenseId: data.schoolExpense?.id,

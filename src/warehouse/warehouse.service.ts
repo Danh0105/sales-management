@@ -23,6 +23,15 @@ export interface WarehouseExportLine {
     quantity: number;
 }
 
+/** Một dòng nhập kho của đề xuất thiết bị từ nhà cung cấp — có thể chưa có mã trong kho. */
+export interface WarehousePurchaseLine {
+    warehouseItemId?: number | null;
+    name: string;
+    unit?: string | null;
+    quantity: number;
+    unitPrice?: number | null;
+}
+
 @Injectable()
 export class WarehouseService {
     constructor(
@@ -232,6 +241,66 @@ export class WarehouseService {
             relatedSuggestId,
             createdBy: actorId,
         });
+    }
+
+    /**
+     * Nhập kho thiết bị mua từ nhà cung cấp cho đề xuất thiết bị. Dòng chưa
+     * có `warehouseItemId` được tạo mới thành một loại thiết bị trong kho (tồn
+     * 0) rồi mới cộng tồn qua phiếu — để tồn kho vẫn chỉ đổi qua phiếu.
+     * Chạy trong transaction của `SuggestService.createStockInReceipt`.
+     */
+    async importPurchaseForSuggestWithManager(
+        manager: EntityManager,
+        lines: WarehousePurchaseLine[],
+        actorId: number,
+        relatedSuggestId: number,
+        note: string,
+    ): Promise<{ receipt: WarehouseReceipt; itemIds: number[] }> {
+        const resolved: WarehouseExportLine[] = [];
+
+        for (const line of lines) {
+            if (line.warehouseItemId != null) {
+                resolved.push({
+                    warehouseItemId: line.warehouseItemId,
+                    quantity: line.quantity,
+                });
+                continue;
+            }
+
+            const code = await this.generateCode(manager, 'warehouse_item', 'TB');
+            const created = await manager.save(WarehouseItem, {
+                code,
+                name: line.name,
+                unit: line.unit || 'cái',
+                imei: null,
+                quantity: 0,
+                note: `Tạo khi nhập kho đề xuất thiết bị #${relatedSuggestId}`,
+                createdBy: actorId,
+            });
+            resolved.push({ warehouseItemId: created.id, quantity: line.quantity });
+        }
+
+        const items = await this.applyStockChange(
+            manager,
+            WarehouseReceiptType.IN,
+            resolved,
+        );
+
+        const code = await this.generateCode(manager, 'warehouse_receipt', 'PNK');
+
+        const receipt = await manager.save(WarehouseReceipt, {
+            code,
+            type: WarehouseReceiptType.IN,
+            items: items.map((it, i) => ({
+                ...it,
+                unitPrice: lines[i].unitPrice ?? null,
+            })),
+            note,
+            relatedSuggestId,
+            createdBy: actorId,
+        });
+
+        return { receipt, itemIds: resolved.map((l) => l.warehouseItemId) };
     }
 
     /**

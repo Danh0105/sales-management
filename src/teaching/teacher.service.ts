@@ -59,6 +59,8 @@ import {
   findTeacherAccountApprovers,
   findTeachingManagers,
 } from './teaching-managers.util';
+import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
+import { vnToday } from '../suggest/utils/vn-date';
 
 const MAX_LIMIT = 100;
 
@@ -118,7 +120,40 @@ export class TeacherService {
 
     @InjectRepository(TeacherAccountRequest)
     private readonly accountRequestRepo: Repository<TeacherAccountRequest>,
+
+    /**
+     * Điền phụ cấp xăng cho các buổi đang trống khi giáo viên có vị trí/trở
+     * thành giáo viên công ty. Test dựng service bằng vị trí nên có thể thiếu
+     * — gọi qua `recomputeGasAllowances()` để khỏi vỡ các test cũ.
+     */
+    private readonly fuelAllowanceTierService?: FuelAllowanceTierService,
   ) {}
+
+  /**
+   * Phụ cấp xăng chỉ được chốt lúc tạo buổi, nên buổi tạo ra khi giáo viên
+   * chưa có vị trí sẽ trống mãi — mỗi lần vị trí/loại giáo viên đổi thì điền
+   * lại các chỗ trống đó. Lỗi chỉ ghi log, không làm hỏng thao tác chính.
+   */
+  private async recomputeGasAllowances(teacherId: number): Promise<void> {
+    await this.fuelAllowanceTierService?.recomputeMissingGasAllowancesSafely({
+      teacherId,
+    });
+  }
+
+  /**
+   * Vị trí nhà mới có hiệu lực TỪ NGÀY DUYỆT: tính lại phụ cấp mọi buổi từ
+   * ngày đó (kể cả buổi đã chốt theo nhà cũ), rồi điền nốt các buổi còn trống.
+   */
+  private async applyNewLocation(
+    teacherId: number,
+    effectiveAt: Date,
+  ): Promise<void> {
+    await this.fuelAllowanceTierService?.reapplyTeacherLocationSafely(
+      teacherId,
+      vnToday(effectiveAt),
+    );
+    await this.recomputeGasAllowances(teacherId);
+  }
 
   async create(dto: CreateTeacherDto) {
     const prepared = await this.prepareCreate(dto);
@@ -360,8 +395,10 @@ export class TeacherService {
     return this.toTeacherItem(row, preferences);
   }
 
-  async update(id: number, dto: UpdateTeacherDto) {
+  async update(id: number, dto: UpdateTeacherDto, actorId?: number) {
     const teacher = await this.getEntity(id);
+    const previousLatitude = teacher.latitude ?? null;
+    const previousLongitude = teacher.longitude ?? null;
 
     if (dto.phone !== undefined) {
       await this.assertPhoneAvailable(dto.phone, id);
@@ -422,6 +459,36 @@ export class TeacherService {
     }
 
     await this.teacherRepo.save(teacher);
+
+    const locationChanged =
+      dto.googleMapsUrl !== undefined &&
+      (Number(teacher.latitude ?? NaN) !== Number(previousLatitude ?? NaN) ||
+        Number(teacher.longitude ?? NaN) !== Number(previousLongitude ?? NaN));
+
+    if (locationChanged) {
+      const now = new Date();
+      // Nhân sự sửa thẳng trong hồ sơ cũng là một lần đổi nhà — phải để lại
+      // lịch sử thì mới biết các ngày trước đó giáo viên ở đâu.
+      if (teacher.latitude != null && teacher.longitude != null) {
+        await this.locationChangeRepo.save(
+          this.locationChangeRepo.create({
+            teacherId: id,
+            latitude: teacher.latitude,
+            longitude: teacher.longitude,
+            previousLatitude,
+            previousLongitude,
+            status: TeacherLocationChangeStatus.APPROVED,
+            reviewedBy: actorId ?? null,
+            reviewNote: 'Nhân sự sửa vị trí trong hồ sơ giáo viên',
+            reviewedAt: now,
+          }),
+        );
+      }
+      await this.applyNewLocation(id, now);
+    } else if (dto.teacherRole !== undefined || dto.employeeId !== undefined) {
+      await this.recomputeGasAllowances(id);
+    }
+
     return this.findOne(id);
   }
 
@@ -583,8 +650,24 @@ export class TeacherService {
         teacher.longitude = dto.longitude;
         teacher.googleMapsUrl = null;
         await teachers.save(teacher);
+        // Lần khai đầu không cần duyệt nhưng vẫn ghi lịch sử — mốc bắt đầu để
+        // tra vị trí nhà theo từng ngày dạy.
+        await changes.save(
+          changes.create({
+            teacherId: teacher.id,
+            latitude: dto.latitude,
+            longitude: dto.longitude,
+            previousLatitude: null,
+            previousLongitude: null,
+            status: TeacherLocationChangeStatus.APPROVED,
+            reviewedBy: null,
+            reviewNote: 'Giáo viên khai vị trí lần đầu',
+            reviewedAt: new Date(),
+          }),
+        );
         return {
           status: 'captured',
+          teacherId: teacher.id,
           requiresApproval: false,
           latitude: dto.latitude,
           longitude: dto.longitude,
@@ -616,6 +699,9 @@ export class TeacherService {
 
     if (result.status === 'pending' && result.requestId !== undefined) {
       await this.notifyLocationChangeRequest(result.requestId, employeeId);
+    }
+    if (result.status === 'captured' && result.teacherId !== undefined) {
+      await this.recomputeGasAllowances(result.teacherId);
     }
     return result;
   }
@@ -741,9 +827,13 @@ export class TeacherService {
         id: request.id,
         status: request.status,
         teacherId: request.teacherId,
+        reviewedAt: request.reviewedAt,
       };
     });
 
+    if (approved) {
+      await this.applyNewLocation(result.teacherId, result.reviewedAt ?? new Date());
+    }
     await this.notifyLocationChangeResult(result.teacherId, approved, dto.note);
 
     return { id: result.id, status: result.status };
@@ -868,6 +958,8 @@ export class TeacherService {
       }),
     );
 
+    // Có tài khoản giáo viên công ty rồi mới được trả phụ cấp xăng.
+    await this.recomputeGasAllowances(teacher.id);
     return this.findOne(teacher.id);
   }
 
@@ -1083,6 +1175,7 @@ export class TeacherService {
       return { request, teacherId };
     });
 
+    if (outcome.teacherId) await this.recomputeGasAllowances(outcome.teacherId);
     await this.notifyAccountResult(outcome.request, approved, dto.note);
 
     return {

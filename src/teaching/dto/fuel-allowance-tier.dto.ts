@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, Min } from 'class-validator';
+import { IsInt, IsNumber, IsOptional, Min } from 'class-validator';
 
 export class CreateFuelAllowanceTierDto {
   @Type(() => Number)
@@ -38,4 +38,13 @@ export class UpdateFuelAllowanceTierDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   amount?: number;
+}
+
+export class RecomputeGasAllowanceDto {
+  /** Bỏ trống = tính lại cho mọi giáo viên công ty. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  teacherId?: number;
 }

@@ -300,7 +300,7 @@ export class TeacherController {
     assertCanManageTeaching(req.user);
     assertCanSetTeachingRates(req.user, dto, ['defaultRatePerPeriod']);
 
-    const teacher = await this.service.update(id, dto);
+    const teacher = await this.service.update(id, dto, req.user!.id);
     if (!dto.password) return teacher;
 
     // Hồ sơ đã lưu xong ở trên; phần cấp tài khoản đi tiếp theo luồng của nó.

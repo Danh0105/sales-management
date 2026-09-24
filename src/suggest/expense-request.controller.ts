@@ -30,6 +30,7 @@ import { SuggestType } from './enums/suggest-type.enum';
 import { SuggestService, UploadedAttachment } from './suggest.service';
 import { CreatePaymentOrderDto } from './dto/expense/create-payment-order.dto';
 import { RejectExpenseDto } from './dto/expense/reject-expense.dto';
+import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
 import { WithdrawExpenseDto } from './dto/expense/withdraw-expense.dto';
 import { SaleAdminReviewExpenseDto } from './dto/expense/sale-admin-review-expense.dto';
 import { ConfirmNoteDto } from './dto/expense/confirm-note.dto';
@@ -40,6 +41,12 @@ import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
+import { ReassignRepairDto } from './dto/expense/reassign-repair.dto';
+import { CreateStockInReceiptDto } from './dto/expense/create-stock-in-receipt.dto';
+import {
+    DeclineAssignmentDto,
+    ReplaceAssignmentDto,
+} from './dto/expense/assignment.dto';
 
 const singleUpload = FileInterceptor('file', {
     storage: diskStorage({
@@ -177,13 +184,17 @@ export class ExpenseRequestController {
     // làm hai bước kiểm soát liên tiếp), guard này chỉ chặn theo role.
 
     @Post(':id/approve')
-    @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN)
-    approve(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
-        return this.service.approveExpense(id, req.user);
+    @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ExpenseRole.CHIEF_ACCOUNTANT)
+    approve(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ApproveExpenseDto,
+        @Req() req: any,
+    ) {
+        return this.service.approveExpense(id, req.user, dto);
     }
 
     @Post(':id/reject')
-    @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN)
+    @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ExpenseRole.CHIEF_ACCOUNTANT)
     reject(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: RejectExpenseDto,
@@ -220,13 +231,39 @@ export class ExpenseRequestController {
     // ================= KẾ TOÁN CÔNG NỢ =================
 
     @Post(':id/payment-order')
-    @Roles(ExpenseRole.DEBT_ACCOUNTANT)
+    @Roles(ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT)
     paymentOrder(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: CreatePaymentOrderDto,
         @Req() req: any,
     ) {
         return this.service.createExpensePaymentOrder(id, dto, req.user);
+    }
+
+    /** Sửa lệnh chi đã lập — các bước sau (xuất tiền, nhận tiền) phải làm lại. */
+    @Post(':id/payment-order/edit')
+    @Roles(ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT)
+    editPaymentOrder(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: CreatePaymentOrderDto,
+        @Req() req: any,
+    ) {
+        return this.service.editExpensePaymentOrder(id, dto, req.user);
+    }
+
+    /** Xoá 1 tệp đính kèm — dùng ở form xác nhận xuất tiền để gỡ tệp up nhầm. */
+    @Delete(':id/attachments/:attachmentId')
+    @Roles(
+        ExpenseRole.DEBT_ACCOUNTANT,
+        ExpenseRole.TREASURER,
+        ExpenseRole.CHIEF_ACCOUNTANT,
+    )
+    deleteAttachment(
+        @Param('id', ParseIntPipe) id: number,
+        @Param('attachmentId', ParseIntPipe) attachmentId: number,
+        @Req() req: any,
+    ) {
+        return this.service.deleteExpenseAttachment(id, attachmentId, req.user);
     }
 
     /** Kinh doanh xác nhận đã nhận thiết bị (nhánh đề xuất thiết bị) */
@@ -264,10 +301,117 @@ export class ExpenseRequestController {
         return this.service.confirmEquipmentReturned(id, req.user, dto.note);
     }
 
+    // ========== THIẾT BỊ TỪ NHÀ CUNG CẤP (equipmentSource = SUPPLIER) ==========
+    // Không gắn @Roles: người xử lý/nghiệm thu do Giám đốc chỉ định có thể
+    // thuộc bất kỳ phòng ban nào — state machine kiểm tra đúng người.
+
+    /** Người xử lý lập phiếu nhập kho thật. */
+    @Post(':id/stock-in-receipt')
+    stockInReceipt(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: CreateStockInReceiptDto,
+        @Req() req: any,
+    ) {
+        if (!req.user) throw new UnauthorizedException('Chưa đăng nhập');
+        return this.service.createStockInReceipt(id, dto, req.user);
+    }
+
+    /** Người nghiệm thu xác nhận hoàn thành — đề xuất chạy về Quản lý thu chi. */
+    @Post(':id/stock-in-accept')
+    @UseInterceptors(multiUpload)
+    stockInAccept(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmNoteDto,
+        @UploadedFiles() files: Express.Multer.File[],
+        @Req() req: any,
+    ) {
+        if (!req.user) throw new UnauthorizedException('Chưa đăng nhập');
+        return this.service.confirmStockInAccepted(
+            id,
+            req.user,
+            dto.note,
+            toAttachments(files),
+        );
+    }
+
+    // ================= GIAO VIỆC: người bàn giao + người hỗ trợ =================
+
+    /**
+     * Người bàn giao / người hỗ trợ từ chối việc được giao. Không gắn @Roles:
+     * người hỗ trợ có thể thuộc bất kỳ phòng ban nào — service kiểm tra đúng
+     * người được giao.
+     */
+    @Post(':id/assignments/decline')
+    declineAssignment(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: DeclineAssignmentDto,
+        @Req() req: any,
+    ) {
+        if (!req.user) throw new UnauthorizedException('Chưa đăng nhập');
+        return this.service.declineAssignment(id, req.user, dto.reason);
+    }
+
+    /** Giám đốc/Sales Admin chọn người thay thế cho người đã từ chối. */
+    @Post(':id/assignments/:assignmentId/replace')
+    @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ExpenseRole.CHIEF_ACCOUNTANT)
+    replaceAssignment(
+        @Param('id', ParseIntPipe) id: number,
+        @Param('assignmentId', ParseIntPipe) assignmentId: number,
+        @Body() dto: ReplaceAssignmentDto,
+        @Req() req: any,
+    ) {
+        return this.service.replaceAssignment(
+            id,
+            assignmentId,
+            req.user,
+            dto.employeeId,
+        );
+    }
+
+    /** Đề xuất sửa chữa: phòng kỹ thuật xác nhận nhận việc. */
+    @Post(':id/repair-accept')
+    @Roles(ExpenseRole.TECHNICAL)
+    repairAccept(
+        @Param('id', ParseIntPipe) id: number,
+        @Req() req: any,
+    ) {
+        return this.service.acceptRepair(id, req.user);
+    }
+
+    /** Đề xuất sửa chữa: phòng kỹ thuật từ chối, bắt buộc có lý do. */
+    @Post(':id/repair-reject')
+    @Roles(ExpenseRole.TECHNICAL)
+    repairReject(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: RejectExpenseDto,
+        @Req() req: any,
+    ) {
+        return this.service.rejectRepair(id, req.user, dto.reason);
+    }
+
+    /** Đề xuất sửa chữa: Giám đốc/Sales Admin chỉ định người khác sau khi bị từ chối. */
+    @Post(':id/repair-reassign')
+    @Roles(
+        ExpenseRole.DIRECTOR,
+        ExpenseRole.SALES_ADMIN,
+        ExpenseRole.CHIEF_ACCOUNTANT,
+    )
+    repairReassign(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ReassignRepairDto,
+        @Req() req: any,
+    ) {
+        return this.service.reassignRepair(
+            id,
+            req.user,
+            dto.assignedTechnicianId,
+        );
+    }
+
     // ================= THỦ QUỸ =================
 
     @Post(':id/cash-released')
-    @Roles(ExpenseRole.TREASURER)
+    @Roles(ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT)
     @UseInterceptors(multiUpload)
     cashReleased(
         @Param('id', ParseIntPipe) id: number,
@@ -285,7 +429,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/fund-returned')
-    @Roles(ExpenseRole.TREASURER)
+    @Roles(ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT)
     fundReturned(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,

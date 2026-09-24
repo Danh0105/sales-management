@@ -26,7 +26,8 @@ import { CreateWarehouseReceiptDto } from './dto/create-warehouse-receipt.dto';
 /**
  * Quản lý kho thiết bị (1 kho duy nhất). Phòng kỹ thuật (`ky_thuat`) quản lý
  * tồn kho + phiếu nhập/xuất; kinh doanh (`sales`) chỉ được xem danh sách tồn
- * để chọn thiết bị có sẵn khi tạo đề xuất thiết bị.
+ * để chọn thiết bị có sẵn khi tạo đề xuất thiết bị. Giám đốc được xem tồn kho
+ * và phiếu nhập/xuất (không tạo/sửa) để theo dõi.
  */
 @Controller('warehouse')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -63,7 +64,7 @@ export class WarehouseController {
     }
 
     @Get('receipts')
-    @Roles(ExpenseRole.TECHNICAL)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.DIRECTOR)
     listReceipts() {
         return this.service.listReceipts();
     }

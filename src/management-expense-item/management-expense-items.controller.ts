@@ -18,9 +18,19 @@ import { AuthUser } from '../type/auth-user.type';
 
 type RequestWithUser = Request & { user: AuthUser };
 
+/** Sales admin chỉnh sửa duy nhất bảng "Chi Ngoài" này (xem RealExpensesController). */
+const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
+
 @Controller('management-expense-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('accountant', 'ketoan_congno', 'ketoan_truong', 'troly_gd', 'director')
+@Roles(
+  'accountant',
+  'ketoan_congno',
+  'ketoan_truong',
+  'troly_gd',
+  'director',
+  ...SALESADMIN_ROLES,
+)
 export class ManagementExpenseItemsController {
   constructor(
     private readonly managementExpenseItemsService: ManagementExpenseItemsService,

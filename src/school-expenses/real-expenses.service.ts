@@ -28,6 +28,9 @@ import {
 } from './expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
 
+/** Giữ đồng bộ với `SALESADMIN_ROLES` trong real-expenses.controller.ts. */
+const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
+
 @Injectable()
 export class RealExpensesService {
   constructor(
@@ -376,6 +379,20 @@ export class RealExpensesService {
       );
     }
 
+    // Bảng "Chi Ngoài" đã được sales admin xác nhận → khoá, chỉ kế toán
+    // trưởng còn sửa được. Khoá thì bỏ qua phần managementExpenseItems của
+    // body (giữ nguyên dòng cũ), không ảnh hưởng tới doanh thu/chi trường.
+    const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
+    const managementLocked =
+      schoolExpense.managementExpenseConfirmed && !isChiefAccountant;
+
+    // Sales admin chỉ được sửa DUY NHẤT bảng "Chi Ngoài" — dùng chung endpoint
+    // save-all (đỡ phải tách API riêng) nhưng bỏ qua hoàn toàn phần doanh thu
+    // và chi trường của body, giữ nguyên dữ liệu cũ.
+    const isSalesAdmin = (user?.roles ?? []).some((r) =>
+      SALESADMIN_ROLES.includes(r),
+    );
+
     const queryRunner = this.dataSource.createQueryRunner();
 
     await queryRunner.connect();
@@ -383,42 +400,52 @@ export class RealExpensesService {
 
     try {
       // Delete old items for this subject
-      await queryRunner.manager.delete(RevenueItem, {
-        schoolExpense: {
-          id: schoolExpenseId,
-        },
-        subject: {
-          id: body.subjectId,
-        },
-      });
+      if (!isSalesAdmin) {
+        await queryRunner.manager.delete(RevenueItem, {
+          schoolExpense: {
+            id: schoolExpenseId,
+          },
+          subject: {
+            id: body.subjectId,
+          },
+        });
 
-      await queryRunner.manager.delete(SchoolExpenseItem, {
-        schoolExpense: {
-          id: schoolExpenseId,
-        },
-        subject: {
-          id: body.subjectId,
-        },
-      });
+        await queryRunner.manager.delete(SchoolExpenseItem, {
+          schoolExpense: {
+            id: schoolExpenseId,
+          },
+          subject: {
+            id: body.subjectId,
+          },
+        });
+      }
 
-      await queryRunner.manager.delete(ManagementExpenseItem, {
-        schoolExpense: {
-          id: schoolExpenseId,
-        },
-        subject: {
-          id: body.subjectId,
-        },
-      });
+      if (!managementLocked) {
+        await queryRunner.manager.delete(ManagementExpenseItem, {
+          schoolExpense: {
+            id: schoolExpenseId,
+          },
+          subject: {
+            id: body.subjectId,
+          },
+        });
+      }
 
-      const revenueItems = Array.isArray(body.revenueItems)
-        ? body.revenueItems
-        : [];
-      const schoolExpenseItems = Array.isArray(body.schoolExpenseItems)
-        ? body.schoolExpenseItems
-        : [];
-      const managementExpenseItems = Array.isArray(body.managementExpenseItems)
-        ? body.managementExpenseItems
-        : [];
+      const revenueItems = isSalesAdmin
+        ? []
+        : Array.isArray(body.revenueItems)
+          ? body.revenueItems
+          : [];
+      const schoolExpenseItems = isSalesAdmin
+        ? []
+        : Array.isArray(body.schoolExpenseItems)
+          ? body.schoolExpenseItems
+          : [];
+      const managementExpenseItems = managementLocked
+        ? []
+        : Array.isArray(body.managementExpenseItems)
+          ? body.managementExpenseItems
+          : [];
 
       const maxRows = Math.max(
         revenueItems.length,
@@ -881,6 +908,47 @@ export class RealExpensesService {
         schoolExpenseItems: schoolExpenseItems.map(mapSchoolExpense),
         managementExpenseItems: managementExpenseItems.map(mapManagementExpense),
       },
+    };
+  }
+
+  /**
+   * Sales admin xác nhận bảng "Chi Ngoài" → khoá chỉnh sửa (chỉ kế toán
+   * trưởng còn sửa được sau khi khoá). Idempotent: gọi lại khi đã khoá vẫn
+   * trả về trạng thái hiện tại, không lỗi.
+   */
+  async confirmManagementExpense(id: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+    if (!data) {
+      throw new NotFoundException('SchoolExpense not found');
+    }
+
+    if (!data.managementExpenseConfirmed) {
+      data.managementExpenseConfirmed = true;
+      data.managementExpenseConfirmedBy = user?.id ?? null;
+      data.managementExpenseConfirmedByName = user?.name ?? null;
+      data.managementExpenseConfirmedAt = new Date();
+      await this.schoolExpenseRepository.save(data);
+
+      await this.historyRepository.save({
+        schoolExpenseId: id,
+        updatedById: user?.id,
+        updatedByName: user?.name,
+        action: 'CONFIRM_MANAGEMENT_EXPENSE',
+        entityType: 'management_expense',
+        oldData: { managementExpenseConfirmed: false },
+        newData: {
+          managementExpenseConfirmed: true,
+          managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
+        },
+      });
+    }
+
+    return {
+      id: data.id,
+      managementExpenseConfirmed: data.managementExpenseConfirmed,
+      managementExpenseConfirmedBy: data.managementExpenseConfirmedBy,
+      managementExpenseConfirmedByName: data.managementExpenseConfirmedByName,
+      managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
     };
   }
 }

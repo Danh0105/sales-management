@@ -11,6 +11,7 @@ import {
 import { ExpenseAction } from './enums/expense-action.enum';
 import { ExpenseRole } from './constants/expense-roles';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
+import { EquipmentSource } from './enums/equipment-source.enum';
 
 const salesOwner = { actorRoles: [ExpenseRole.SALES], isOwner: true };
 const salesOther = { actorRoles: [ExpenseRole.SALES], isOwner: false };
@@ -228,19 +229,23 @@ describe('Expense flow state machine (trong Suggest)', () => {
   // ===== actor giữ bước (reminder / my-tasks) =====
   it('map đúng actor đang giữ bước theo status', () => {
     expect(expenseActorForStatus(SuggestStatus.PENDING_APPROVAL)).toEqual({
-      roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+      roles: [
+        ExpenseRole.DIRECTOR,
+        ExpenseRole.SALES_ADMIN,
+        ExpenseRole.CHIEF_ACCOUNTANT,
+      ],
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.APPROVED)).toEqual({
-      roles: [ExpenseRole.DEBT_ACCOUNTANT],
+      roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.PAYMENT_ORDERED)).toEqual({
-      roles: [ExpenseRole.TREASURER],
+      roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.NOT_SPENT)).toEqual({
-      roles: [ExpenseRole.TREASURER],
+      roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.CASH_RELEASED)).toEqual({
@@ -250,7 +255,7 @@ describe('Expense flow state machine (trong Suggest)', () => {
     expect(expenseActorForStatus(SuggestStatus.DRAFT)).toBeNull();
     expect(expenseActorForStatus(SuggestStatus.SPENT)).toBeNull();
     expect(expenseActorForStatus(SuggestStatus.FUND_RETURNED)).toEqual({
-      roles: [ExpenseRole.DEBT_ACCOUNTANT],
+      roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.REJECTED)).toBeNull();
@@ -660,7 +665,10 @@ describe('đề xuất thiết bị (kind = EQUIPMENT)', () => {
 
         expect(
             expenseActorForStatus(SuggestStatus.APPROVED, ExpenseRequestKind.CASH),
-        ).toEqual({ roles: [ExpenseRole.DEBT_ACCOUNTANT], owner: false });
+        ).toEqual({
+            roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+            owner: false,
+        });
 
         // NOT_SPENT: tiền về thủ quỹ, thiết bị về kỹ thuật
         expect(
@@ -671,6 +679,176 @@ describe('đề xuất thiết bị (kind = EQUIPMENT)', () => {
         ).toEqual({ roles: [ExpenseRole.TECHNICAL], owner: false });
         expect(
             expenseActorForStatus(SuggestStatus.NOT_SPENT, ExpenseRequestKind.CASH),
-        ).toEqual({ roles: [ExpenseRole.TREASURER], owner: false });
+        ).toEqual({
+            roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
+            owner: false,
+        });
     });
+});
+
+describe('đề xuất sửa chữa (kind = REPAIR)', () => {
+  const repair = { kind: ExpenseRequestKind.REPAIR };
+  const technical = {
+    actorRoles: [ExpenseRole.TECHNICAL],
+    isOwner: false,
+    ...repair,
+  };
+
+  it.each([
+    [ExpenseAction.ACCEPT_REPAIR, SuggestStatus.REPAIR_ACCEPTED],
+    [ExpenseAction.REJECT_REPAIR, SuggestStatus.REPAIR_REJECTED],
+  ])('kỹ thuật có thể %s từ APPROVED', (action, expected) => {
+    expect(
+      assertExpenseTransition(action, SuggestStatus.APPROVED, technical),
+    ).toBe(expected);
+    expect(EXPENSE_TERMINAL_STATUSES).toContain(expected);
+  });
+
+  it('không dùng thao tác sửa chữa cho đề xuất thiết bị', () => {
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.ACCEPT_REPAIR,
+        SuggestStatus.APPROVED,
+        {
+          actorRoles: [ExpenseRole.TECHNICAL],
+          isOwner: false,
+          kind: ExpenseRequestKind.EQUIPMENT,
+        },
+      ),
+    ).toThrow(ConflictException);
+  });
+
+  it('APPROVED của đề xuất sửa chữa thuộc phòng kỹ thuật', () => {
+    expect(
+      expenseActorForStatus(
+        SuggestStatus.APPROVED,
+        ExpenseRequestKind.REPAIR,
+      ),
+    ).toEqual({ roles: [ExpenseRole.TECHNICAL], owner: false });
+  });
+});
+
+describe('đề xuất thiết bị mua từ nhà cung cấp (equipmentSource = SUPPLIER)', () => {
+  const supplier = {
+    kind: ExpenseRequestKind.EQUIPMENT,
+    equipmentSource: EquipmentSource.SUPPLIER,
+  };
+
+  it('người xử lý nhập kho → người nghiệm thu hoàn thành → SPENT', () => {
+    let status = assertExpenseTransition(
+      ExpenseAction.CREATE_STOCK_IN_RECEIPT,
+      SuggestStatus.APPROVED,
+      {
+        actorRoles: [ExpenseRole.SALES],
+        isOwner: false,
+        isAssignee: true,
+        actorId: 7,
+        previousActorId: 1,
+        ...supplier,
+      },
+    );
+    expect(status).toBe(SuggestStatus.STOCK_IN_COMPLETED);
+
+    // Người nghiệm thu có thể chính là chủ đề xuất, không cần role nào.
+    status = assertExpenseTransition(
+      ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
+      status,
+      {
+        actorRoles: [],
+        isOwner: true,
+        isAssignee: true,
+        actorId: 9,
+        previousActorId: 7,
+        ...supplier,
+      },
+    );
+    expect(status).toBe(SuggestStatus.SPENT);
+  });
+
+  it('không phải người được chỉ định thì bị chặn, kể cả giám đốc/kỹ thuật', () => {
+    for (const actorRoles of [[ExpenseRole.DIRECTOR], [ExpenseRole.TECHNICAL]]) {
+      expect(() =>
+        assertExpenseTransition(
+          ExpenseAction.CREATE_STOCK_IN_RECEIPT,
+          SuggestStatus.APPROVED,
+          { actorRoles, isOwner: false, isAssignee: false, ...supplier },
+        ),
+      ).toThrow(ForbiddenException);
+    }
+  });
+
+  it('người lập phiếu nhập không được tự nghiệm thu', () => {
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
+        SuggestStatus.STOCK_IN_COMPLETED,
+        {
+          actorRoles: [],
+          isOwner: false,
+          isAssignee: true,
+          actorId: 7,
+          previousActorId: 7,
+          ...supplier,
+        },
+      ),
+    ).toThrow(ForbiddenException);
+  });
+
+  it('không nghiệm thu khi chưa nhập kho', () => {
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
+        SuggestStatus.APPROVED,
+        { actorRoles: [], isOwner: false, isAssignee: true, ...supplier },
+      ),
+    ).toThrow(ConflictException);
+  });
+
+  it('thiết bị lấy từ kho (kể cả đề xuất cũ chưa có nguồn) không lập phiếu nhập kho', () => {
+    for (const equipmentSource of [EquipmentSource.STOCK, null, undefined]) {
+      expect(() =>
+        assertExpenseTransition(
+          ExpenseAction.CREATE_STOCK_IN_RECEIPT,
+          SuggestStatus.APPROVED,
+          {
+            actorRoles: [ExpenseRole.TECHNICAL],
+            isOwner: false,
+            isAssignee: true,
+            kind: ExpenseRequestKind.EQUIPMENT,
+            equipmentSource,
+          },
+        ),
+      ).toThrow(ConflictException);
+    }
+  });
+
+  it('thiết bị từ nhà cung cấp không lên lệnh xuất kho', () => {
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+        SuggestStatus.APPROVED,
+        { actorRoles: [ExpenseRole.TECHNICAL], isOwner: false, ...supplier },
+      ),
+    ).toThrow(ConflictException);
+  });
+
+  it('bước sau duyệt thuộc về người được chỉ định, còn nguồn kho vẫn là kỹ thuật', () => {
+    expect(
+      expenseActorForStatus(
+        SuggestStatus.APPROVED,
+        ExpenseRequestKind.EQUIPMENT,
+        EquipmentSource.SUPPLIER,
+      ),
+    ).toEqual({ roles: [], owner: false, assignee: 'stockInHandler' });
+    expect(
+      expenseActorForStatus(
+        SuggestStatus.STOCK_IN_COMPLETED,
+        ExpenseRequestKind.EQUIPMENT,
+        EquipmentSource.SUPPLIER,
+      ),
+    ).toEqual({ roles: [], owner: false, assignee: 'acceptor' });
+    expect(
+      expenseActorForStatus(SuggestStatus.APPROVED, ExpenseRequestKind.EQUIPMENT),
+    ).toEqual({ roles: [ExpenseRole.TECHNICAL], owner: false });
+  });
 });

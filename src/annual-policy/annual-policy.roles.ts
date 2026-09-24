@@ -12,4 +12,5 @@ export const ANNUAL_POLICY_VIEW_ROLES = [
     'accountant',
     'ketoan_congno',
     'thuquy',
+    'ketoan_truong',
 ];

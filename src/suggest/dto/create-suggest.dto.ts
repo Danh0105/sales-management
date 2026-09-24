@@ -1,11 +1,11 @@
 // dto/create-suggest.dto.ts
-import { IsArray, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
+import { IsArray, IsBoolean, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
-import { RequestedEquipmentItemDto, parseJsonArray } from './expense/create-expense-request.dto';
+import { RequestedEquipmentItemDto, parseJsonArray, parseBoolean } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
     @IsString()
@@ -71,6 +71,15 @@ export class CreateSuggestDto {
     @IsString()
     @MaxLength(500)
     participants?: string;
+
+    /**
+     * Kinh doanh tự đánh dấu: đề xuất này nên trừ vào chính sách liên quan.
+     * Chỉ để hiển thị/thống kê, không có logic trừ tiền tự động kèm theo.
+     */
+    @IsOptional()
+    @Transform(parseBoolean)
+    @IsBoolean()
+    deductPolicy?: boolean;
 
     /** Trường liên quan (multipart gửi string → ép Number) */
     @IsOptional()

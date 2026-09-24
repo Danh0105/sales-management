@@ -37,6 +37,10 @@ describe('Teacher location approval workflow', () => {
     const notificationService = { create: jest.fn().mockResolvedValue({}) };
     const fcmService = { sendToMultiple: jest.fn().mockResolvedValue({}) };
     const tokenService = { getTokens: jest.fn().mockResolvedValue([]) };
+    const fuelService = {
+      reapplyTeacherLocationSafely: jest.fn().mockResolvedValue(undefined),
+      recomputeMissingGasAllowancesSafely: jest.fn().mockResolvedValue(undefined),
+    };
     const service = new TeacherService(
       teacherRepo as any,
       {} as any,
@@ -50,9 +54,12 @@ describe('Teacher location approval workflow', () => {
       notificationService as any,
       fcmService as any,
       tokenService as any,
+      {} as any,
+      fuelService as any,
     );
     return {
       service,
+      fuelService,
       teacherRepo,
       changeRepo,
       employeeQb,
@@ -71,7 +78,17 @@ describe('Teacher location approval workflow', () => {
     expect(teacherRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({ latitude: 10.77, longitude: 106.7 }),
     );
-    expect(changeRepo.save).not.toHaveBeenCalled();
+    // Không tạo yêu cầu chờ duyệt, nhưng vẫn ghi lịch sử (đã có hiệu lực) làm
+    // mốc để tra vị trí nhà theo từng ngày dạy.
+    expect(changeRepo.save).toHaveBeenCalledTimes(1);
+    expect(changeRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        teacherId: 3,
+        latitude: 10.77,
+        previousLatitude: null,
+        status: TeacherLocationChangeStatus.APPROVED,
+      }),
+    );
   });
 
   it('tạo yêu cầu và giữ nguyên vị trí cũ khi giáo viên đổi vị trí', async () => {
@@ -117,6 +134,47 @@ describe('Teacher location approval workflow', () => {
       reviewNote: 'Đã xác minh',
       status: TeacherLocationChangeStatus.APPROVED,
     });
+  });
+
+  it('duyệt đổi vị trí → tính lại phụ cấp từ NGÀY DUYỆT trở đi', async () => {
+    jest.useFakeTimers({ now: new Date('2026-09-30T03:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
+    try {
+      const teacher = { id: 3, latitude: 10.7, longitude: 106.6 };
+      const request = {
+        id: 9,
+        teacherId: 3,
+        latitude: 10.8,
+        longitude: 106.8,
+        status: TeacherLocationChangeStatus.PENDING,
+      };
+      const { service, fuelService } = makeService(teacher, request);
+
+      await service.reviewLocationChange(9, 12, true, {});
+
+      // 10:00 giờ VN ngày 30/09 → hiệu lực từ 2026-09-30.
+      expect(fuelService.reapplyTeacherLocationSafely).toHaveBeenCalledWith(
+        3,
+        '2026-09-30',
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('từ chối đổi vị trí → không tính lại phụ cấp', async () => {
+    const teacher = { id: 3, latitude: 10.7, longitude: 106.6 };
+    const request = {
+      id: 9,
+      teacherId: 3,
+      latitude: 10.8,
+      longitude: 106.8,
+      status: TeacherLocationChangeStatus.PENDING,
+    };
+    const { service, fuelService } = makeService(teacher, request);
+
+    await service.reviewLocationChange(9, 12, false, { note: 'Sai vị trí' });
+
+    expect(fuelService.reapplyTeacherLocationSafely).not.toHaveBeenCalled();
   });
 
   it('báo cho chính giáo viên khi yêu cầu đổi vị trí được duyệt', async () => {

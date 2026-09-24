@@ -221,6 +221,49 @@ export class RemoveSchedulesBySchoolDto {
 }
 
 /**
+ * Đổi chéo lịch dạy giữa 2 giáo viên: toàn bộ tiết (đang áp dụng) của A thoả
+ * các bộ lọc dưới đây chuyển sang B, và ngược lại — hai chiều cùng lúc, khác
+ * với "chuyển lịch" một chiều hiện có (`teacherId` trong `UpdateTeachingScheduleDto`).
+ * Không truyền bộ lọc nào = đổi hết lịch đang áp dụng của cả hai người.
+ */
+export class SwapTeacherSchedulesDto {
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    teacherAId!: number;
+
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    teacherBId!: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    schoolId?: number;
+
+    /** 0 = chỉ tiết của trường chính (chưa gắn điểm trường). */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(0)
+    schoolLocationId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    subjectId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @IsIn(DAY_OF_WEEK_VALUES)
+    dayOfWeek?: number;
+}
+
+/**
  * Áp một khoảng hiệu lực cho **mọi tiết** của một trường (tuỳ chọn: một
  * điểm trường / một môn) trong một lần gọi — thay vì sửa từng tiết trên TKB.
  */

@@ -42,6 +42,14 @@ mountpoint -q "$NAS_MOUNT" \
 [ "$DELETE" = 1 ] && log "CHẾ ĐỘ XOÁ" || log "Chế độ báo cáo (dry-run), không xoá gì"
 log "Chỉ xét file cũ hơn $MIN_AGE_DAYS ngày"
 
+# MIN_AGE_DAYS=0 nghĩa là chuyển hết, kể cả file trong ngày. `-mtime +0` lại
+# bỏ qua file dưới 24 giờ, nên dùng phút — chừa 10 phút cho file đang upload dở.
+if [ "$MIN_AGE_DAYS" = "0" ]; then
+  AGE_FILTER=(-mmin +"${MIN_AGE_MINUTES:-10}")
+else
+  AGE_FILTER=(-mtime +"$MIN_AGE_DAYS")
+fi
+
 ok=0; missing=0; differ=0; freed=0
 
 while IFS= read -r -d '' src; do
@@ -62,7 +70,7 @@ while IFS= read -r -d '' src; do
   ok=$((ok+1))
   freed=$((freed + $(stat -c%s "$src")))
   [ "$DELETE" = 1 ] && rm -f "$src"
-done < <(find "$SOURCE_DIR" -type f -not -path '*/thumb/*' -mtime +"$MIN_AGE_DAYS" -print0)
+done < <(find "$SOURCE_DIR" -type f -not -path '*/thumb/*' "${AGE_FILTER[@]}" -print0)
 
 echo
 log "Khớp checksum : $ok"
