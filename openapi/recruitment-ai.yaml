@@ -1,0 +1,643 @@
+openapi: 3.1.0
+info:
+  title: Sales Management — Recruitment AI API (OpenClaw)
+  version: 1.0.0
+  description: |
+    API dành riêng cho OpenClaw AI Recruiter. Xác thực bằng
+    `Authorization: Bearer <RECRUITMENT_AI_API_KEY>` (không phải JWT nhân viên).
+
+    AI chỉ được thu thập dữ liệu, sàng lọc, đề xuất/xác nhận lịch trong slot HR
+    mở và chuyển HR. Không có endpoint cho OFFER/HIRED/REJECTED.
+
+    Lỗi nghiệp vụ luôn có dạng `{ code, message }`. Mọi POST trả 200 và an
+    toàn khi retry. Chi tiết workflow: RECRUITMENT-AI-API.md
+
+servers:
+  - url: https://sales.kidoedu.vn
+    description: production
+  - url: https://api-dev.kidoedu.edu.vn
+    description: development
+
+security:
+  - recruitmentAiKey: []
+
+tags:
+  - name: jobs
+  - name: candidates
+  - name: applications
+  - name: conversations
+  - name: interviews
+
+paths:
+  /recruitment/ai/jobs/active:
+    get:
+      tags: [jobs]
+      operationId: getActiveJobs
+      summary: Vị trí đang tuyển (ACTIVE)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Job' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Disabled' }
+
+  /recruitment/ai/jobs/{id}:
+    get:
+      tags: [jobs]
+      operationId: getJobDetail
+      summary: Chi tiết vị trí (DRAFT → 404)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/candidates/find-or-create:
+    post:
+      tags: [candidates]
+      operationId: findOrCreateCandidate
+      summary: Tìm theo zaloUserId hoặc tạo mới. SĐT/email trùng chỉ báo POSSIBLE_DUPLICATE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Phải có ít nhất một trong zaloUserId, phone, email.
+              properties:
+                zaloUserId: { type: string, pattern: '^[A-Za-z0-9_-]{1,100}$' }
+                phone: { type: string, maxLength: 30 }
+                email: { type: string, format: email, maxLength: 255 }
+                fullName: { type: string, maxLength: 255 }
+                source: { $ref: '#/components/schemas/CandidateSource' }
+                location: { type: string, maxLength: 255 }
+                confirmNewCandidate:
+                  type: boolean
+                  description: Gửi true sau POSSIBLE_DUPLICATE để vẫn tạo hồ sơ mới (gắn cờ nghi trùng).
+            example: { zaloUserId: '123456', fullName: 'Nguyễn Văn A', source: ZALO }
+      responses:
+        '200':
+          description: EXISTING / CREATED / POSSIBLE_DUPLICATE
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      outcome: { type: string, enum: [EXISTING, CREATED] }
+                      created: { type: boolean }
+                      candidate: { $ref: '#/components/schemas/Candidate' }
+                      suspectedDuplicate: { type: boolean }
+                  - type: object
+                    properties:
+                      outcome: { type: string, const: POSSIBLE_DUPLICATE }
+                      created: { type: boolean, const: false }
+                      candidate: { type: 'null' }
+                      matchedOn: { type: array, items: { type: string, enum: [phone, email] } }
+                      possibleDuplicateCount: { type: integer }
+                      message: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/candidates/{id}:
+    get:
+      tags: [candidates]
+      operationId: getCandidate
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Candidate' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [candidates]
+      operationId: updateCandidate
+      summary: Cập nhật dữ liệu ứng viên AI thu thập được (null để xoá một trường)
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CandidateProfile' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidate: { $ref: '#/components/schemas/Candidate' }
+                  possibleDuplicate: { type: boolean }
+                  matchedOn: { type: array, items: { type: string } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/candidates/{id}/deletion-request:
+    post:
+      tags: [candidates]
+      operationId: requestDataDeletion
+      summary: Ứng viên xin xoá dữ liệu — dừng AI với ứng viên, mở yêu cầu HR ưu tiên cao
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: { note: { type: string, maxLength: 2000 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidateId: { type: integer }
+                  deletionRequestedAt: { type: string, format: date-time }
+                  aiStopped: { type: boolean, const: true }
+                  alreadyRequested: { type: boolean }
+                  handoffId: { type: [integer, 'null'] }
+                  pausedApplicationIds: { type: array, items: { type: integer } }
+
+  /recruitment/ai/applications/find-or-create:
+    post:
+      tags: [applications]
+      operationId: findOrCreateApplication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidateId, jobId]
+              properties:
+                candidateId: { type: integer, minimum: 1 }
+                jobId: { type: integer, minimum: 1 }
+                source: { $ref: '#/components/schemas/CandidateSource' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: boolean }
+                  application: { $ref: '#/components/schemas/Application' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/applications/{id}/context:
+    get:
+      tags: [applications]
+      operationId: getApplicationContext
+      summary: Context có cấu trúc — đọc missingFields, allowedActions, guidance trước khi hành động
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Context' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/applications/{id}/screen:
+    post:
+      tags: [applications]
+      operationId: screenCandidate
+      summary: Ghi dữ liệu đã thu thập vào hồ sơ rồi chấm điểm tất định
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                extractedSkills:
+                  type: array
+                  maxItems: 50
+                  items: { type: string, maxLength: 100 }
+                  description: Đã map về đúng từ vựng requiredSkills/preferredSkills của vị trí
+                experienceSummary: { type: string, maxLength: 5000 }
+                totalExperienceMonths: { type: integer, minimum: 0, maximum: 600 }
+                availableFrom: { type: string, format: date }
+                expectedSalary: { type: number, minimum: 0 }
+                location: { type: string, maxLength: 255 }
+                aiSummary: { type: string, maxLength: 5000, description: Chỉ để HR đọc, không ảnh hưởng điểm }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ScreeningResult' } } } }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/applications/{id}/handoff:
+    post:
+      tags: [applications]
+      operationId: handoffToHR
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason, summary]
+              properties:
+                reason: { $ref: '#/components/schemas/HandoffReason' }
+                summary: { type: string, minLength: 1, maxLength: 2000 }
+                priority: { type: string, enum: [LOW, NORMAL, HIGH, URGENT], default: NORMAL }
+            example: { reason: SALARY_OUT_OF_RANGE, summary: 'Ứng viên yêu cầu mức lương vượt range.', priority: NORMAL }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoffId: { type: [integer, 'null'] }
+                  reason: { $ref: '#/components/schemas/HandoffReason' }
+                  priority: { type: string }
+                  status: { type: string, enum: [OPEN, RESOLVED, RETURNED_TO_AI] }
+                  alreadyOpen: { type: boolean }
+                  candidateAiStopped: { type: boolean }
+                  application:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      status: { $ref: '#/components/schemas/ApplicationStatus' }
+                      aiPaused: { type: boolean }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/conversations/message:
+    post:
+      tags: [conversations]
+      operationId: saveCandidateMessage
+      summary: Lưu tin nhắn (luôn được phép). Trùng externalMessageId → duplicate=true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidateId, channel, senderType, direction, content]
+              properties:
+                candidateId: { type: integer, minimum: 1 }
+                applicationId: { type: integer, minimum: 1 }
+                channel: { type: string, enum: [ZALO, WEB, FACEBOOK, OTHER] }
+                externalConversationId: { type: string, maxLength: 255 }
+                externalMessageId: { type: string, maxLength: 255 }
+                senderType: { type: string, enum: [CANDIDATE, AI, HR, SYSTEM] }
+                direction: { type: string, enum: [INBOUND, OUTBOUND], description: CANDIDATE=INBOUND; AI/HR=OUTBOUND }
+                content: { type: string, minLength: 1, maxLength: 10000 }
+                contentType: { type: string, enum: [TEXT, IMAGE, FILE, LINK, OTHER], default: TEXT }
+                metadata: { $ref: '#/components/schemas/Metadata' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversationId: { type: integer }
+                  messageId: { type: integer }
+                  applicationId: { type: [integer, 'null'] }
+                  duplicate: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/conversations/{id}/context:
+    get:
+      tags: [conversations]
+      operationId: getConversationContext
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Context' } } } }
+
+  /recruitment/ai/interview-slots:
+    get:
+      tags: [interviews]
+      operationId: getInterviewSlots
+      summary: Slot HR đã mở, còn chỗ, bắt đầu sau ≥ 60 phút (mặc định 14 ngày tới)
+      parameters:
+        - { name: jobId, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        jobId: { type: [integer, 'null'] }
+                        startAt: { type: string, format: date-time }
+                        endAt: { type: string, format: date-time }
+                        timezone: { type: string }
+                        location: { type: [string, 'null'] }
+                        meetingUrl: { type: [string, 'null'] }
+                        remaining: { type: integer }
+
+  /recruitment/ai/interviews/propose:
+    post:
+      tags: [interviews]
+      operationId: proposeInterview
+      summary: Đề xuất lịch trong slot HR mở (hồ sơ phải QUALIFIED). Bắt buộc Idempotency-Key.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_.:-]{8,255}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [applicationId, slotId]
+              properties:
+                applicationId: { type: integer, minimum: 1 }
+                slotId: { type: integer, minimum: 1 }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  interview: { $ref: '#/components/schemas/Interview' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /recruitment/ai/interviews/{id}/confirm:
+    post:
+      tags: [interviews]
+      operationId: confirmInterview
+      summary: Ứng viên đồng ý lịch → CONFIRMED, hồ sơ QUALIFIED → INTERVIEW
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  interview: { $ref: '#/components/schemas/Interview' }
+                  alreadyConfirmed: { type: boolean }
+                  application:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      status: { $ref: '#/components/schemas/ApplicationStatus' }
+        '409': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    recruitmentAiKey:
+      type: http
+      scheme: bearer
+      description: RECRUITMENT_AI_API_KEY (≥ 32 ký tự)
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, pattern: '^[A-Za-z0-9_.:-]{8,255}$' }
+
+  responses:
+    Error:
+      description: Lỗi nghiệp vụ / validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Thiếu/sai API key (INVALID_API_KEY)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Vượt hạn mức (RATE_LIMITED), xem header Retry-After
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Disabled:
+      description: API AI đang tắt (RECRUITMENT_AI_DISABLED)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          examples: [AI_PAUSED_FOR_HR, AI_STOPPED_FOR_CANDIDATE, APPLICATION_CLOSED, INVALID_STATUS_TRANSITION, AI_TRANSITION_FORBIDDEN, SLOT_UNAVAILABLE, ACTIVE_INTERVIEW_EXISTS, JOB_NOT_ACTIVE, INVALID_PHONE, IDEMPOTENCY_KEY_REUSED]
+        message: { oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+
+    CandidateSource:
+      type: string
+      enum: [ZALO, WEBSITE, FACEBOOK, REFERRAL, MANUAL, OTHER]
+
+    ApplicationStatus:
+      type: string
+      enum: [NEW, COLLECTING_INFO, SCREENING, QUALIFIED, NEEDS_HR_REVIEW, INTERVIEW, OFFER, HIRED, REJECTED, WITHDRAWN]
+
+    HandoffReason:
+      type: string
+      enum: [CANDIDATE_REQUESTED_HUMAN, SALARY_OUT_OF_RANGE, AI_UNCERTAIN, COMPLAINT, DATA_DELETION_REQUEST, SPECIAL_CASE, FINAL_DECISION_REQUIRED, OTHER]
+
+    Metadata:
+      type: object
+      maxProperties: 30
+      description: Object phẳng; giá trị string ≤ 1000 / number / boolean / null. Cấm khoá nhạy cảm (gender, age, dob, religion, marital, health...).
+      additionalProperties:
+        oneOf: [{ type: string, maxLength: 1000 }, { type: number }, { type: boolean }, { type: 'null' }]
+
+    ScreeningCriteria:
+      type: object
+      properties:
+        minimumExperienceMonths: { type: integer }
+        requiredSkills: { type: array, items: { type: string } }
+        preferredSkills: { type: array, items: { type: string } }
+        locations: { type: array, items: { type: string } }
+        availableImmediatelyPreferred: { type: boolean }
+        maxStartDelayDays: { type: integer }
+
+    Job:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        department: { type: [object, 'null'], properties: { id: { type: integer }, name: { type: string } } }
+        location: { type: [string, 'null'] }
+        employmentType: { type: string, enum: [FULL_TIME, PART_TIME, CONTRACT, INTERNSHIP, COLLABORATOR] }
+        numberOfPositions: { type: integer }
+        salaryMin: { type: [number, 'null'] }
+        salaryMax: { type: [number, 'null'] }
+        currency: { type: string }
+        requirements: { type: [string, 'null'] }
+        responsibilities: { type: [string, 'null'] }
+        screeningCriteria: { $ref: '#/components/schemas/ScreeningCriteria' }
+        status: { type: string, enum: [DRAFT, ACTIVE, PAUSED, CLOSED] }
+        publishedAt: { type: [string, 'null'], format: date-time }
+
+    CandidateProfile:
+      type: object
+      additionalProperties: false
+      properties:
+        fullName: { type: [string, 'null'], maxLength: 255 }
+        phone: { type: [string, 'null'], maxLength: 30, description: Số VN; lưu về dạng 0xxxxxxxxx }
+        email: { type: [string, 'null'], format: email }
+        location: { type: [string, 'null'], maxLength: 255 }
+        education: { type: [string, 'null'], maxLength: 500 }
+        experienceSummary: { type: [string, 'null'], maxLength: 5000 }
+        totalExperienceMonths: { type: [integer, 'null'], minimum: 0, maximum: 600 }
+        currentJob: { type: [string, 'null'], maxLength: 255 }
+        expectedSalary: { type: [number, 'null'], minimum: 0 }
+        availableFrom: { type: [string, 'null'], format: date }
+        skills: { type: [array, 'null'], maxItems: 50, items: { type: string, maxLength: 100 } }
+        cvUrl: { type: [string, 'null'], format: uri, description: Chỉ lưu đường dẫn, backend không nhận file }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+
+    Candidate:
+      allOf:
+        - $ref: '#/components/schemas/CandidateProfile'
+        - type: object
+          properties:
+            id: { type: integer }
+            zaloUserId: { type: [string, 'null'] }
+            source: { $ref: '#/components/schemas/CandidateSource' }
+            suspectedDuplicate: { type: boolean }
+            deletionRequested: { type: boolean }
+            aiStopped: { type: boolean }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+
+    Application:
+      type: object
+      properties:
+        id: { type: integer }
+        candidateId: { type: integer }
+        jobId: { type: integer }
+        status: { $ref: '#/components/schemas/ApplicationStatus' }
+        source: { $ref: '#/components/schemas/CandidateSource' }
+        aiMatchScore: { type: [integer, 'null'] }
+        aiMatchLevel: { type: [string, 'null'], enum: [HIGH_MATCH, MEDIUM_MATCH, LOW_MATCH, INSUFFICIENT_DATA, null] }
+        aiSummary: { type: [string, 'null'] }
+        aiStrengths: { type: array, items: { type: string } }
+        aiConcerns: { type: array, items: { type: string } }
+        aiMissingInformation: { type: array, items: { type: string } }
+        aiScoreBreakdown: { type: [object, 'null'] }
+        screeningCompletedAt: { type: [string, 'null'], format: date-time }
+        aiPaused: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Interview:
+      type: object
+      properties:
+        id: { type: integer }
+        applicationId: { type: integer }
+        candidateId: { type: integer }
+        jobId: { type: integer }
+        slotId: { type: [integer, 'null'] }
+        scheduledStart: { type: string, format: date-time }
+        scheduledEnd: { type: string, format: date-time }
+        timezone: { type: string }
+        location: { type: [string, 'null'] }
+        meetingUrl: { type: [string, 'null'] }
+        status: { type: string, enum: [PROPOSED, CONFIRMED, COMPLETED, CANCELLED, NO_SHOW] }
+        candidateConfirmedAt: { type: [string, 'null'], format: date-time }
+        createdByType: { type: string, enum: [AI, HR, SYSTEM] }
+
+    ScreeningResult:
+      type: object
+      properties:
+        applicationId: { type: integer }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        matchLevel: { type: string, enum: [HIGH_MATCH, MEDIUM_MATCH, LOW_MATCH, INSUFFICIENT_DATA] }
+        strengths: { type: array, items: { type: string } }
+        concerns: { type: array, items: { type: string } }
+        missingInformation: { type: array, items: { type: string, enum: [totalExperienceMonths, skills, location, expectedSalary, availableFrom] } }
+        recommendedAction: { type: string, enum: [PROPOSE_INTERVIEW, HR_REVIEW, HANDOFF_TO_HR, COLLECT_MORE_INFO] }
+        status: { $ref: '#/components/schemas/ApplicationStatus' }
+        aiPaused: { type: boolean }
+        handoffId: { type: [integer, 'null'] }
+        breakdown:
+          type: object
+          properties:
+            engineVersion: { type: string }
+            evaluatedOn: { type: string, format: date }
+            applicableWeight: { type: number }
+            earnedWeight: { type: number }
+            missingWeight: { type: number }
+            criteria:
+              type: array
+              items:
+                type: object
+                properties:
+                  criterion: { type: string, enum: [experience, requiredSkills, preferredSkills, location, salary, availability] }
+                  weight: { type: number }
+                  fraction: { type: [number, 'null'] }
+                  earned: { type: number }
+                  missingField: { type: [string, 'null'] }
+                  detail: { type: string }
+            adjustments: { type: array, items: { type: string } }
+
+    Context:
+      type: object
+      properties:
+        candidate: { $ref: '#/components/schemas/Candidate' }
+        job: { oneOf: [{ $ref: '#/components/schemas/Job' }, { type: 'null' }] }
+        application: { oneOf: [{ $ref: '#/components/schemas/Application' }, { type: 'null' }] }
+        conversationId: { type: [integer, 'null'] }
+        missingFields: { type: array, items: { type: string } }
+        openHandoffs:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              reason: { $ref: '#/components/schemas/HandoffReason' }
+              priority: { type: string }
+              createdAt: { type: string, format: date-time }
+        activeInterview: { oneOf: [{ $ref: '#/components/schemas/Interview' }, { type: 'null' }] }
+        recentMessages:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              senderType: { type: string }
+              direction: { type: string }
+              content: { type: string }
+              contentType: { type: string }
+              createdAt: { type: string, format: date-time }
+        aiStopped: { type: boolean }
+        aiPaused: { type: boolean }
+        allowedActions:
+          type: array
+          items:
+            type: string
+            enum: [SAVE_MESSAGE, UPDATE_CANDIDATE, FIND_OR_CREATE_APPLICATION, SCREEN_CANDIDATE, GET_INTERVIEW_SLOTS, PROPOSE_INTERVIEW, CONFIRM_INTERVIEW, HANDOFF_TO_HR, REQUEST_DATA_DELETION]
+        guidance: { type: [string, 'null'] }
