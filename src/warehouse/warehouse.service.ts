@@ -16,6 +16,7 @@ import { CreateWarehouseItemDto } from './dto/create-warehouse-item.dto';
 import { UpdateWarehouseItemDto } from './dto/update-warehouse-item.dto';
 import { CreateWarehouseReceiptDto } from './dto/create-warehouse-receipt.dto';
 import { vnYearMonth } from '../suggest/utils/vn-date';
+import { WarehouseImageStorageService } from './warehouse-image-storage.service';
 
 /** Một dòng xuất kho tối giản dùng khi export được gọi từ nhánh đề xuất thiết bị. */
 export interface WarehouseExportLine {
@@ -40,6 +41,7 @@ export class WarehouseService {
         @InjectRepository(WarehouseReceipt)
         private readonly receiptRepo: Repository<WarehouseReceipt>,
         private readonly dataSource: DataSource,
+        private readonly imageStorage: WarehouseImageStorageService,
     ) {}
 
     private async generateCode(
@@ -135,6 +137,27 @@ export class WarehouseService {
         return this.itemRepo.save(item);
     }
 
+    /** Gắn ảnh chụp cho thiết bị; ảnh cũ (nếu có) bị xóa sau khi lưu ảnh mới. */
+    async updateItemImage(
+        id: number,
+        file: Express.Multer.File | undefined,
+    ): Promise<WarehouseItem> {
+        const item = await this.getItem(id);
+        const previousUrl = item.imageUrl;
+
+        const url = await this.imageStorage.store(file);
+        item.imageUrl = url;
+        try {
+            await this.itemRepo.save(item);
+        } catch (err) {
+            await this.imageStorage.remove(url);
+            throw err;
+        }
+
+        await this.imageStorage.remove(previousUrl);
+        return item;
+    }
+
     async listReceipts(): Promise<WarehouseReceipt[]> {
         return this.receiptRepo.find({ order: { createdAt: 'DESC' } });
     }
@@ -159,7 +182,12 @@ export class WarehouseService {
             return manager.save(WarehouseReceipt, {
                 code,
                 type: dto.type,
-                items: lines,
+                items: lines.map((line, i) => ({
+                    ...line,
+                    unitPrice: dto.items[i].unitPrice ?? null,
+                    serial: dto.items[i].serial?.trim() || null,
+                    note: dto.items[i].note?.trim() || null,
+                })),
                 note: dto.note ?? null,
                 createdBy: actorId,
             });

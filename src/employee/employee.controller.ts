@@ -31,6 +31,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AssignRegionDto } from '../employee-region-school/dto/assign-region.dto';
+import { auditActorFromRequest } from '../hr/audit/hr-audit-actor';
 import {
   assertSelfOrEmployeeAdmin,
   EMPLOYEE_ADMIN_ROLES,
@@ -87,8 +88,8 @@ export class EmployeeController {
 
   @Roles(...EMPLOYEE_ADMIN_ROLES)
   @Delete(':id')
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.service.remove(id);
+  remove(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
+    return this.service.remove(id, auditActorFromRequest(req));
   }
 
   @Get('department/:departmentId')
@@ -143,7 +144,12 @@ export class EmployeeController {
         );
       }
     }
-    return this.service.update(id, dto, avatar);
+    return this.service.update(
+      id,
+      dto,
+      avatar,
+      req ? auditActorFromRequest(req) : undefined,
+    );
   }
 
   @Get(':id')

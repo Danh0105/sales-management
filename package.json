@@ -7,6 +7,13 @@
   "license": "UNLICENSED",
   "scripts": {
     "typeorm": "node -r tsconfig-paths/register ./node_modules/typeorm/cli-ts-node-commonjs.js",
+    "hr:migration:show": "ts-node -r tsconfig-paths/register src/hr/database/run-hr-migrations.ts",
+    "hr:migration:run": "ts-node -r tsconfig-paths/register src/hr/database/run-hr-migrations.ts --apply",
+    "hr:employees:analyze": "ts-node -r tsconfig-paths/register src/hr/database/analyze-legacy-employees.ts",
+    "hr:employees:import": "ts-node -r tsconfig-paths/register src/hr/database/import-employees.ts",
+    "hr:employees:verify-search": "ts-node -r tsconfig-paths/register src/hr/database/verify-employee-search.ts",
+    "hr:org:backfill": "ts-node -r tsconfig-paths/register src/hr/database/backfill-org-history.ts",
+    "hr:access:bootstrap": "ts-node -r tsconfig-paths/register src/hr/database/bootstrap-hr-admin.ts",
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",

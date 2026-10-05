@@ -16,6 +16,8 @@ import { EmployeeFace } from './employee-face.entity';
 import { AvatarStorageService } from '../teaching/avatar-storage.service';
 import { assertNoTeacherRoleGrant, DEV_ROLE } from './employee-roles';
 import { AuthUser } from '../type/auth-user.type';
+import { HrAccessSafetyService } from '../hr/access-safety/hr-access-safety.service';
+import type { HrAuditActor } from '../hr/audit/hr-audit-actor';
 
 /**
  * Bỏ mật khẩu băm khỏi dữ liệu trả về. Các endpoint đọc ở đây trả nguyên
@@ -39,7 +41,22 @@ export class EmployeeService {
     @InjectRepository(EmployeeFace)
     private readonly employeeFaceRepository: Repository<EmployeeFace>,
     private readonly avatarStorage: AvatarStorageService,
+    /**
+     * Chặn khoá/xoá tài khoản làm công ty thiếu quản trị HR tối thiểu. Nest
+     * luôn inject (không @Optional); `?` chỉ để các spec cũ khởi tạo tay không
+     * phải sửa — thiếu service mà vẫn khoá/xoá thì fail-closed (xem guardHr).
+     */
+    private readonly hrSafety?: HrAccessSafetyService,
   ) {}
+
+  private guardHr(): HrAccessSafetyService {
+    if (!this.hrSafety) {
+      throw new Error(
+        'HrAccessSafetyService chưa được inject — từ chối khoá/xoá tài khoản',
+      );
+    }
+    return this.hrSafety;
+  }
   async create(data: CreateEmployeeDto) {
     const existedEmail = await this.repo.findOne({
       where: {
@@ -207,8 +224,18 @@ export class EmployeeService {
     });
   }
 
-  remove(id: number) {
-    return this.repo.delete(id);
+  /**
+   * Xoá chạy qua HrAccessSafetyService: không để công ty mất quản trị HR tối
+   * thiểu, và tài khoản đã có lịch sử quyền HR thì trả 409 (khuyên khoá) thay
+   * vì 500 do FK. Tài khoản không liên quan HR xoá như cũ.
+   */
+  remove(id: number, actor?: HrAuditActor) {
+    return this.guardHr().guardAccountRemoval(
+      id,
+      'delete',
+      actor ?? { accountId: null },
+      (manager) => manager.delete(Employee, id),
+    );
   }
 
   async findByDepartment(departmentId: number) {
@@ -345,6 +372,7 @@ export class EmployeeService {
     id: number,
     dto: UpdateEmployeeDto,
     avatar?: Express.Multer.File,
+    actor?: HrAuditActor,
   ) {
     const current = await this.repo.findOne({ where: { id } });
     if (!current) {
@@ -373,8 +401,22 @@ export class EmployeeService {
     }
 
     if (Object.keys(patch).length > 0) {
+      // Chỉ khi thật sự KHOÁ một tài khoản đang active mới đi qua kiểm tra
+      // quản trị HR (409 nếu làm công ty thiếu quản trị tối thiểu). Mọi cập
+      // nhật khác — kể cả mở khoá — chạy y như trước.
+      const deactivating =
+        patch.isActive === false && current.isActive !== false;
       try {
-        await this.repo.update(id, patch);
+        if (deactivating) {
+          await this.guardHr().guardAccountRemoval(
+            id,
+            'deactivate',
+            actor ?? { accountId: null },
+            (manager) => manager.update(Employee, id, patch),
+          );
+        } else {
+          await this.repo.update(id, patch);
+        }
       } catch (error) {
         await this.avatarStorage.remove(newAvatarUrl);
         throw error;

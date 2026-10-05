@@ -37,6 +37,10 @@ export class WarehouseItem {
   @Column({ type: 'text', nullable: true })
   note?: string | null;
 
+  /** Ảnh chụp thiết bị, đường dẫn tương đối `/uploads/warehouse-items/...`. */
+  @Column({ type: 'varchar', length: 255, name: 'image_url', nullable: true })
+  imageUrl?: string | null;
+
   @Column()
   createdBy!: number;
 

@@ -5,6 +5,7 @@ import {
   Logger,
   NestInterceptor,
 } from '@nestjs/common';
+import { PATH_METADATA } from '@nestjs/common/constants';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { Observable, from, switchMap, tap } from 'rxjs';
@@ -25,6 +26,7 @@ import {
   ROW_IGNORED_FIELDS,
   ID_FIELD_LOOKUPS,
   LOOKUP_PATH_SUFFIXES,
+  METADATA_ONLY_ROUTE_PREFIXES,
   SKIPPED_RESOURCES,
   SNAPSHOT_RELATIONS,
 } from './audited-entities';
@@ -73,6 +75,43 @@ const MUTATING_METHODS = ['POST', 'PATCH', 'PUT', 'DELETE'];
 /** Chỉ các method sửa/xoá mới có "dữ liệu cũ" để chụp. */
 const SNAPSHOT_METHODS = ['PATCH', 'PUT', 'DELETE'];
 
+/** Phần request mà nhánh chỉ-ghi-metadata được phép đọc — không body/params/query. */
+interface MetadataOnlyRequest {
+  originalUrl?: string;
+  url?: string;
+  method?: string;
+  ip?: string;
+  headers?: Record<string, string | string[] | undefined>;
+}
+
+/** `/API//hr/v1/x?y` → `/api/hr/v1/x/` — Express khớp route không phân biệt hoa thường. */
+function normalizeRoutePath(path: string): string {
+  let text = `/${path.split(/[?#]/)[0]}`;
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    // Chuỗi % hỏng — so khớp trên bản thô.
+  }
+  return `${text.replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase()}/`;
+}
+
+/**
+ * Request thuộc route chỉ-ghi-metadata không? Xét cả URL lẫn path khai báo
+ * của controller đã khớp — một trong hai khớp là đủ.
+ */
+export function isMetadataOnlyRoute(
+  url: string,
+  controllerPath?: string | string[],
+): boolean {
+  const paths = [url, ...([] as string[]).concat(controllerPath ?? [])];
+  return paths.some((p) => {
+    const normalized = normalizeRoutePath(String(p));
+    return METADATA_ONLY_ROUTE_PREFIXES.some((prefix) =>
+      normalized.startsWith(prefix),
+    );
+  });
+}
+
 /**
  * Ghi nhật ký **mọi** request ghi dữ liệu do Giáo vụ / Nhân sự thực hiện.
  *
@@ -100,6 +139,22 @@ export class ActivityLogInterceptor implements NestInterceptor {
     const user: AuthUser | undefined = req?.user;
 
     if (!user?.id || !this.shouldAudit(req, user)) return next.handle();
+
+    const route = req as MetadataOnlyRequest;
+    const controller = context.getClass?.();
+    if (
+      isMetadataOnlyRoute(
+        route.originalUrl ?? route.url ?? '',
+        controller
+          ? (Reflect.getMetadata(PATH_METADATA, controller) as
+              | string
+              | string[]
+              | undefined)
+          : undefined,
+      )
+    ) {
+      return this.recordMetadataOnly(route, user, http, next);
+    }
 
     // Chụp lại body ngay lúc này: pipe/service phía sau có thể sửa đổi nó.
     const snapshot = this.snapshot(req, user);
@@ -131,6 +186,56 @@ export class ActivityLogInterceptor implements NestInterceptor {
           }),
         ),
       ),
+    );
+  }
+
+  /**
+   * Route nhạy cảm (`METADATA_ONLY_ROUTE_PREFIXES`): chỉ ghi ai làm gì, lúc
+   * nào, kết quả ra sao. Không đọc body/params/query, không chụp bản ghi,
+   * không nhìn response (endpoint reveal trả số đầy đủ), không ghi message lỗi.
+   */
+  private recordMetadataOnly(
+    req: MetadataOnlyRequest,
+    user: AuthUser,
+    http: ReturnType<ExecutionContext['switchToHttp']>,
+    next: CallHandler,
+  ): Observable<unknown> {
+    const path = (req.originalUrl ?? req.url ?? '').split('?')[0];
+    const entry = {
+      actorId: user.id,
+      actorName: user.name ?? null,
+      actorRoles: user.roles ?? (user.role ? [user.role] : []),
+      method: req.method,
+      path,
+      resource: resourceOf(path),
+      body: null,
+      params: null,
+      query: null,
+      ip: req.ip ?? [req.headers?.['x-forwarded-for'] ?? []].flat()[0] ?? null,
+    };
+    const startedAt = Date.now();
+
+    return next.handle().pipe(
+      tap({
+        next: () => {
+          void this.service.record({
+            ...entry,
+            success: true,
+            statusCode:
+              http.getResponse<{ statusCode?: number }>()?.statusCode ?? 200,
+            durationMs: Date.now() - startedAt,
+          });
+        },
+        error: (err: { status?: number; statusCode?: number } | undefined) => {
+          void this.service.record({
+            ...entry,
+            success: false,
+            statusCode: err?.status ?? err?.statusCode ?? 500,
+            errorMessage: null,
+            durationMs: Date.now() - startedAt,
+          });
+        },
+      }),
     );
   }
 

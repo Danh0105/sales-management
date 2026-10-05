@@ -44,6 +44,7 @@ import { SchoolLocationModule } from './school-location/school-location.module';
 import { ActivityLogModule } from './activity-log/activity-log.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
 import { PayrollModule } from './payroll/payroll.module';
+import { HrModule } from './hr/hr.module';
 
 @Module({
   imports: [
@@ -106,6 +107,7 @@ import { PayrollModule } from './payroll/payroll.module';
     SchoolLocationModule,
     WarehouseModule,
     PayrollModule,
+    HrModule,
   ],
 })
 export class AppModule {}

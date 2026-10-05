@@ -8,10 +8,13 @@ import {
     Post,
     Req,
     UnauthorizedException,
+    UploadedFile,
     UseGuards,
+    UseInterceptors,
     UsePipes,
     ValidationPipe,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
@@ -22,6 +25,7 @@ import { WarehouseService } from './warehouse.service';
 import { CreateWarehouseItemDto } from './dto/create-warehouse-item.dto';
 import { UpdateWarehouseItemDto } from './dto/update-warehouse-item.dto';
 import { CreateWarehouseReceiptDto } from './dto/create-warehouse-receipt.dto';
+import { MAX_WAREHOUSE_IMAGE_BYTES } from './warehouse-image-storage.service';
 
 /**
  * Quản lý kho thiết bị (1 kho duy nhất). Phòng kỹ thuật (`ky_thuat`) quản lý
@@ -61,6 +65,20 @@ export class WarehouseController {
         @Body() dto: UpdateWarehouseItemDto,
     ) {
         return this.service.updateItem(id, dto);
+    }
+
+    @Post('items/:id/image')
+    @Roles(ExpenseRole.TECHNICAL)
+    @UseInterceptors(
+        FileInterceptor('image', {
+            limits: { fileSize: MAX_WAREHOUSE_IMAGE_BYTES, files: 1 },
+        }),
+    )
+    uploadItemImage(
+        @Param('id', ParseIntPipe) id: number,
+        @UploadedFile() image?: Express.Multer.File,
+    ) {
+        return this.service.updateItemImage(id, image);
     }
 
     @Get('receipts')

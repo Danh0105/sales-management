@@ -174,6 +174,16 @@ export const SKIPPED_RESOURCES = [
 ];
 
 /**
+ * Route chỉ ghi **metadata** (người làm, method, path, status, thời gian) —
+ * không body / params / query / dữ liệu trước-sau / response / errorMessage.
+ *
+ * `/api/hr/v1/**` mang dữ liệu nhạy cảm (CCCD, số tài khoản, MST, BHXH) và đã
+ * có audit nghiệp vụ riêng ở `hr.audit_logs` (có che dữ liệu). So khớp theo
+ * prefix đầy đủ — cố ý không dùng tên resource chung chung như `api`.
+ */
+export const METADATA_ONLY_ROUTE_PREFIXES = ['/api/hr/v1/'];
+
+/**
  * Đuôi path là **tra cứu** dù gọi bằng POST (payload lọc quá dài cho query
  * string). Tra cứu không đổi dữ liệu nên không thuộc phạm vi nhật ký.
  */

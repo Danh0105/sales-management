@@ -8,6 +8,7 @@ import { DepartmentModule } from '../department/department.module';
 import { RegionModule } from '../region/region.module';
 import { EmployeeFace } from './employee-face.entity';
 import { AvatarStorageService } from '../teaching/avatar-storage.service';
+import { HrAccessSafetyModule } from '../hr/access-safety/hr-access-safety.module';
 
 
 @Module({
@@ -25,6 +26,9 @@ import { AvatarStorageService } from '../teaching/avatar-storage.service';
         DepartmentModule,
 
         RegionModule,
+
+        // Chặn khoá/xoá tài khoản làm công ty thiếu quản trị HR tối thiểu.
+        HrAccessSafetyModule,
     ],
 
     providers: [

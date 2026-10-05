@@ -25,6 +25,10 @@ export interface WarehouseReceiptItem {
   unit?: string | null;
   /** Đơn giá mua — chỉ có ở phiếu nhập của đề xuất thiết bị mới. */
   unitPrice?: number | null;
+  /** Số serial/IMEI của các thiết bị trong dòng. */
+  serial?: string | null;
+  /** Ghi chú chi tiết cho dòng thiết bị. */
+  note?: string | null;
 }
 
 /** Phiếu nhập/xuất kho — nguồn duy nhất làm thay đổi tồn kho của `WarehouseItem`. */
