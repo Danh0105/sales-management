@@ -143,6 +143,15 @@ export class SchoolExpenseItem {
   })
   remaining!: number;
 
+  /** Hình thức chi: 'in_contract' (Có trong HĐ) | 'not_in_contract' (Không có trong HĐ). */
+  @Column({
+    name: 'payment_type',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  paymentType!: string | null;
+
   @Column({
     nullable: true,
   })

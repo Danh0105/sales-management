@@ -503,6 +503,7 @@ export class TeachingScheduleService {
    *
    * Mẫu chưa sinh buổi nào thì không sinh gì cả: việc sinh buổi là thao tác có
    * chủ đích của Giáo vụ, sửa lịch không phải là lúc thay họ quyết định.
+   * Trừ khi giáo viên đã xác nhận mẫu — xem `generateForConfirmedWithoutSessions`.
    */
   private async regenerateMovedSessions(
     schedule: TeachingSchedule,
@@ -518,7 +519,11 @@ export class TeachingScheduleService {
       before.effectiveFrom === toDateString(schedule.effectiveFrom) &&
       before.effectiveTo === toDateString(schedule.effectiveTo);
 
-    if (unchanged || !previous.length || !schedule.isActive) return 0;
+    if (unchanged || !schedule.isActive) return 0;
+
+    if (!previous.length) {
+      return this.generateForConfirmedWithoutSessions(schedule);
+    }
 
     const dates = previous.map(
       (session) => toDateString(session.date) as string,
@@ -561,6 +566,44 @@ export class TeachingScheduleService {
       fromDate,
       toDate,
     } as GenerateSessionsDto);
+
+    return created;
+  }
+
+  /**
+   * Mẫu đã CONFIRMED mà chưa có buổi nào: sinh theo khoảng hiệu lực mới, từ
+   * hôm nay trở đi.
+   *
+   * Lúc giáo viên xác nhận, `onScheduleConfirmed` chỉ sinh trong khoảng hiệu
+   * lực khi đó. Màn xếp TKB mặc định "Hiệu lực đến" là cuối tháng, nên lịch
+   * xếp sát cuối tháng có khoảng kiểu 29/09–30/09 — không chứa Thứ 5/6 nào —
+   * và xác nhận xong vẫn 0 buổi. Giáo vụ kéo dài hiệu lực sau đó cũng không
+   * sinh vì mẫu "chưa từng sinh": giáo viên thấy lịch đã nhận mà chấm công
+   * trống (Lê Hoàng Bình, TH Bình Châu, 01/10/2026). Mẫu đã xác nhận thì
+   * việc sinh buổi đã được quyết định rồi, không còn là chọn lựa của Giáo vụ.
+   */
+  private async generateForConfirmedWithoutSessions(
+    schedule: TeachingSchedule,
+  ): Promise<number> {
+    if (schedule.confirmationStatus !== ConfirmationStatus.CONFIRMED) return 0;
+
+    const today = this.todayDateString();
+    const effectiveFrom = toDateString(schedule.effectiveFrom) as string;
+    const effectiveTo = toDateString(schedule.effectiveTo);
+
+    // Không sinh vào quá khứ, cùng lý do với `regenerateMovedSessions`.
+    const fromDate = effectiveFrom > today ? effectiveFrom : today;
+    // Lịch không thời hạn thì cắt ở mốc an toàn, như `onScheduleConfirmed`.
+    const cappedTo = addDays(fromDate, MAX_GENERATE_DAYS);
+    const toDate =
+      effectiveTo && effectiveTo < cappedTo ? effectiveTo : cappedTo;
+
+    if (fromDate > toDate) return 0;
+
+    const { created } = await this.generateSessions(schedule.id, {
+      fromDate,
+      toDate,
+    });
 
     return created;
   }

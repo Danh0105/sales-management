@@ -1,4 +1,10 @@
-import { IsOptional, IsNumber, IsDateString, IsString } from 'class-validator';
+import {
+  IsOptional,
+  IsNumber,
+  IsDateString,
+  IsString,
+  IsIn,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class UpdateSchoolExpenseItemDto {
@@ -50,6 +56,10 @@ export class UpdateSchoolExpenseItemDto {
   @Type(() => Number)
   @IsNumber()
   paidAmount?: number;
+
+  @IsOptional()
+  @IsIn(['in_contract', 'not_in_contract', ''])
+  paymentType?: string;
 
   @IsOptional()
   @IsString()

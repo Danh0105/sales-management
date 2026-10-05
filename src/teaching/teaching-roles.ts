@@ -167,6 +167,7 @@ export function assertCanSetTeachingRates(
 export const TEACHING_RATE_FIELD_LABELS: Record<string, string> = {
   ratePerPeriod: 'đơn giá mỗi tiết',
   defaultRatePerPeriod: 'đơn giá riêng của giáo viên',
+  rateEffectiveFrom: 'ngày áp dụng đơn giá',
   otherCosts: 'các khoản phụ cấp',
 };
 

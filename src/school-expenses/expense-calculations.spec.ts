@@ -1,7 +1,10 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
 import {
+  assertNotFinalized,
   buildManagementExpenseItemData,
+  buildRevenueItemData,
+  buildSchoolExpenseItemData,
   computeOtherCostRows,
 } from './expense-calculations';
 
@@ -193,7 +196,7 @@ describe('buildManagementExpenseItemData (fold Chi khác vào totalOutside/remai
     expect(data.totalOutside).toBe(100 * 10 * 2); // 2000
   });
 
-  it('thuế QL1/QL2 tách riêng: KHÔNG cộng vào totalOutside/remaining', () => {
+  it('thuế QL1/QL2/Chi khác được TRỪ khỏi totalOutside/remaining (tiền thực chi)', () => {
     const item = {
       studentCount: 100,
       monthsCount: 3,
@@ -216,10 +219,78 @@ describe('buildManagementExpenseItemData (fold Chi khác vào totalOutside/remai
 
     expect(data.ql1TaxAmount).toBe(100 * 100 * 3); // 30000
     expect(data.ql2TaxAmount).toBe(200 * 100 * 3); // 60000
-    // totalOutside CHƯA thuế
-    expect(data.totalOutside).toBe(300000 + 600000 + 360000); // 1260000
-    expect(data.remaining).toBe(1260000 - 100000); // 1160000
+    // totalOutside = (300000 - 30000) + (600000 - 60000) + (360000 - 36000)
+    expect(data.totalOutside).toBe(270000 + 540000 + 324000); // 1134000
+    expect(data.remaining).toBe(1134000 - 100000); // 1034000
     // totalTaxAmount = 30000 + 60000 + 36000
     expect(data.totalTaxAmount).toBe(30000 + 60000 + 36000); // 126000
+  });
+
+  it('trường hợp thực tế: 73 HS, QL1 70.000, QL2 49.000 thuế 4.900, đã chi đủ', () => {
+    const item = {
+      studentCount: 73,
+      monthsCount: 1,
+      ql1UnitPrice: 70000,
+      ql2UnitPrice: 49000,
+      ql2Tax: 4900,
+      paidAmount: 8329300,
+    };
+    const data = buildManagementExpenseItemData(item);
+    expect(data.totalOutside).toBe(5110000 + 3219300); // 8329300
+    expect(data.remaining).toBe(0);
+  });
+});
+
+describe('buildSchoolExpenseItemData — Hình thức chi (paymentType)', () => {
+  const base = { studentCount: 73, monthsCount: 1, csvc: 70000 };
+
+  it('lưu in_contract / not_in_contract', () => {
+    expect(
+      buildSchoolExpenseItemData({ ...base, paymentType: 'in_contract' })
+        .paymentType,
+    ).toBe('in_contract');
+    expect(
+      buildSchoolExpenseItemData({ ...base, paymentType: 'not_in_contract' })
+        .paymentType,
+    ).toBe('not_in_contract');
+  });
+
+  it('rỗng/không gửi → null', () => {
+    expect(buildSchoolExpenseItemData(base).paymentType).toBeNull();
+    expect(
+      buildSchoolExpenseItemData({ ...base, paymentType: '' }).paymentType,
+    ).toBeNull();
+  });
+
+  it('từ chối giá trị lạ', () => {
+    expect(() =>
+      buildSchoolExpenseItemData({ ...base, paymentType: 'abc' }),
+    ).toThrow(BadRequestException);
+  });
+});
+
+describe('buildRevenueItemData — khóa xuất hóa đơn (invoiceLocked)', () => {
+  const base = { studentCount: 73, monthsCount: 1, unitPrice: 700000 };
+
+  it('chỉ true khi gửi đúng boolean true', () => {
+    const locked = (value: unknown) =>
+      buildRevenueItemData({ ...base, invoiceLocked: value }).invoiceLocked;
+    expect(locked(true)).toBe(true);
+    expect(locked(false)).toBe(false);
+    expect(locked('false')).toBe(false);
+    expect(buildRevenueItemData(base).invoiceLocked).toBe(false);
+  });
+});
+
+describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
+  it('chặn mọi chỉnh sửa khi finalized', () => {
+    expect(() => assertNotFinalized({ finalized: true })).toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it('cho qua khi chưa kết thúc', () => {
+    expect(() => assertNotFinalized({ finalized: false })).not.toThrow();
+    expect(() => assertNotFinalized(null)).not.toThrow();
   });
 });

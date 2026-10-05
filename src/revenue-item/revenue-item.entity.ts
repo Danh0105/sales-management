@@ -132,6 +132,21 @@ export class RevenueItem {
   })
   invoiceDate!: Date | null;
 
+  /** ĐVT trên hóa đơn (cột "ĐVT" bảng Hóa Đơn). */
+  @Column({
+    type: 'varchar',
+    length: 50,
+    nullable: true,
+  })
+  invoiceUnit!: string | null;
+
+  /** Đã bấm "Xuất hóa đơn" — khóa dòng, không được thêm dòng doanh thu (trừ kế toán trưởng). */
+  @Column({
+    type: 'boolean',
+    default: false,
+  })
+  invoiceLocked!: boolean;
+
   @Column({
     type: 'decimal',
     precision: 15,

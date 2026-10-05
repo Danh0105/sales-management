@@ -135,6 +135,38 @@ export class SchoolExpense {
     })
     managementExpenseConfirmedAt?: Date | null;
 
+    /**
+     * Kế toán trưởng bấm "Kết thúc" → khoá toàn bộ kỳ thu chi (mọi môn, mọi bảng),
+     * kể cả kế toán trưởng; muốn sửa phải "Mở lại" (chỉ kế toán trưởng).
+     */
+    @Column({
+        type: 'boolean',
+        name: 'finalized',
+        default: false,
+    })
+    finalized!: boolean;
+
+    @Column({
+        type: 'int',
+        name: 'finalized_by',
+        nullable: true,
+    })
+    finalizedBy?: number | null;
+
+    @Column({
+        type: 'varchar',
+        name: 'finalized_by_name',
+        nullable: true,
+    })
+    finalizedByName?: string | null;
+
+    @Column({
+        type: 'timestamptz',
+        name: 'finalized_at',
+        nullable: true,
+    })
+    finalizedAt?: Date | null;
+
     @CreateDateColumn()
     createdAt!: Date;
 

@@ -46,6 +46,10 @@ export class School {
     @Column({ name: 'tax_code', nullable: true })
     taxCode!: string;
 
+    /** Mã đơn vị quan hệ ngân sách (ĐVQHNS, 7 chữ số) — in trên hóa đơn điện tử. */
+    @Column({ name: 'budget_code', type: 'varchar', length: 7, nullable: true })
+    budgetCode!: string | null;
+
     @Column({ nullable: true })
     phone!: string;
 

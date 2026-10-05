@@ -15,6 +15,7 @@ import { Subject } from '../subject/subject.entity';
 import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
 import { SchoolExpenseHistory } from '../school-expenses/entities/school-expense-history.entity';
 import {
+  assertNotFinalized,
   buildManagementExpenseItemData,
   computeOtherCostRows,
   normalizeSharedFields,
@@ -45,6 +46,7 @@ export class ManagementExpenseItemsService {
    * được sau khi khoá.
    */
   private assertNotLocked(schoolExpense: SchoolExpense, user?: AuthUser) {
+    assertNotFinalized(schoolExpense);
     if (!schoolExpense.managementExpenseConfirmed) return;
     const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
     if (!isChiefAccountant) {

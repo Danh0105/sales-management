@@ -21,6 +21,7 @@ import {
 import { AssignmentStatus, ConfirmationStatus, SessionStatus } from '../teaching.enum';
 import { TIME_PATTERN } from './teaching-schedule.dto';
 import { IsCalendarDate } from '../../policy/dto/query-policies.dto';
+import { TEACHER_ROLES } from '../teaching-roles';
 
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
@@ -458,6 +459,35 @@ export class QueryTeachingSessionsDto {
   @IsBoolean()
   unchecked?: boolean;
 
+  /**
+   * Loại buổi có trạng thái này — Chấm công dùng `PRESENT` để ẩn tiết đã
+   * chấm "Có dạy", chỉ còn lại việc cần xử lý. Lọc dưới database để phân
+   * trang/cuộn tải thêm không ra những trang rỗng.
+   */
+  @IsOptional()
+  @IsEnum(SessionStatus, { message: 'excludeStatus không hợp lệ' })
+  excludeStatus?: SessionStatus;
+
+  /**
+   * Tiến độ IN · OUT · BG của giáo viên: `COMPLETE` = đã check-out và đã báo
+   * giảng; `INCOMPLETE` = còn thiếu. Check-in không xét riêng vì danh sách
+   * coi tiết đã check-out là đã check-in (xem `toSessionItem`) — lọc phải
+   * khớp đúng các nhãn IN/OUT/BG người dùng đang thấy.
+   */
+  @IsOptional()
+  @IsIn(['COMPLETE', 'INCOMPLETE'], { message: 'progress không hợp lệ' })
+  progress?: 'COMPLETE' | 'INCOMPLETE';
+
+  /**
+   * true = chỉ buổi "thiếu giá" — cùng điều kiện cột "thiếu giá N buổi" của
+   * bảng tổng hợp (`attendanceSummary`): đã dạy mà chưa có đơn giá tiết lẫn
+   * phụ cấp xăng.
+   */
+  @IsOptional()
+  @Transform(toBool)
+  @IsBoolean()
+  missingRate?: boolean;
+
   @IsOptional()
   @IsCalendarDate()
   fromDate?: string;
@@ -522,4 +552,15 @@ export class QueryAttendanceSummaryDto {
   @IsInt()
   @Min(1)
   classId?: number;
+
+  /**
+   * Chỉ giáo viên công ty hoặc chỉ cộng tác viên. Cộng tác viên = mọi giáo
+   * viên không có role `giaovien_congty` (kể cả chưa có tài khoản) — đúng ranh
+   * giới trả lương: công ty ăn lương + xăng, còn lại trả theo tiết.
+   */
+  @IsOptional()
+  @IsIn(TEACHER_ROLES, {
+    message: `teacherRole phải là một trong: ${TEACHER_ROLES.join(', ')}`,
+  })
+  teacherRole?: string;
 }

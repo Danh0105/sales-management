@@ -17,6 +17,7 @@ import {
   Matches,
 } from 'class-validator';
 import { TEACHER_ROLES } from '../teaching-roles';
+import { IsCalendarDate } from '../../policy/dto/query-policies.dto';
 
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
@@ -153,7 +154,16 @@ export class CreateTeacherDto {
   zaloUserId?: string | null;
 }
 
-export class UpdateTeacherDto extends PartialType(CreateTeacherDto) {}
+export class UpdateTeacherDto extends PartialType(CreateTeacherDto) {
+  /**
+   * Kèm `defaultRatePerPeriod`: mọi buổi từ ngày này trở đi (kể cả buổi đã có
+   * giá) tính theo giá mới, buổi trước đó giữ giá cũ. Bỏ trống = chỉ điền các
+   * buổi còn thiếu giá.
+   */
+  @IsOptional()
+  @IsCalendarDate()
+  rateEffectiveFrom?: string;
+}
 
 export class ResetTeacherPasswordDto {
   @IsOptional()

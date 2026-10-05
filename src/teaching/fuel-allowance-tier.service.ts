@@ -23,6 +23,7 @@ import {
 import { vnToday } from '../suggest/utils/vn-date';
 import { toDateString } from './teaching.util';
 import { TEACHER_STAFF_ROLE } from './teaching-roles';
+import { departurePoint, HCM_REGION_SQL } from './company-departure';
 import { haversineKm } from './teacher-matching.service';
 import {
   CreateFuelAllowanceTierDto,
@@ -527,9 +528,29 @@ export class FuelAllowanceTierService {
     });
   }
 
+  /**
+   * Áp quy tắc "trường khu vực HCM tính từ văn phòng" cho các buổi đã có trong
+   * khoảng ngày: tính lại MỌI buổi (kể cả đã có phụ cấp) của giáo viên công ty
+   * ở trường khu vực HCM. Tháng đã gửi phiếu lương không bị đổi.
+   */
+  async reapplyHcmOfficeDeparture(
+    fromDate: string,
+    toDate: string,
+  ): Promise<RecomputeGasAllowanceResult> {
+    return this.recomputeGasAllowances({
+      fromDate,
+      toDate,
+      hcmRegionOnly: true,
+      onlyMissing: false,
+    });
+  }
+
   private async recomputeGasAllowances(opts: {
     teacherId?: number;
     fromDate?: string;
+    toDate?: string;
+    /** Chỉ buổi ở trường khu vực HCM (xem company-departure.ts). */
+    hcmRegionOnly?: boolean;
     onlyMissing: boolean;
   }): Promise<RecomputeGasAllowanceResult> {
     const qb = this.sessionRepo
@@ -537,6 +558,7 @@ export class FuelAllowanceTierService {
       .innerJoin('ss.teacher', 't')
       .innerJoin('t.employee', 'e')
       .leftJoin('ss.school', 'sc')
+      .leftJoin('sc.ward', 'sw')
       .leftJoin('ss.schoolLocation', 'sl')
       .select([
         'ss.id AS "id"',
@@ -549,6 +571,8 @@ export class FuelAllowanceTierService {
         'sc.name AS "schoolName"',
         'sc.latitude AS "schoolLatitude"',
         'sc.longitude AS "schoolLongitude"',
+        'sw.id AS "schoolWardId"',
+        'sw.province_id AS "schoolProvinceId"',
         'ss.schoolLocationId AS "schoolLocationId"',
         'sl.name AS "locationName"',
         'sl.latitude AS "locationLatitude"',
@@ -562,6 +586,10 @@ export class FuelAllowanceTierService {
     if (opts.fromDate) {
       qb.andWhere('ss.date >= :fromDate', { fromDate: opts.fromDate });
     }
+    if (opts.toDate) {
+      qb.andWhere('ss.date <= :toDate', { toDate: opts.toDate });
+    }
+    if (opts.hcmRegionOnly) qb.andWhere(HCM_REGION_SQL('sw'));
     if (opts.teacherId) {
       qb.andWhere('ss.teacherId = :teacherId', { teacherId: opts.teacherId });
     }
@@ -605,10 +633,17 @@ export class FuelAllowanceTierService {
         result.skippedLocked += 1;
         continue;
       }
-      const home = homeAtDate(
-        timelines.get(Number(row.teacherId)) ?? [],
-        { latitude: row.teacherLatitude, longitude: row.teacherLongitude },
-        date,
+      // Trường khu vực HCM: xuất phát từ văn phòng thay cho nhà theo ngày.
+      const home = departurePoint(
+        homeAtDate(
+          timelines.get(Number(row.teacherId)) ?? [],
+          { latitude: row.teacherLatitude, longitude: row.teacherLongitude },
+          date,
+        ),
+        {
+          wardId: row.schoolWardId as number | null,
+          provinceId: row.schoolProvinceId as number | null,
+        },
       );
       const key = `${row.teacherId}|${row.schoolId}|${row.schoolLocationId ?? ''}|${home.latitude},${home.longitude}`;
       const group = groups.get(key) ?? { home, rows: [] };
@@ -742,11 +777,18 @@ export class FuelAllowanceTierService {
     // Từ đây chắc chắn là giáo viên công ty — dù không tra được khoảng cách
     // (thiếu vị trí/toạ độ trường/chưa khai bậc) vẫn phải báo `isCompanyTeacher`
     // để nơi gọi bỏ `ratePerPeriod`, không được âm thầm trả theo tiết.
-    if (!hasCoordinates(teacher.latitude, teacher.longitude)) {
+    const school = await this.schoolRepo.findOne({
+      where: { id: schoolId },
+      relations: { ward: true },
+    });
+    // Trường khu vực HCM tính từ văn phòng (company-departure.ts), còn lại từ nhà.
+    const origin = departurePoint(
+      { latitude: teacher.latitude, longitude: teacher.longitude },
+      { wardId: school?.ward?.id, provinceId: school?.ward?.province_id },
+    );
+    if (!hasCoordinates(origin.latitude, origin.longitude)) {
       return { isCompanyTeacher: true, distanceToSchoolKm: null, gasAllowance: null };
     }
-
-    const school = await this.schoolRepo.findOne({ where: { id: schoolId } });
 
     let lat = school?.latitude;
     let lng = school?.longitude;
@@ -766,8 +808,8 @@ export class FuelAllowanceTierService {
     const distanceKm =
       Math.round(
         haversineKm(
-          teacher.latitude!,
-          teacher.longitude!,
+          origin.latitude!,
+          origin.longitude!,
           lat!,
           lng!,
         ) * 100,

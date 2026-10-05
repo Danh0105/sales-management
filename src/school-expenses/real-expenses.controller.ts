@@ -136,9 +136,12 @@ export class RealExpensesController {
     );
   }
 
-  /** Sales admin xác nhận bảng "Chi Ngoài" → khoá chỉnh sửa (xem ManagementExpenseItemsService). */
+  /**
+   * Sales admin / kế toán trưởng "Xác nhận đúng BBCS" bảng "Chi Ngoài" → khoá
+   * chỉnh sửa (xem ManagementExpenseItemsService).
+   */
   @Post(':id/confirm-management-expense')
-  @Roles(...SALESADMIN_ROLES)
+  @Roles(...SALESADMIN_ROLES, 'ketoan_truong')
   confirmManagementExpense(
     @Param('id') id: string,
     @Req() req: RequestWithUser,
@@ -147,5 +150,32 @@ export class RealExpensesController {
       Number(id),
       req.user,
     );
+  }
+
+  /** Kế toán trưởng mở khoá "Xác nhận đúng BBCS". */
+  @Post(':id/unconfirm-management-expense')
+  @Roles('ketoan_truong')
+  unconfirmManagementExpense(
+    @Param('id') id: string,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.realExpensesService.unconfirmManagementExpense(
+      Number(id),
+      req.user,
+    );
+  }
+
+  /** Kế toán trưởng "Kết thúc" kỳ thu chi → khoá toàn bộ. */
+  @Post(':id/finalize')
+  @Roles('ketoan_truong')
+  finalize(@Param('id') id: string, @Req() req: RequestWithUser) {
+    return this.realExpensesService.finalize(Number(id), req.user);
+  }
+
+  /** Kế toán trưởng mở lại kỳ thu chi đã kết thúc. */
+  @Post(':id/reopen')
+  @Roles('ketoan_truong')
+  reopen(@Param('id') id: string, @Req() req: RequestWithUser) {
+    return this.realExpensesService.reopen(Number(id), req.user);
   }
 }
