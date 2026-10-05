@@ -55,6 +55,19 @@ export class CreateTeacherDto {
   @IsEmail({}, { message: 'email không hợp lệ' })
   email!: string;
 
+  /** Thông tin nhận lương được lưu trên tài khoản nhân viên gắn với giáo viên. */
+  @IsOptional()
+  @Transform(toNullableTrimmedString)
+  @IsString()
+  @MaxLength(50)
+  bankAccountNumber?: string | null;
+
+  @IsOptional()
+  @Transform(toNullableTrimmedString)
+  @IsString()
+  @MaxLength(255)
+  bankName?: string | null;
+
   /** Có password và không có employeeId: tạo tài khoản role giaovien trong transaction. */
   @IsOptional()
   @IsString()

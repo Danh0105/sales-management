@@ -300,6 +300,8 @@ export class PayrollService {
             name: payroll.employee.name,
             email: payroll.employee.email,
             phone: payroll.employee.phone,
+            bankAccountNumber: payroll.employee.bankAccountNumber ?? null,
+            bankName: payroll.employee.bankName ?? null,
             department: payroll.employee.department
               ? {
                   id: payroll.employee.department.id,

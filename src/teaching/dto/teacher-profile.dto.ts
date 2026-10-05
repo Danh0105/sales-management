@@ -52,6 +52,24 @@ export class UpdateTeacherProfileDto {
   @MaxLength(150)
   email?: string;
 
+  @ApiPropertyOptional({ nullable: true, example: '0914732580', maxLength: 50 })
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(50)
+  bankAccountNumber?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'MB - Ngân hàng TMCP Quân Đội',
+    maxLength: 255,
+  })
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(255)
+  bankName?: string | null;
+
   @ApiPropertyOptional({ type: 'string', format: 'binary' })
   @IsOptional()
   avatar?: unknown;
@@ -70,6 +88,10 @@ export class TeacherProfileResponseDto {
   @ApiProperty({ nullable: true, example: 'teacher@example.com' }) email!:
     | string
     | null;
+  @ApiProperty({ nullable: true, example: '0914732580' })
+  bankAccountNumber!: string | null;
+  @ApiProperty({ nullable: true, example: 'MB - Ngân hàng TMCP Quân Đội' })
+  bankName!: string | null;
   @ApiProperty({
     nullable: true,
     example: 'https://example.com/uploads/avatars/file.webp',

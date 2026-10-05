@@ -1,12 +1,15 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 
 import { PayrollService } from './payroll.service';
+import { PayrollStatus } from './payroll-status.enum';
 
 const employee = {
   id: 15,
   name: 'Nguyễn Xuân Danh',
   email: 'danh@example.com',
   phone: '0900000015',
+  bankAccountNumber: '0914732580',
+  bankName: 'MB - Ngân hàng TMCP Quân Đội',
   password: 'khong-duoc-lo',
   roles: ['sales'],
   department: { id: 3, name: 'Phòng Công nghệ' },
@@ -93,6 +96,8 @@ describe('PayrollService', () => {
       name: 'Nguyễn Xuân Danh',
       email: 'danh@example.com',
       phone: '0900000015',
+      bankAccountNumber: '0914732580',
+      bankName: 'MB - Ngân hàng TMCP Quân Đội',
       department: { id: 3, name: 'Phòng Công nghệ' },
     });
     expect(result.employee).not.toHaveProperty('password');
@@ -114,7 +119,12 @@ describe('PayrollService', () => {
 
   it('ẩn sự tồn tại của phiếu khi nhân viên khác truy cập', async () => {
     const { service, payrollRepo } = setup();
-    payrollRepo.findOne.mockResolvedValue({ id: 7, employeeId: 15, employee });
+    payrollRepo.findOne.mockResolvedValue({
+      id: 7,
+      employeeId: 15,
+      employee,
+      status: PayrollStatus.SENT,
+    });
 
     await expect(
       service.findOne(7, { id: 99, roles: ['sales'] }),
@@ -123,7 +133,12 @@ describe('PayrollService', () => {
 
   it('nhân viên được xem phiếu của chính mình', async () => {
     const { service, payrollRepo } = setup();
-    payrollRepo.findOne.mockResolvedValue({ id: 7, employeeId: 15, employee });
+    payrollRepo.findOne.mockResolvedValue({
+      id: 7,
+      employeeId: 15,
+      employee,
+      status: PayrollStatus.SENT,
+    });
 
     await expect(
       service.findOne(7, { id: 15, roles: ['sales'] }),

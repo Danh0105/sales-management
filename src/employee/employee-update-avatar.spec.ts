@@ -17,7 +17,11 @@ describe('EmployeeService.update — avatar', () => {
       store: jest.fn().mockResolvedValue('/uploads/avatars/new.webp'),
       remove: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new EmployeeService(repo as never, {} as never, storage as never);
+    const service = new EmployeeService(
+      repo as never,
+      {} as never,
+      storage as never,
+    );
     return { service, repo, storage };
   }
 
@@ -42,10 +46,15 @@ describe('EmployeeService.update — avatar', () => {
   });
 
   it('ghi DB hỏng thì xoá ảnh mới, giữ ảnh cũ', async () => {
-    const { service, repo, storage } = make({ id: 158, avatarUrl: '/uploads/avatars/old.webp' });
+    const { service, repo, storage } = make({
+      id: 158,
+      avatarUrl: '/uploads/avatars/old.webp',
+    });
     repo.update.mockRejectedValue(new Error('db down'));
 
-    await expect(service.update(158, {} as never, file)).rejects.toThrow('db down');
+    await expect(service.update(158, {} as never, file)).rejects.toThrow(
+      'db down',
+    );
 
     expect(storage.remove).toHaveBeenCalledTimes(1);
     expect(storage.remove).toHaveBeenCalledWith('/uploads/avatars/new.webp');
@@ -62,18 +71,26 @@ describe('EmployeeService.update — avatar', () => {
 
   it('không có nhân viên → 404, không lưu ảnh', async () => {
     const { service, storage } = make(null);
-    await expect(service.update(999, {} as never, file)).rejects.toThrow(NotFoundException);
+    await expect(service.update(999, {} as never, file)).rejects.toThrow(
+      NotFoundException,
+    );
     expect(storage.store).not.toHaveBeenCalled();
   });
 });
 
 describe('EmployeeService.findOne — trang cá nhân', () => {
-  it('trả avatarUrl để FE render sau reload', async () => {
+  it('trả avatarUrl và tài khoản ngân hàng để FE render sau reload', async () => {
     const repo = { findOne: jest.fn().mockResolvedValue({ id: 158 }) };
-    const service = new EmployeeService(repo as never, {} as never, {} as never);
+    const service = new EmployeeService(
+      repo as never,
+      {} as never,
+      {} as never,
+    );
     await service.findOne(158);
     const select = repo.findOne.mock.calls[0][0].select as string[];
     expect(select).toContain('avatarUrl');
+    expect(select).toContain('bankAccountNumber');
+    expect(select).toContain('bankName');
     expect(select).not.toContain('password');
   });
 });

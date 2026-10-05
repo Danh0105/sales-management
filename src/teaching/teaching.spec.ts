@@ -2379,10 +2379,16 @@ describe('TeacherService', () => {
       email: 'coa@test.local',
       password: '123456',
       teacherRole: TEACHER_COLLABORATOR_ROLE,
+      bankAccountNumber: '0914732580',
+      bankName: 'MB - Ngân hàng TMCP Quân Đội',
     } as CreateTeacherDto);
 
     expect(employee.repo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ roles: [TEACHER_COLLABORATOR_ROLE] }),
+      expect.objectContaining({
+        roles: [TEACHER_COLLABORATOR_ROLE],
+        bankAccountNumber: '0914732580',
+        bankName: 'MB - Ngân hàng TMCP Quân Đội',
+      }),
     );
   });
 
@@ -2456,12 +2462,18 @@ describe('TeacherService', () => {
         employeeId: 30,
         employeeName: 'Cô A',
         teacherRole: TEACHER_COLLABORATOR_ROLE,
+        bankAccountNumber: '0914732580',
+        bankName: 'MB - Ngân hàng TMCP Quân Đội',
         isActive: true,
       },
     });
 
     await expect(service.findOne(1)).resolves.toEqual(
-      expect.objectContaining({ teacherRole: TEACHER_COLLABORATOR_ROLE }),
+      expect.objectContaining({
+        teacherRole: TEACHER_COLLABORATOR_ROLE,
+        bankAccountNumber: '0914732580',
+        bankName: 'MB - Ngân hàng TMCP Quân Đội',
+      }),
     );
   });
 

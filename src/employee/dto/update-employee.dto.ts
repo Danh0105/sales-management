@@ -5,8 +5,16 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  MaxLength,
   MinLength,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
+
+const toNullableTrimmedString = ({ value }: { value: unknown }) => {
+  if (value === null) return null;
+  if (typeof value !== 'string') return value;
+  return value.trim() || null;
+};
 
 /**
  * Trước đây endpoint sửa nhân viên nhận thẳng `body: any` rồi đẩy nguyên vào
@@ -26,6 +34,18 @@ export class UpdateEmployeeDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @IsOptional()
+  @Transform(toNullableTrimmedString)
+  @IsString()
+  @MaxLength(50)
+  bankAccountNumber?: string | null;
+
+  @IsOptional()
+  @Transform(toNullableTrimmedString)
+  @IsString()
+  @MaxLength(255)
+  bankName?: string | null;
 
   /** Gửi lên thì được băm trước khi lưu, y như lúc tạo tài khoản. */
   @IsOptional()
