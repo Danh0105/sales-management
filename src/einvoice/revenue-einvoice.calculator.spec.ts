@@ -53,6 +53,24 @@ describe('revenue-einvoice.calculator', () => {
     ).toEqual({ quantity: 3, unitPrice: 66666.67, amount: 200000 });
   });
 
+  it('invoiceLine: không có số HS thì dùng số tiết × số tháng', () => {
+    expect(
+      invoiceLine(
+        {
+          studentCount: 0,
+          totalPeriods: 60,
+          monthsCount: 2,
+          unitPrice: 530_000,
+        },
+        { giaovien: 0, thue: 0, csvc: 0 },
+      ),
+    ).toEqual({
+      quantity: 120,
+      unitPrice: 530_000,
+      amount: 63_600_000,
+    });
+  });
+
   it('invoiceItemName: thêm tên môn nếu nội dung chưa có', () => {
     expect(invoiceItemName('Tiếng Anh', 'Tháng 9')).toBe('Tiếng Anh: Tháng 9');
     expect(invoiceItemName('Tiếng Anh', 'Học phí tiếng anh tháng 9')).toBe(
@@ -73,7 +91,6 @@ describe('revenue-einvoice.calculator', () => {
         budgetCode: ' 1012345 ',
         address: '1 Lê Lợi, Q1',
         phone: '028 3822-1234',
-        representative: 'Nguyễn Văn A',
       },
       items: [
         {
@@ -98,7 +115,6 @@ describe('revenue-einvoice.calculator', () => {
     });
     expect(payload.buyerInfo).toEqual({
       buyerCode: 'TRUONG-12',
-      buyerName: 'Nguyễn Văn A',
       buyerLegalName: 'Trường TH Nguyễn Huệ',
       buyerTaxCode: '0312345678',
       buyerBudgetCode: '1012345',
@@ -140,7 +156,6 @@ describe('revenue-einvoice.calculator', () => {
         taxCode: '0312345678',
         address: 'Địa chỉ',
         phone: '0901234567 / 0281234567',
-        representative: null,
       },
       items: [
         {

@@ -429,7 +429,6 @@ export class RevenueEInvoicesService {
         budgetCode: context.school.budgetCode,
         address: context.school.address,
         phone: context.school.phone,
-        representative: context.school.representative,
       },
       items,
     });

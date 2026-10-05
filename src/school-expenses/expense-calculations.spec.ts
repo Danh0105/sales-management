@@ -269,8 +269,40 @@ describe('buildSchoolExpenseItemData — Hình thức chi (paymentType)', () => 
   });
 });
 
-describe('buildRevenueItemData — khóa xuất hóa đơn (invoiceLocked)', () => {
+describe('buildRevenueItemData — tính doanh thu', () => {
   const base = { studentCount: 73, monthsCount: 1, unitPrice: 700000 };
+
+  it('có số học sinh: thành tiền = số học sinh × số tháng × đơn giá', () => {
+    const data = buildRevenueItemData({
+      studentCount: 30,
+      totalPeriods: 60,
+      monthsCount: 2,
+      unitPrice: 120_000,
+      paidAmount: 1_000_000,
+    });
+
+    expect(data.invoiceAmount).toBe(30 * 2 * 120_000);
+    expect(data.remainingAmount).toBe(30 * 2 * 120_000 - 1_000_000);
+  });
+
+  it('không có số học sinh: thành tiền = số tiết × số tháng × đơn giá', () => {
+    const data = buildRevenueItemData({
+      studentCount: 0,
+      totalPeriods: 60,
+      monthsCount: 1,
+      unitPrice: 530_000,
+    });
+
+    expect(data.invoiceAmount).toBe(60 * 1 * 530_000);
+    expect(data.remainingAmount).toBe(60 * 1 * 530_000);
+  });
+
+  it('không có số học sinh lẫn số tiết thì thành tiền bằng 0', () => {
+    expect(
+      buildRevenueItemData({ monthsCount: 3, unitPrice: 530_000 })
+        .invoiceAmount,
+    ).toBe(0);
+  });
 
   it('chỉ true khi gửi đúng boolean true', () => {
     const locked = (value: unknown) =>
