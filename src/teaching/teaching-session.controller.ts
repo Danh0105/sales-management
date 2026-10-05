@@ -10,6 +10,7 @@ import {
     Post,
     Query,
     Req,
+    Res,
     UploadedFile,
     UploadedFiles,
     UseFilters,
@@ -20,11 +21,12 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { TeachingSessionService } from './teaching-session.service';
+import { AttendanceExportService } from './attendance-export.service';
 import { TeachingBulkService } from './teaching-bulk.service';
 import {
     BulkCheckAttendanceDto,
@@ -66,6 +68,7 @@ export class TeachingSessionController {
         private readonly service: TeachingSessionService,
         private readonly bulkService: TeachingBulkService,
         private readonly lessonImageLibrary: LessonImageLibraryService,
+        private readonly attendanceExport: AttendanceExportService,
     ) { }
 
     /**
@@ -345,6 +348,47 @@ export class TeachingSessionController {
     @Get('attendance/summary')
     attendanceSummary(@Query() query: QueryAttendanceSummaryDto) {
         return this.service.attendanceSummary(query);
+    }
+
+    /** File Excel của bảng tổng hợp (sheet tổng hợp + sheet số tiết theo ngày). */
+    @Roles(...TEACHING_VIEW_ROLES)
+    @Get('attendance/summary/export')
+    async exportAttendanceSummary(
+        @Query() query: QueryAttendanceSummaryDto,
+        @Res() res: Response,
+    ) {
+        this.sendXlsx(
+            res,
+            await this.attendanceExport.exportAttendanceSummary(query),
+        );
+    }
+
+    /** File Excel chỉ có bảng số tiết dạy theo ngày, cùng bộ lọc với bảng tổng hợp. */
+    @Roles(...TEACHING_VIEW_ROLES)
+    @Get('attendance/daily-periods/export')
+    async exportDailyPeriods(
+        @Query() query: QueryAttendanceSummaryDto,
+        @Res() res: Response,
+    ) {
+        this.sendXlsx(
+            res,
+            await this.attendanceExport.exportAttendanceSummary(query, 'daily'),
+        );
+    }
+
+    private sendXlsx(
+        res: Response,
+        { buffer, fileName }: { buffer: Buffer; fileName: string },
+    ) {
+        res.setHeader(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+        res.setHeader(
+            'Content-Disposition',
+            `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        );
+        res.send(buffer);
     }
 
     /** Rà soát quãng đường di chuyển từng ngày của giáo viên công ty. */

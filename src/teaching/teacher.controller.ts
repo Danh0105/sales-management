@@ -298,7 +298,10 @@ export class TeacherController {
     @Req() req: Request,
   ) {
     assertCanManageTeaching(req.user);
-    assertCanSetTeachingRates(req.user, dto, ['defaultRatePerPeriod']);
+    assertCanSetTeachingRates(req.user, dto, [
+      'defaultRatePerPeriod',
+      'rateEffectiveFrom',
+    ]);
 
     const teacher = await this.service.update(id, dto, req.user!.id);
     if (!dto.password) return teacher;

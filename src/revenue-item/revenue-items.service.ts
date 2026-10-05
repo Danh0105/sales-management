@@ -12,7 +12,10 @@ import { RevenueItem } from './revenue-item.entity';
 import { Subject } from '../subject/subject.entity';
 import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
 import { SchoolExpenseHistory } from '../school-expenses/entities/school-expense-history.entity';
-import { buildRevenueItemData } from '../school-expenses/expense-calculations';
+import {
+  assertNotFinalized,
+  buildRevenueItemData,
+} from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
 
 @Injectable()
@@ -53,6 +56,8 @@ export class RevenueItemsService {
     if (!schoolExpense) {
       throw new NotFoundException('SchoolExpense not found');
     }
+
+    assertNotFinalized(schoolExpense);
 
     if (!subject) {
       throw new NotFoundException('Subject not found');
@@ -144,6 +149,8 @@ export class RevenueItemsService {
       throw new NotFoundException('RevenueItem not found');
     }
 
+    assertNotFinalized(data.schoolExpense);
+
     const oldData = { ...data };
 
     if (body.subjectId && Number(body.subjectId) !== data.subject?.id) {
@@ -178,6 +185,8 @@ export class RevenueItemsService {
         invoiceOther: data.invoiceOther,
         invoiceNumber: data.invoiceNumber,
         invoiceDate: data.invoiceDate,
+        invoiceUnit: data.invoiceUnit,
+        invoiceLocked: data.invoiceLocked,
         paidAmount: data.paidAmount,
         paymentMethod: data.paymentMethod,
         paymentDate: data.paymentDate,
@@ -211,6 +220,8 @@ export class RevenueItemsService {
   // DELETE
   async remove(id: number, user?: AuthUser) {
     const data = await this.findOne(id);
+
+    assertNotFinalized(data.schoolExpense);
 
     await this.historyRepository.save({
       schoolExpenseId: data.schoolExpense?.id,

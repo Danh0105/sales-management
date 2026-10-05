@@ -57,7 +57,7 @@ export class ManagementExpenseOtherCost {
     @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
     tax!: number;
 
-    /** Thuế của khoản này — KHÔNG cộng vào totalOutside, chỉ để báo cáo. */
+    /** Thuế của khoản này — được TRỪ khỏi totalOutside của dòng Chi Ngoài. */
     @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
     taxAmount!: number;
 

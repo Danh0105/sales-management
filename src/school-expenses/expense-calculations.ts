@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
 import {
   normalizeRevenueInvoiceStatus,
@@ -163,6 +163,30 @@ export function normalizePaymentMethod(value: unknown): string | null {
   throw new BadRequestException('Invalid paymentMethod');
 }
 
+/** Hình thức chi của dòng Chi trường. */
+export function normalizeSchoolPaymentType(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  if (value === 'in_contract' || value === 'not_in_contract') {
+    return value;
+  }
+
+  throw new BadRequestException('Invalid paymentType');
+}
+
+/** Kỳ thu chi đã "Kết thúc" → khoá mọi chỉnh sửa, kể cả kế toán trưởng (phải mở lại trước). */
+export function assertNotFinalized(
+  schoolExpense?: { finalized?: boolean } | null,
+) {
+  if (schoolExpense?.finalized) {
+    throw new ForbiddenException(
+      'Kỳ thu chi đã kết thúc — kế toán trưởng mở lại mới sửa được',
+    );
+  }
+}
+
 export function assertNonNegative(values: Record<string, number>) {
   for (const [key, value] of Object.entries(values)) {
     if (value < 0) {
@@ -228,6 +252,8 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
         ? item?.invoiceNumber || null
         : null,
     invoiceDate: item?.invoiceDate || null,
+    invoiceUnit: String(item?.invoiceUnit ?? '').trim().slice(0, 50) || null,
+    invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),
     paymentDate: item?.paymentDate || null,
@@ -270,6 +296,7 @@ export function buildSchoolExpenseItemData(
     expenseDate: item?.expenseDate || null,
     paidAmount,
     remaining: schoolExpenseAmount - paidAmount,
+    paymentType: normalizeSchoolPaymentType(item?.paymentType),
     payer: item?.payer || null,
     note: item?.note || null,
   };
@@ -307,10 +334,14 @@ export function buildManagementExpenseItemData(
   const ql1TaxAmount = ql1Tax * shared.studentCount * shared.monthsCount;
   const ql2TaxAmount = ql2Tax * shared.studentCount * shared.monthsCount;
 
-  // totalOutside = QL1 + QL2 + Chi khác (CHƯA thuế — thuế tách riêng).
-  const totalOutside = ql1Amount + ql2Amount + totalOtherCostAmount;
-  // totalTaxAmount = thuế QL1 + QL2 + toàn bộ thuế Chi khác (chỉ để báo cáo).
+  // totalTaxAmount = thuế QL1 + QL2 + toàn bộ thuế Chi khác.
   const totalTaxAmount = ql1TaxAmount + ql2TaxAmount + totalOtherTaxAmount;
+  // totalOutside = số tiền thực chi = (QL1 - thuế) + (QL2 - thuế) + (Chi khác - thuế),
+  // khớp cột "Tổng chi ngoài" của bảng Chi Ngoài bên FE.
+  const totalOutside =
+    Math.max(0, ql1Amount - ql1TaxAmount) +
+    Math.max(0, ql2Amount - ql2TaxAmount) +
+    Math.max(0, totalOtherCostAmount - totalOtherTaxAmount);
 
   return {
     ...shared,

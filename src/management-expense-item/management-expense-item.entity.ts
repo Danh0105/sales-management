@@ -98,7 +98,7 @@ export class ManagementExpenseItem {
   ql2Amount!: number;
 
   // ===== Thuế (đơn giá thuế tuyệt đối; taxAmount = tax × HS × tháng) =====
-  // taxAmount KHÔNG cộng vào totalOutside — chỉ để báo cáo (totalTaxAmount).
+  // totalOutside đã TRỪ taxAmount (số tiền thực chi, xem buildManagementExpenseItemData).
 
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
   ql1Tax!: number;

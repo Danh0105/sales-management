@@ -30,6 +30,7 @@ import { ExpenseItemsModule } from './expense-item/expense-items.module';
 import { ExpensePeriodsModule } from './expense-periods/expense-periods.module';
 import { SchoolExpensesModule } from './school-expenses/real-expenses.module';
 import { RevenueItemsModule } from './revenue-item/revenue-items.module';
+import { RevenueEInvoicesModule } from './einvoice/revenue-einvoices.module';
 import { SchoolExpenseItemsModule } from './school-expense-item/school-expense-items.module';
 import { ManagementExpenseItemsModule } from './management-expense-item/management-expense-items.module';
 import { AnnualPolicyModule } from './annual-policy/annual-policy.module';
@@ -94,6 +95,7 @@ import { PayrollModule } from './payroll/payroll.module';
     CashPolicyItemsModule,
     ExpensePeriodsModule,
     RevenueItemsModule,
+    RevenueEInvoicesModule,
     SchoolExpenseItemsModule,
     ManagementExpenseItemsModule,
     AnnualPolicyModule,

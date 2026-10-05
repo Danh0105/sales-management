@@ -20,6 +20,7 @@ import { ManagementExpenseItem } from '../management-expense-item/management-exp
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
 import { Subject } from '../subject/subject.entity';
 import {
+  assertNotFinalized,
   buildManagementExpenseItemData,
   buildRevenueItemData,
   buildSchoolExpenseItemData,
@@ -220,6 +221,7 @@ export class RealExpensesService {
   // UPDATE
   async update(id: number, body: any, user?: AuthUser) {
     const data = await this.findOne(id);
+    assertNotFinalized(data);
     const oldData = { ...data };
 
     if (body.schoolId) {
@@ -284,6 +286,7 @@ export class RealExpensesService {
   // DELETE
   async remove(id: number, user?: AuthUser) {
     const data = await this.findOne(id);
+    assertNotFinalized(data);
 
     await this.historyRepository.save({
       schoolExpenseId: id,
@@ -336,6 +339,8 @@ export class RealExpensesService {
     if (!schoolExpense) {
       throw new NotFoundException('SchoolExpense not found');
     }
+
+    assertNotFinalized(schoolExpense);
 
     const subject = await this.subjectRepository.findOne({
       where: {
@@ -392,6 +397,26 @@ export class RealExpensesService {
     const isSalesAdmin = (user?.roles ?? []).some((r) =>
       SALESADMIN_ROLES.includes(r),
     );
+
+    // Doanh thu đã "Xuất hóa đơn" → khóa: không được thêm dòng, không tự mở khóa.
+    // Kế toán trưởng được bỏ qua (mở khóa / thêm dòng).
+    const lockedRevenueRows = new Set(
+      oldRevenue
+        .filter((item) => item.invoiceLocked)
+        .map((item) => item.rowIndex),
+    );
+    const revenueLocked =
+      !isSalesAdmin && !isChiefAccountant && lockedRevenueRows.size > 0;
+
+    if (
+      revenueLocked &&
+      Array.isArray(body.revenueItems) &&
+      body.revenueItems.length > oldRevenue.length
+    ) {
+      throw new BadRequestException(
+        'Đã xuất hóa đơn — không thể thêm dòng doanh thu',
+      );
+    }
 
     const queryRunner = this.dataSource.createQueryRunner();
 
@@ -470,7 +495,13 @@ export class RealExpensesService {
         const entity = queryRunner.manager.create(RevenueItem, {
           schoolExpense,
           subject,
-          ...buildRevenueItemData(item, index, sharedItems[index]),
+          ...buildRevenueItemData(
+            revenueLocked && lockedRevenueRows.has(index)
+              ? { ...item, invoiceLocked: true }
+              : item,
+            index,
+            sharedItems[index],
+          ),
         });
 
         await queryRunner.manager.save(entity);
@@ -820,6 +851,7 @@ export class RealExpensesService {
       invoiceOther: i.invoiceOther,
       invoiceNumber: i.invoiceNumber,
       invoiceDate: i.invoiceDate,
+      invoiceLocked: i.invoiceLocked,
       paidAmount: num(i.paidAmount),
       paymentMethod: i.paymentMethod,
       paymentDate: i.paymentDate,
@@ -842,6 +874,7 @@ export class RealExpensesService {
       schoolExpenseAmount: num(i.schoolExpenseAmount),
       paidAmount: num(i.paidAmount),
       remaining: num(i.remaining),
+      paymentType: i.paymentType,
       expenseDate: i.expenseDate,
       payer: i.payer,
       note: i.note,
@@ -921,6 +954,7 @@ export class RealExpensesService {
     if (!data) {
       throw new NotFoundException('SchoolExpense not found');
     }
+    assertNotFinalized(data);
 
     if (!data.managementExpenseConfirmed) {
       data.managementExpenseConfirmed = true;
@@ -943,12 +977,115 @@ export class RealExpensesService {
       });
     }
 
+    return this.lockState(data);
+  }
+
+  /** Kế toán trưởng mở khoá "Xác nhận đúng BBCS" của bảng Chi Ngoài. */
+  async unconfirmManagementExpense(id: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+    if (!data) {
+      throw new NotFoundException('SchoolExpense not found');
+    }
+    assertNotFinalized(data);
+
+    if (data.managementExpenseConfirmed) {
+      const oldData = {
+        managementExpenseConfirmed: true,
+        managementExpenseConfirmedByName: data.managementExpenseConfirmedByName,
+        managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
+      };
+      data.managementExpenseConfirmed = false;
+      data.managementExpenseConfirmedBy = null;
+      data.managementExpenseConfirmedByName = null;
+      data.managementExpenseConfirmedAt = null;
+      await this.schoolExpenseRepository.save(data);
+
+      await this.historyRepository.save({
+        schoolExpenseId: id,
+        updatedById: user?.id,
+        updatedByName: user?.name,
+        action: 'UNCONFIRM_MANAGEMENT_EXPENSE',
+        entityType: 'management_expense',
+        oldData,
+        newData: { managementExpenseConfirmed: false },
+      });
+    }
+
+    return this.lockState(data);
+  }
+
+  /** Kế toán trưởng "Kết thúc" kỳ thu chi → khoá toàn bộ, kể cả kế toán trưởng. */
+  async finalize(id: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+    if (!data) {
+      throw new NotFoundException('SchoolExpense not found');
+    }
+
+    if (!data.finalized) {
+      data.finalized = true;
+      data.finalizedBy = user?.id ?? null;
+      data.finalizedByName = user?.name ?? null;
+      data.finalizedAt = new Date();
+      await this.schoolExpenseRepository.save(data);
+
+      await this.historyRepository.save({
+        schoolExpenseId: id,
+        updatedById: user?.id,
+        updatedByName: user?.name,
+        action: 'FINALIZE',
+        entityType: 'school_expense',
+        oldData: { finalized: false },
+        newData: { finalized: true, finalizedAt: data.finalizedAt },
+      });
+    }
+
+    return this.lockState(data);
+  }
+
+  /** Kế toán trưởng mở lại kỳ thu chi đã "Kết thúc". */
+  async reopen(id: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+    if (!data) {
+      throw new NotFoundException('SchoolExpense not found');
+    }
+
+    if (data.finalized) {
+      const oldData = {
+        finalized: true,
+        finalizedByName: data.finalizedByName,
+        finalizedAt: data.finalizedAt,
+      };
+      data.finalized = false;
+      data.finalizedBy = null;
+      data.finalizedByName = null;
+      data.finalizedAt = null;
+      await this.schoolExpenseRepository.save(data);
+
+      await this.historyRepository.save({
+        schoolExpenseId: id,
+        updatedById: user?.id,
+        updatedByName: user?.name,
+        action: 'REOPEN',
+        entityType: 'school_expense',
+        oldData,
+        newData: { finalized: false },
+      });
+    }
+
+    return this.lockState(data);
+  }
+
+  private lockState(data: SchoolExpense) {
     return {
       id: data.id,
       managementExpenseConfirmed: data.managementExpenseConfirmed,
       managementExpenseConfirmedBy: data.managementExpenseConfirmedBy,
       managementExpenseConfirmedByName: data.managementExpenseConfirmedByName,
       managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
+      finalized: data.finalized,
+      finalizedBy: data.finalizedBy,
+      finalizedByName: data.finalizedByName,
+      finalizedAt: data.finalizedAt,
     };
   }
 }

@@ -11,7 +11,10 @@ import {
   DataSource,
   EntityManager,
   In,
+  IsNull,
+  MoreThanOrEqual,
   Not,
+  Or,
   QueryFailedError,
   Repository,
 } from 'typeorm';
@@ -30,6 +33,7 @@ import {
   TEACHER_STAFF_ROLE,
 } from './teaching-roles';
 import { SchoolsService } from '../school/schools.service';
+import { effectiveRatePerPeriod } from './teaching-rate.util';
 import { Ward } from '../ward/ward.entity';
 import { SubjectCatalog } from '../subject-catalog/subject-catalog.entity';
 import { UpdateTeacherProfileDto } from './dto/teacher-profile.dto';
@@ -81,6 +85,16 @@ type PreparedTeacherCreate = {
   passwordHash: string | null;
   coordinates: { latitude: number | null; longitude: number | null };
 };
+
+/** Kết quả áp giá mới vào các buổi dạy khi đổi đơn giá/tiết của giáo viên. */
+export interface TeacherRateRecomputeResult {
+  /** Ngày bắt đầu áp dụng; null = chỉ điền buổi thiếu giá. */
+  fromDate: string | null;
+  /** Buổi thiếu giá (mọi ngày) được điền giá mới. */
+  filledMissing: number;
+  /** Buổi từ ngày áp dụng đổi từ giá cũ sang giá mới. */
+  repriced: number;
+}
 
 @Injectable()
 export class TeacherService {
@@ -153,6 +167,60 @@ export class TeacherService {
       vnToday(effectiveAt),
     );
     await this.recomputeGasAllowances(teacherId);
+  }
+
+  /**
+   * Đơn giá/tiết được chốt vào từng buổi lúc gán giáo viên, nên đổi giá ở hồ
+   * sơ không tự đổi tiền các buổi đã có. Khi đổi giá:
+   * - buổi thiếu giá (chưa có đơn giá lẫn phụ cấp xăng) ở mọi ngày → điền giá mới;
+   * - có `fromDate`: mọi buổi từ ngày đó trở đi → giá mới; buổi trước giữ giá cũ.
+   * Giáo viên công ty không tính theo tiết (nhận phụ cấp xăng) nên bỏ qua; buổi
+   * đã có phụ cấp xăng cũng không đụng tới.
+   */
+  async reapplyTeacherRate(
+    teacherId: number,
+    fromDate?: string,
+  ): Promise<TeacherRateRecomputeResult> {
+    const result: TeacherRateRecomputeResult = {
+      fromDate: fromDate ?? null,
+      filledMissing: 0,
+      repriced: 0,
+    };
+    const teacher = await this.teacherRepo.findOne({
+      where: { id: teacherId },
+    });
+    if (!teacher) return result;
+    const employee = teacher.employeeId
+      ? await this.employeeRepo.findOne({ where: { id: teacher.employeeId } })
+      : null;
+    const rate = effectiveRatePerPeriod(
+      teacher,
+      !!employee?.roles?.includes(TEACHER_STAFF_ROLE),
+    );
+    if (rate == null) return result;
+
+    await this.sessionRepo.manager.transaction(async (manager) => {
+      const filled = await manager.update(
+        TeachingSession,
+        { teacherId, ratePerPeriod: IsNull(), gasAllowance: IsNull() },
+        { ratePerPeriod: rate },
+      );
+      result.filledMissing = filled.affected ?? 0;
+      if (fromDate) {
+        const repriced = await manager.update(
+          TeachingSession,
+          {
+            teacherId,
+            date: MoreThanOrEqual(fromDate),
+            gasAllowance: IsNull(),
+            ratePerPeriod: Or(IsNull(), Not(rate)),
+          },
+          { ratePerPeriod: rate },
+        );
+        result.repriced = repriced.affected ?? 0;
+      }
+    });
+    return result;
   }
 
   async create(dto: CreateTeacherDto) {
@@ -460,6 +528,11 @@ export class TeacherService {
 
     await this.teacherRepo.save(teacher);
 
+    const rateRecompute =
+      dto.defaultRatePerPeriod != null
+        ? await this.reapplyTeacherRate(id, dto.rateEffectiveFrom)
+        : null;
+
     const locationChanged =
       dto.googleMapsUrl !== undefined &&
       (Number(teacher.latitude ?? NaN) !== Number(previousLatitude ?? NaN) ||
@@ -489,7 +562,8 @@ export class TeacherService {
       await this.recomputeGasAllowances(id);
     }
 
-    return this.findOne(id);
+    const updated = await this.findOne(id);
+    return rateRecompute ? { ...updated, rateRecompute } : updated;
   }
 
   /**

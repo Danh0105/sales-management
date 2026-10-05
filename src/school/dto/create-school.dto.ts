@@ -50,6 +50,13 @@ export class CreateSchoolDto {
     @IsOptional()
     taxCode?: string;
 
+    /** Mã đơn vị quan hệ ngân sách (ĐVQHNS) — 7 chữ số. */
+    @IsOptional()
+    @Matches(/^(\d{7})?$/, {
+        message: 'Mã đơn vị quan hệ ngân sách gồm 7 chữ số',
+    })
+    budgetCode?: string | null;
+
     @IsOptional()
     phone?: string;
 

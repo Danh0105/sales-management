@@ -5,6 +5,12 @@ import {
   homeAtDate,
 } from './fuel-allowance-tier.service';
 import { TEACHER_STAFF_ROLE, TEACHER_COLLABORATOR_ROLE } from './teaching-roles';
+import {
+  departurePoint,
+  HCM_OFFICE,
+  HCM_REGION_SQL,
+  isHcmRegionWard,
+} from './company-departure';
 
 /**
  * Phụ cấp xăng theo khoảng cách — chỉ áp dụng giáo viên công ty
@@ -255,6 +261,109 @@ describe('FuelAllowanceTierService', () => {
       const result = await service.computeForTeacherSchool(1, 5, 9);
       expect(result.distanceToSchoolKm).toBeCloseTo(2.6, 0);
       expect(result.gasAllowance).toBe(20_000);
+    });
+  });
+
+  describe('trường khu vực HCM tính từ văn phòng (company-departure.ts)', () => {
+    // Trường (10.82, 106.71): cách nhà GV (10.8, 106.7) ~2,4 km → 20.000đ;
+    // cách văn phòng 231 Nguyễn Phúc Chu ~7,8 km → 30.000đ.
+    const hcmWard = { id: 500, province_id: 6 };
+    // Bảng bậc riêng: test update() phía trên sửa thẳng vào TIERS dùng chung.
+    const tiers = () => [
+      { id: 1, minDistanceKm: 0, maxDistanceKm: 5, amount: 20_000 },
+      { id: 2, minDistanceKm: 5, maxDistanceKm: 10, amount: 30_000 },
+      { id: 3, minDistanceKm: 10, maxDistanceKm: null, amount: 50_000 },
+    ];
+
+    it('khu vực HCM = tỉnh HCM trừ phường/xã Vũng Tàu, Bình Dương cũ', () => {
+      expect(isHcmRegionWard(500, 6)).toBe(true);
+      expect(isHcmRegionWard('500', '6')).toBe(true);
+      expect(isHcmRegionWard(151, 6)).toBe(false); // Vũng Tàu
+      expect(isHcmRegionWard(450, 6)).toBe(false); // Bình Dương
+      expect(isHcmRegionWard(500, 52)).toBe(false);
+      expect(isHcmRegionWard(null, null)).toBe(false);
+      const home = { latitude: 1, longitude: 2 };
+      expect(departurePoint(home, { wardId: 500, provinceId: 6 })).toBe(HCM_OFFICE);
+      expect(departurePoint(home, { wardId: 151, provinceId: 6 })).toBe(home);
+    });
+
+    it('computeForTeacherSchool: trường HCM đo từ văn phòng, không từ nhà', async () => {
+      const { service, schoolRepo } = setup({
+        tiers: tiers(),
+        school: { id: 5, latitude: 10.82, longitude: 106.71, ward: hcmWard },
+      });
+      const result = await service.computeForTeacherSchool(1, 5);
+      expect(schoolRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ relations: { ward: true } }),
+      );
+      expect(result.distanceToSchoolKm).toBeGreaterThan(7);
+      expect(result.gasAllowance).toBe(30_000);
+    });
+
+    it('computeForTeacherSchool: trường HCM vẫn tính được khi giáo viên chưa có vị trí nhà', async () => {
+      const { service } = setup({
+        tiers: tiers(),
+        teacher: { id: 1, employeeId: 100, latitude: null, longitude: null },
+        school: { id: 5, latitude: 10.82, longitude: 106.71, ward: hcmWard },
+      });
+      await expect(service.computeForTeacherSchool(1, 5)).resolves.toMatchObject({
+        isCompanyTeacher: true,
+        gasAllowance: 30_000,
+      });
+    });
+
+    it('trường ngoài khu vực (Vũng Tàu cũ) vẫn đo từ nhà', async () => {
+      const { service } = setup({
+        tiers: tiers(),
+        school: {
+          id: 5,
+          latitude: 10.82,
+          longitude: 106.71,
+          ward: { id: 151, province_id: 6 },
+        },
+      });
+      await expect(service.computeForTeacherSchool(1, 5)).resolves.toMatchObject({
+        gasAllowance: 20_000,
+      });
+    });
+
+    it('reapplyHcmOfficeDeparture: tính lại mọi buổi (kể cả đã có) ở trường HCM trong khoảng ngày', async () => {
+      const row = {
+        id: 21,
+        teacherId: 1,
+        employeeId: 100,
+        teacherName: 'Cô A',
+        teacherLatitude: null,
+        teacherLongitude: null,
+        schoolId: 5,
+        schoolName: 'TH A',
+        schoolLatitude: '10.82',
+        schoolLongitude: '106.71',
+        schoolWardId: 500,
+        schoolProvinceId: 6,
+        schoolLocationId: null,
+        date: '2026-09-15',
+        gasAllowance: '40000',
+        distanceToSchoolKm: '7.92',
+      };
+      const { service, sessionRepo, sessionQb } = setup({
+        tiers: tiers(),
+        missingSessions: [row],
+      });
+
+      const result = await service.reapplyHcmOfficeDeparture(
+        '2026-09-01',
+        '2027-05-30',
+      );
+
+      expect(result).toMatchObject({ updated: 1, stillMissing: 0 });
+      expect(sessionQb.andWhere).not.toHaveBeenCalledWith('ss.gasAllowance IS NULL');
+      expect(sessionQb.andWhere).toHaveBeenCalledWith('ss.date <= :toDate', {
+        toDate: '2027-05-30',
+      });
+      expect(sessionQb.andWhere).toHaveBeenCalledWith(HCM_REGION_SQL('sw'));
+      const [, values] = sessionRepo.update.mock.calls[0];
+      expect(values.gasAllowance).toBe(30_000);
     });
   });
 

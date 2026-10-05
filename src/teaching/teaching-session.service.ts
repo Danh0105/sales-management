@@ -117,6 +117,7 @@ import {
   type MissingAllowanceEntry,
 } from './fuel-allowance-tier.service';
 import { effectiveRatePerPeriod } from './teaching-rate.util';
+import { HCM_OFFICE, isHcmRegionWard } from './company-departure';
 import { findTeachingManagers as findTeachingManagersUtil } from './teaching-managers.util';
 import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
@@ -132,7 +133,11 @@ import {
   LessonImageEntity,
 } from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
-import { TEACHER_STAFF_ROLE, TeachingScope } from './teaching-roles';
+import {
+  TEACHER_COLLABORATOR_ROLE,
+  TEACHER_STAFF_ROLE,
+  TeachingScope,
+} from './teaching-roles';
 import {
   TEACHING_LESSON_REPORT_ALERT_KIND,
   TEACHING_LESSON_REPORT_ALERT_MANAGER_TITLE,
@@ -144,6 +149,36 @@ import {
 } from '../notifications/constants/teaching-lesson-report.constant';
 
 const MAX_LIMIT = 200;
+
+/** Buổi của giáo viên công ty (tài khoản có role `giaovien_congty`), alias `ss`. */
+export const STAFF_TEACHER_SQL =
+  `EXISTS (SELECT 1 FROM teachers stt JOIN employee ste ON ste.id = stt.employee_id ` +
+  `WHERE stt.id = ss.teacherId AND '${TEACHER_STAFF_ROLE}' = ANY(ste.roles))`;
+
+/**
+ * Buổi "thiếu giá": đã dạy mà chưa có đơn giá tiết. Giáo viên công ty cố ý
+ * không có rate_per_period (ăn lương + phụ cấp xăng) nên loại hẳn khỏi cảnh
+ * báo — kể cả buổi chưa chốt được gas_allowance (thiếu vị trí/toạ độ trường),
+ * vì điền đơn giá cũng không đúng. Dùng chung cho cột "thiếu giá N buổi" và
+ * danh sách chi tiết các buổi đó.
+ */
+const MISSING_RATE_SQL =
+  `(ss.status = '${SessionStatus.PRESENT}' AND ss.ratePerPeriod IS NULL AND ss.gasAllowance IS NULL ` +
+  `AND NOT ${STAFF_TEACHER_SQL})`;
+
+/**
+ * Lọc buổi theo loại giáo viên (alias `ss`). Cộng tác viên = không phải giáo
+ * viên công ty, kể cả giáo viên chưa có tài khoản.
+ */
+export function applyTeacherRoleFilter(
+  qb: SelectQueryBuilder<TeachingSession>,
+  teacherRole?: string,
+): void {
+  if (teacherRole === TEACHER_STAFF_ROLE) qb.andWhere(STAFF_TEACHER_SQL);
+  else if (teacherRole === TEACHER_COLLABORATOR_ROLE) {
+    qb.andWhere(`NOT ${STAFF_TEACHER_SQL}`);
+  }
+}
 
 /** Ngữ cảnh ghi log khi check-out hỏng — không chứa token hay dữ liệu ảnh. */
 interface CheckoutTrace {
@@ -1925,12 +1960,9 @@ export class TeachingSessionService {
         'totalPayableAmount',
       )
       // Buổi đã dạy nhưng chưa khai đơn giá -> tiền đang thiếu, phải báo ra.
-      // Giáo viên công ty cố ý không có rate_per_period (nhận phụ cấp xăng
-      // thay vào đó) nên loại các buổi đã có gas_allowance khỏi cảnh báo này.
+      // Giáo viên công ty không tính (xem MISSING_RATE_SQL).
       .addSelect(
-        `COUNT(*) FILTER (WHERE ss.status = '${SessionStatus.PRESENT}'
-                    AND ss.ratePerPeriod IS NULL
-                    AND ss.gasAllowance IS NULL)`,
+        `COUNT(*) FILTER (WHERE ${MISSING_RATE_SQL})`,
         'missingRateSessions',
       )
       .where('ss.date >= :fromDate', { fromDate: query.fromDate })
@@ -1950,6 +1982,7 @@ export class TeachingSessionService {
     if (query.classId) {
       qb.andWhere('ss.classId = :classId', { classId: query.classId });
     }
+    applyTeacherRoleFilter(qb, query.teacherRole);
 
     const rows = await qb.getRawMany();
     const { fuelAllowanceByTeacher, distanceKmByTeacher } =
@@ -2038,6 +2071,7 @@ export class TeachingSessionService {
       .innerJoin('ss.teacher', 't')
       .leftJoin('t.employee', 'e')
       .leftJoin('ss.school', 'sc')
+      .leftJoin('sc.ward', 'sw')
       .leftJoin('ss.schoolLocation', 'sl')
       .leftJoin('ss.subject', 'sub')
       .leftJoin('ss.class', 'cl')
@@ -2051,6 +2085,8 @@ export class TeachingSessionService {
         'sc.name AS "schoolName"',
         'sc.latitude AS "schoolLatitude"',
         'sc.longitude AS "schoolLongitude"',
+        'sw.id AS "schoolWardId"',
+        'sw.province_id AS "schoolProvinceId"',
         'ss.schoolLocationId AS "schoolLocationId"',
         'sl.name AS "locationName"',
         'sl.latitude AS "locationLatitude"',
@@ -2158,11 +2194,32 @@ export class TeachingSessionService {
       });
     };
 
+    /**
+     * Điểm xuất phát tính phụ cấp của lượt/ngày: văn phòng nếu trường ở khu vực
+     * HCM (company-departure.ts), không thì nhà có hiệu lực vào ngày đó.
+     */
+    const departureOnDate = (row: Record<string, any>, date: string) => {
+      const fromOffice = isHcmRegionWard(
+        row.schoolWardId as number | null,
+        row.schoolProvinceId as number | null,
+      );
+      return {
+        fromOffice,
+        point: fromOffice
+          ? { lat: HCM_OFFICE.latitude, lng: HCM_OFFICE.longitude }
+          : homeOnDate(row, date),
+      };
+    };
+
     type TravelStop = ReturnType<typeof toStop>;
     type TravelDay = {
       date: string;
-      /** Nhà có hiệu lực vào ngày này — điểm xuất phát của lộ trình. */
+      /**
+       * Điểm xuất phát của lộ trình: nhà có hiệu lực vào ngày này, hoặc văn
+       * phòng khi lượt đầu ngày ở trường khu vực HCM (`fromOffice`).
+       */
       home: LatLngPoint | null;
+      fromOffice: boolean;
       totalDistanceKm: number;
       fuelAllowanceAmount: number;
       stops: TravelStop[];
@@ -2198,7 +2255,7 @@ export class TeachingSessionService {
         ? null
         : diagnoseGasAllowance({
             teacher: (() => {
-              const home = homeOnDate(first, block.date);
+              const home = departureOnDate(first, block.date).point;
               return { latitude: home?.lat ?? null, longitude: home?.lng ?? null };
             })(),
             school: {
@@ -2317,9 +2374,11 @@ export class TeachingSessionService {
       const teacher = teacherEntry(block.rows[0]);
       let day = teacher.days[teacher.days.length - 1];
       if (!day || day.date !== block.date) {
+        const departure = departureOnDate(block.rows[0], block.date);
         day = {
           date: block.date,
-          home: homeOnDate(block.rows[0], block.date),
+          home: departure.point,
+          fromOffice: departure.fromOffice,
           totalDistanceKm: 0,
           fuelAllowanceAmount: 0,
           stops: [],
@@ -2437,6 +2496,7 @@ export class TeachingSessionService {
     if (query.classId) {
       qb.andWhere('ss.classId = :classId', { classId: query.classId });
     }
+    applyTeacherRoleFilter(qb, query.teacherRole);
 
     const rows = await qb.getRawMany();
     const coordsOf = await this.loadTravelPlaceCoords(rows);
@@ -2701,6 +2761,22 @@ export class TeachingSessionService {
       qb.andWhere('ss.status = :scheduledStatus', {
         scheduledStatus: SessionStatus.SCHEDULED,
       });
+    }
+    if (query.excludeStatus) {
+      qb.andWhere('ss.status != :excludeStatus', {
+        excludeStatus: query.excludeStatus,
+      });
+    }
+    if (query.missingRate) {
+      qb.andWhere(MISSING_RATE_SQL);
+    }
+    if (query.progress) {
+      // Cùng điều kiện "đủ IN · OUT · BG" với nhãn trên bảng chấm công: đã
+      // check-out (kéo theo check-in) và đã báo giảng (tên bài hoặc nhận xét).
+      const complete =
+        `(ss.checkoutAt IS NOT NULL AND (COALESCE(TRIM(ss.lessonName), '') <> '' ` +
+        `OR COALESCE(TRIM(ss.lessonEvaluation), '') <> ''))`;
+      qb.andWhere(query.progress === 'COMPLETE' ? complete : `NOT ${complete}`);
     }
     if (query.fromDate) {
       qb.andWhere('ss.date >= :fromDate', { fromDate: query.fromDate });

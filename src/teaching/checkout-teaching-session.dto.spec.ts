@@ -2,7 +2,9 @@ import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import {
   CheckinTeachingSessionDto,
   CheckoutTeachingSessionDto,
+  QueryTeachingSessionsDto,
 } from './dto/teaching-session.dto';
+import { SessionStatus } from './teaching.enum';
 
 describe('CheckinTeachingSessionDto multipart validation', () => {
   const pipe = new ValidationPipe({ transform: true, whitelist: true });
@@ -102,6 +104,49 @@ describe('CheckoutTeachingSessionDto multipart validation', () => {
           metatype: CheckoutTeachingSessionDto,
         },
       ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('QueryTeachingSessionsDto excludeStatus', () => {
+  // Cùng cấu hình pipe với TeachingSessionController.
+  const pipe = new ValidationPipe({ transform: true, whitelist: true });
+  const metadata = {
+    type: 'query' as const,
+    metatype: QueryTeachingSessionsDto,
+  };
+
+  it('nhận excludeStatus=PRESENT từ query string', async () => {
+    const result = await pipe.transform(
+      { fromDate: '2026-10-01', toDate: '2026-10-31', excludeStatus: 'PRESENT' },
+      metadata,
+    );
+
+    expect(result.excludeStatus).toBe(SessionStatus.PRESENT);
+  });
+
+  it('từ chối excludeStatus không thuộc trạng thái buổi dạy', async () => {
+    await expect(
+      pipe.transform({ excludeStatus: 'DONE' }, metadata),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('QueryTeachingSessionsDto progress', () => {
+  const pipe = new ValidationPipe({ transform: true, whitelist: true });
+  const metadata = {
+    type: 'query' as const,
+    metatype: QueryTeachingSessionsDto,
+  };
+
+  it.each(['COMPLETE', 'INCOMPLETE'])('nhận progress=%s', async (progress) => {
+    const result = await pipe.transform({ progress }, metadata);
+    expect(result.progress).toBe(progress);
+  });
+
+  it('từ chối progress không hợp lệ', async () => {
+    await expect(
+      pipe.transform({ progress: 'DONE' }, metadata),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 });

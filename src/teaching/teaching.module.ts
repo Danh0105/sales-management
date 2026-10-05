@@ -38,6 +38,7 @@ import { LessonImageLibraryService } from './lesson-image-library.service';
 import { LessonImageEntity } from './entities/lesson-image.entity';
 import { TeachingScheduleService } from './teaching-schedule.service';
 import { TeachingSessionService } from './teaching-session.service';
+import { AttendanceExportService } from './attendance-export.service';
 import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
 
 import { SchoolClassController } from './school-class.controller';
@@ -97,6 +98,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     TeachingSessionService,
     TeachingBulkService,
     FuelAllowanceTierService,
+    AttendanceExportService,
   ],
   exports: [
     SubjectResolverService,

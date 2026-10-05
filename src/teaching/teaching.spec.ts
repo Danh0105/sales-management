@@ -895,9 +895,43 @@ describe('TeachingScheduleService', () => {
     });
 
     it('mẫu chưa sinh buổi nào thì sửa lịch không tự sinh buổi', async () => {
+      const made = syncSetup([]);
+      made.schedule.repo.findOne = jest
+        .fn()
+        .mockResolvedValue({ ...SYNCED_SCHEDULE, confirmationStatus: 'PENDING' });
+
+      await made.service.update(1, { dayOfWeek: 5 });
+
+      expect(made.session.repo.insert).not.toHaveBeenCalled();
+    });
+
+    it('mẫu đã xác nhận mà chưa có buổi nào thì kéo dài hiệu lực sẽ sinh buổi từ hôm nay (Lê Hoàng Bình, 01/10/2026)', async () => {
+      // Xếp lịch Thứ Ba với hiệu lực 20/08–24/08 (không có Thứ Ba nào): giáo
+      // viên xác nhận xong vẫn 0 buổi. Giáo vụ kéo hiệu lực tới 15/09 thì
+      // phải sinh các Thứ Ba từ hôm nay (25/08) trở đi.
+      const made = syncSetup([]);
+      made.schedule.repo.findOne = jest.fn().mockResolvedValue({
+        ...SYNCED_SCHEDULE,
+        effectiveFrom: '2026-08-20',
+        effectiveTo: '2026-08-24',
+      });
+
+      const result = await made.service.update(1, { effectiveTo: '2026-09-15' });
+
+      const inserted = made.session.repo.insert.mock.calls.flatMap((c: any[]) => c[0]);
+      expect(inserted.map((row: any) => row.date)).toEqual([
+        '2026-08-25',
+        '2026-09-01',
+        '2026-09-08',
+        '2026-09-15',
+      ]);
+      expect(result.sessionSync.created).toBe(4);
+    });
+
+    it('mẫu đã xác nhận, chưa có buổi, sửa nhưng không đổi thứ/hiệu lực thì không sinh', async () => {
       const { service, session } = syncSetup([]);
 
-      await service.update(1, { dayOfWeek: 5 });
+      await service.update(1, { startTime: '07:00' });
 
       expect(session.repo.insert).not.toHaveBeenCalled();
     });
@@ -1943,6 +1977,41 @@ describe('TeachingSessionService', () => {
         (c: any[]) => c[0] === 'ss.status = :scheduledStatus',
       );
       expect(call[1]).toEqual({ scheduledStatus: SessionStatus.SCHEDULED });
+    });
+
+    it('excludeStatus = PRESENT ẩn tiết đã chấm "Có dạy" ngay trong SQL', async () => {
+      const { service, session } = makeSessionService();
+
+      await service.findAll({ excludeStatus: SessionStatus.PRESENT });
+
+      const call = session.qb.andWhere.mock.calls.find(
+        (c: any[]) => c[0] === 'ss.status != :excludeStatus',
+      );
+      expect(call[1]).toEqual({ excludeStatus: SessionStatus.PRESENT });
+    });
+
+    it.each([
+      ['COMPLETE', /^\(ss\.checkoutAt IS NOT NULL AND/],
+      ['INCOMPLETE', /^NOT \(ss\.checkoutAt IS NOT NULL AND/],
+    ] as const)('progress = %s lọc tiến độ IN · OUT · BG trong SQL', async (progress, sql) => {
+      const { service, session } = makeSessionService();
+
+      await service.findAll({ progress });
+
+      const sqls = session.qb.andWhere.mock.calls.map((c: any[]) => c[0]);
+      const condition = sqls.find((s: unknown) => typeof s === 'string' && s.includes('ss.checkoutAt IS NOT NULL'));
+      expect(condition).toMatch(sql);
+      expect(condition).toContain('ss.lessonName');
+      expect(condition).toContain('ss.lessonEvaluation');
+    });
+
+    it('không gửi excludeStatus thì không lọc trạng thái', async () => {
+      const { service, session } = makeSessionService();
+
+      await service.findAll({});
+
+      const sqls = session.qb.andWhere.mock.calls.map((c: any[]) => c[0]);
+      expect(sqls).not.toContain('ss.status != :excludeStatus');
     });
 
     it('phân trang dưới database và chặn limit quá lớn', async () => {
