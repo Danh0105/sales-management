@@ -1,6 +1,18 @@
 #!/bin/bash
 set -e
 
+# Không build production từ working tree của developer: mọi thay đổi chưa
+# commit (WIP) sẽ lọt vào dist/ — dist/ và sales_db dùng chung cho cả 3010
+# lẫn 3011 (sự cố 05/10/2026). Muốn deploy thì commit trước, hoặc build từ
+# worktree sạch của đúng commit.
+cd "$(dirname "$0")"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "❌ ERROR: refusing deployment from dirty working tree"
+  git status --short
+  exit 1
+fi
+echo "📌 Deploying commit: $(git rev-parse HEAD)"
+
 APP_NAME="sales-management"
 PORT="3010"
 export PORT
