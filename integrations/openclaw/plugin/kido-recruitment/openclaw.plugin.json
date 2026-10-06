@@ -1,0 +1,46 @@
+{
+  "id": "kido-recruitment",
+  "name": "KIDO Recruitment",
+  "description": "Tools for the KIDO recruitment API used by the AI recruiter.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "API base URL, e.g. http://staging-api:3021"
+      },
+      "apiKeyEnv": {
+        "type": "string",
+        "description": "Name of the env var holding the API key (default RECRUITMENT_AI_API_KEY)"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 60000
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "recruitment_get_active_jobs",
+      "recruitment_get_job",
+      "recruitment_find_or_create_candidate",
+      "recruitment_get_candidate",
+      "recruitment_update_candidate",
+      "recruitment_request_data_deletion",
+      "recruitment_find_or_create_application",
+      "recruitment_get_application_context",
+      "recruitment_screen_candidate",
+      "recruitment_handoff_to_hr",
+      "recruitment_save_message",
+      "recruitment_get_conversation_context",
+      "recruitment_get_interview_slots",
+      "recruitment_propose_interview",
+      "recruitment_confirm_interview"
+    ]
+  }
+}

@@ -1,0 +1,88 @@
+# KIDO AI Recruiter — Phase 2 (staging). Không đụng production:
+#   staging-db   Postgres riêng: schema prod (không dữ liệu) + seed tuyển dụng
+#   staging-api  sales-management build từ tag release, bật API AI bằng key staging
+#   openclaw     gateway OpenClaw, chỉ có tool recruitment_* (xem scripts/bootstrap-openclaw.sh)
+#
+# Chạy từ thư mục này, secrets nằm ngoài repo:
+#   docker compose --env-file /opt/kido-recruiter/.env up -d
+name: kido-recruiter
+
+services:
+  staging-db:
+    image: postgres:16.10
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sales_db_staging
+      # Mật khẩu nằm ngoài repo. Cho tới khi sales-management đọc DB credential từ env,
+      # giá trị phải khớp mật khẩu app đang hard-code. DB chỉ ở mạng internal, không publish cổng.
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?set STAGING_DB_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - staging-db-data:/var/lib/postgresql/data
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/staging-db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./staging/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    networks:
+      staging:
+        # staging-api dùng chung network namespace của DB (để localhost:5432 trỏ đúng DB),
+        # nên tên staging-api được gắn làm alias ở đây.
+        aliases: [staging-api]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales_db_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  staging-api:
+    image: kido-sales-staging:${STAGING_API_TAG:-sales-release-20261005}
+    restart: unless-stopped
+    network_mode: "service:staging-db"
+    depends_on:
+      staging-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: staging
+      PORT: "3021"
+      DB_NAME: sales_db_staging
+      DB_SYNCHRONIZE: "false"
+      JWT_SECRET: ${STAGING_JWT_SECRET:?set STAGING_JWT_SECRET}
+      RECRUITMENT_AI_ENABLED: "true"
+      RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      TZ: Asia/Ho_Chi_Minh
+
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    restart: unless-stopped
+    depends_on:
+      - staging-api
+    environment: &openclaw-env
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      TZ: Asia/Ho_Chi_Minh
+    volumes: &openclaw-volumes
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/openclaw-state:/home/node/.openclaw
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/build/plugin-build:/opt/kido/plugins/kido-recruitment:ro
+      - ./skills:/opt/kido/skills:ro
+    # Control UI chỉ nghe loopback của host — truy cập qua SSH tunnel.
+    ports:
+      - "127.0.0.1:18789:18789"
+    networks: [staging, egress]
+
+  # CLI một lần: docker compose --env-file ... run --rm openclaw-cli <lệnh>
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    profiles: [cli]
+    entrypoint: ["openclaw"]
+    environment: *openclaw-env
+    volumes: *openclaw-volumes
+    networks: [staging, egress]
+
+networks:
+  # Không có đường ra internet: staging-db/staging-api không gọi ra ngoài, không chạm Postgres prod.
+  staging:
+    internal: true
+  # Chỉ OpenClaw cần ra internet (gọi Anthropic).
+  egress: {}
+
+volumes:
+  staging-db-data: {}
