@@ -1,27 +1,35 @@
 import type { TypeOrmModuleOptions } from '@nestjs/typeorm';
 
-/**
- * Database production. Test **không bao giờ** được trỏ vào đây: `AppModule`
- * chạy `synchronize: true`, nên chỉ cần boot là schema production bị sửa theo
- * entity trong working tree (sự cố 05/10/2026 do `test/app.e2e-spec.ts`).
- */
 export const PRODUCTION_DATABASE_NAMES: readonly string[] = ['sales_db'];
 
 export const REFUSE_PRODUCTION_DB_ERROR =
   'REFUSING_TO_RUN_TESTS_AGAINST_PRODUCTION_DATABASE';
 
-/** Mặc định giữ đúng cấu hình production trước đây (cấu hình cứng). */
-const DEFAULT_DATABASE = 'sales_db';
+export const MISSING_DATABASE_CONFIG_ERROR =
+  'MISSING_PRODUCTION_DATABASE_CONFIGURATION';
 
-/**
- * Đang chạy trong test. Xét cả `JEST_WORKER_ID` (Jest luôn đặt, kể cả
- * `--runInBand`) để `NODE_ENV=production npx jest` cũng không lọt qua.
- */
+const DEFAULT_CONNECTION = {
+  host: 'localhost',
+  port: 5432,
+  username: 'postgres',
+  password: 'postgres',
+  database: 'sales_db',
+} as const;
+
+export interface DatabaseConnectionSettings {
+  type: 'postgres';
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  database: string;
+  synchronize: boolean;
+}
+
 export function isTestRun(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV === 'test' || env.JEST_WORKER_ID !== undefined;
 }
 
-/** Ném lỗi nếu đang test mà database đích là production. */
 export function assertSafeDatabaseTarget(
   database: unknown,
   env: NodeJS.ProcessEnv = process.env,
@@ -36,31 +44,74 @@ export function assertSafeDatabaseTarget(
   }
 }
 
-/**
- * Cấu hình TypeORM của `AppModule`. Production giữ nguyên hành vi cũ
- * (`sales_db`, `synchronize: true`) khi không đặt biến nào — pm2 và `.env`
- * hiện không đặt `DB_NAME`/`DB_SYNCHRONIZE`.
- *
- * Gọi lúc `AppModule` được import, nên test trỏ nhầm production bị chặn
- * trước khi TypeORM kịp tạo kết nối.
- *
- * Bỏ `synchronize` ở production là việc riêng (tech debt), không làm ở đây.
- */
-export function resolveDatabaseOptions(
+function readConnectionValue(
+  env: NodeJS.ProcessEnv,
+  key: 'DB_HOST' | 'DB_PORT' | 'DB_NAME' | 'DB_USER' | 'DB_PASSWORD',
+  developmentDefault: string,
+): string {
+  const raw = env[key];
+  const empty = raw === undefined || raw.trim() === '';
+
+  if (empty && env.NODE_ENV === 'production' && !isTestRun(env)) {
+    throw new Error(`${MISSING_DATABASE_CONFIG_ERROR}: ${key} is required`);
+  }
+
+  if (empty) return developmentDefault;
+  return key === 'DB_PASSWORD' ? raw : raw.trim();
+}
+
+function parsePort(value: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`INVALID_DATABASE_CONFIGURATION: DB_PORT="${value}"`);
+  }
+  return port;
+}
+
+function parseSynchronize(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.DB_SYNCHRONIZE;
+  if (raw === undefined || raw.trim() === '') {
+    return env.NODE_ENV !== 'production';
+  }
+
+  if (raw !== 'true' && raw !== 'false') {
+    throw new Error(
+      'INVALID_DATABASE_CONFIGURATION: DB_SYNCHRONIZE must be "true" or "false"',
+    );
+  }
+  return raw === 'true';
+}
+
+export function resolveDatabaseConnectionSettings(
   env: NodeJS.ProcessEnv = process.env,
-): TypeOrmModuleOptions {
-  const database = env.DB_NAME?.trim() || DEFAULT_DATABASE;
+): DatabaseConnectionSettings {
+  // Resolve the target first so Jest always gets the production-DB guard,
+  // even when a test deliberately passes NODE_ENV=production.
+  const database = env.DB_NAME?.trim() || DEFAULT_CONNECTION.database;
   assertSafeDatabaseTarget(database, env);
 
   return {
     type: 'postgres',
-    host: 'localhost',
-    port: 5432,
-    username: 'postgres',
-    password: 'postgres',
-    database,
+    host: readConnectionValue(env, 'DB_HOST', DEFAULT_CONNECTION.host),
+    port: parsePort(
+      readConnectionValue(env, 'DB_PORT', String(DEFAULT_CONNECTION.port)),
+    ),
+    username: readConnectionValue(env, 'DB_USER', DEFAULT_CONNECTION.username),
+    password: readConnectionValue(
+      env,
+      'DB_PASSWORD',
+      DEFAULT_CONNECTION.password,
+    ),
+    database: readConnectionValue(env, 'DB_NAME', DEFAULT_CONNECTION.database),
+    synchronize: parseSynchronize(env),
+  };
+}
+
+export function resolveDatabaseOptions(
+  env: NodeJS.ProcessEnv = process.env,
+): TypeOrmModuleOptions {
+  return {
+    ...resolveDatabaseConnectionSettings(env),
     autoLoadEntities: true,
-    synchronize:
-      env.DB_SYNCHRONIZE === undefined ? true : env.DB_SYNCHRONIZE === 'true',
   };
 }

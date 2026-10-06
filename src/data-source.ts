@@ -1,13 +1,14 @@
-// src/data-source.ts
+import 'dotenv/config';
 import { DataSource } from 'typeorm';
+import { resolveDatabaseConnectionSettings } from './database/database-options';
+
+const { synchronize: _runtimeSynchronize, ...connection } =
+  resolveDatabaseConnectionSettings();
 
 export default new DataSource({
-    type: 'postgres',
-    host: 'localhost',
-    port: 5432,
-    username: 'postgres',
-    password: 'postgres',
-    database: 'sales_db',
-    entities: ['src/**/*.entity.ts'],
-    migrations: ['src/migrations/*.ts'],
+  ...connection,
+  // Migrations must never trigger TypeORM schema synchronization.
+  synchronize: false,
+  entities: ['src/**/*.entity.ts'],
+  migrations: ['src/migrations/*.ts'],
 });
