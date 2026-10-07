@@ -53,6 +53,12 @@ services:
       # REQUIRE_SUBJECT thì key AI chung bị từ chối — production bắt buộc "true".
       RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
       RECRUITMENT_AI_REQUIRE_SUBJECT: ${RECRUITMENT_AI_REQUIRE_SUBJECT:-false}
+      # P3-3: webhook Zalo OA tuyển dụng với OA GIẢ — không phải OA thật, không có token
+      # gửi tin. Event ký bằng secret staging do bootstrap sinh.
+      RECRUITMENT_ZALO_ENABLED: "true"
+      RECRUITMENT_ZALO_APP_ID: stg-recruit-app
+      RECRUITMENT_ZALO_OA_ID: stg-recruit-oa
+      RECRUITMENT_ZALO_OA_SECRET_KEY: ${STAGING_ZALO_OA_SECRET_KEY:?set STAGING_ZALO_OA_SECRET_KEY}
       # FcmService bắt buộc có service account lúc khởi động. Staging KHÔNG dùng
       # credential Firebase thật: file giả do bootstrap sinh, không gửi được thông báo.
       FIREBASE_SERVICE_ACCOUNT_PATH: /run/kido/fake-firebase.json

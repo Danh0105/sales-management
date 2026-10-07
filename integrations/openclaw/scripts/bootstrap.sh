@@ -22,6 +22,7 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)"
     echo "RECRUITMENT_AI_API_KEY=$(openssl rand -hex 32)"
     echo "RECRUITMENT_CHANNEL_API_KEY=$(openssl rand -hex 32)"
+    echo "STAGING_ZALO_OA_SECRET_KEY=$(openssl rand -hex 32)"
     echo "STAGING_JWT_SECRET=$(openssl rand -hex 32)"
     echo "OPENAI_API_KEY="
     echo "STAGING_DB_PASSWORD="
@@ -31,6 +32,11 @@ fi
 # Phase 3: key kênh tin cậy — .env tạo trước Phase 3 thì bổ sung (khác key AI chung).
 if ! grep -qE '^RECRUITMENT_CHANNEL_API_KEY=.+' "$ENV_FILE"; then
   echo "RECRUITMENT_CHANNEL_API_KEY=$(openssl rand -hex 32)" >> "$ENV_FILE"
+fi
+# P3-3: OA Secret Key GIẢ cho webhook Zalo OA tuyển dụng trên staging (OA giả
+# stg-recruit-oa, không phải OA thật) — acceptance tự ký event bằng key này.
+if ! grep -qE '^STAGING_ZALO_OA_SECRET_KEY=.+' "$ENV_FILE"; then
+  echo "STAGING_ZALO_OA_SECRET_KEY=$(openssl rand -hex 32)" >> "$ENV_FILE"
 fi
 if ! grep -qE '^STAGING_DB_PASSWORD=.+' "$ENV_FILE"; then
   echo "Điền STAGING_DB_PASSWORD trong $ENV_FILE (khớp mật khẩu DB mà staging-api dùng)." >&2
