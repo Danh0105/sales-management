@@ -1,4 +1,5 @@
 import { REQUIRE_SUBJECT_CONFIG_ERROR } from './ai/recruitment-ai-subject';
+import { RECRUITMENT_ZALO_CONFIG_ERROR } from './channels/zalo-recruitment-event';
 import { RecruitmentModule } from './recruitment.module';
 
 function moduleWith(values: Record<string, string>) {
@@ -23,5 +24,11 @@ describe('RecruitmentModule — kiểm cấu hình lúc khởi động (fail-clo
         RECRUITMENT_AI_REQUIRE_SUBJECT: 'true',
       }).onModuleInit(),
     ).not.toThrow();
+  });
+
+  it('bật webhook Zalo OA tuyển dụng mà thiếu cấu hình OA → không khởi động', () => {
+    expect(() =>
+      moduleWith({ RECRUITMENT_ZALO_ENABLED: 'true' }).onModuleInit(),
+    ).toThrow(RECRUITMENT_ZALO_CONFIG_ERROR);
   });
 });

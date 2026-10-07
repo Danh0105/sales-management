@@ -143,3 +143,20 @@ export enum IdempotencyStatus {
   IN_PROGRESS = 'IN_PROGRESS',
   COMPLETED = 'COMPLETED',
 }
+
+/** Kênh nhắn tin bên ngoài đẩy event vào (webhook). */
+export enum ChannelEventChannel {
+  ZALO = 'ZALO',
+}
+
+/**
+ * Vòng đời một event webhook. Lúc nhận chỉ ghi `RECEIVED` (sẽ được xử lý) hoặc
+ * `IGNORED` (hợp lệ nhưng không xử lý); worker sau này mới chuyển tiếp.
+ */
+export enum ChannelEventStatus {
+  RECEIVED = 'RECEIVED',
+  IGNORED = 'IGNORED',
+  PROCESSING = 'PROCESSING',
+  PROCESSED = 'PROCESSED',
+  FAILED = 'FAILED',
+}
