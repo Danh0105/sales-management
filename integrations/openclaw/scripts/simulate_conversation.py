@@ -704,7 +704,7 @@ def scenario_sensitive() -> Report:
 
 def scenario_isolation() -> Report:
     rep = Report("isolation", "Session isolation — 2 ứng viên nhắn xen kẽ")
-    x, y = f"simz-isoX-{RUN_ID}", f"simz-isoY-{RUN_ID}"
+    x, y = f"simz-isox-{RUN_ID}", f"simz-isoy-{RUN_ID}"  # OpenClaw hạ chữ thường session key
     (spoken_x, phone_x), (spoken_y, phone_y) = sim_phone("094"), sim_phone("096")
     converse(rep, [
         (x, "Chào bạn, mình muốn ứng tuyển nhân viên kinh doanh ở Cà Mau. Mình tên Trần Văn Khải.", {"provides": ["name", "location"]}),

@@ -4,6 +4,18 @@ import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { callApi, resolveConfig, traceLine, type ApiRequest, type PluginConfig } from "./client.js";
 
 /**
+ * Phiên của kênh tin cậy: danh tính lấy từ session (subject), không theo tham số
+ * model — bỏ các trường danh tính model tự khai trước khi gọi API.
+ */
+export function scrubIdentity(tool: string, params: unknown): unknown {
+  if (tool !== "recruitment_find_or_create_candidate" || !params || typeof params !== "object") {
+    return params;
+  }
+  const { zaloUserId: _ignored, ...rest } = params as Record<string, unknown>;
+  return rest;
+}
+
+/**
  * Tool OpenClaw cho API tuyển dụng KIDO. Mỗi tool ánh xạ đúng một endpoint
  * `/recruitment/ai/*` (xem RECRUITMENT-AI-API.md). Tool không tự ra quyết
  * định: backend giữ state machine, chấm điểm và các ràng buộc.
@@ -93,7 +105,7 @@ export const ENDPOINTS = [
     name: "recruitment_find_or_create_candidate",
     label: "Nhận diện ứng viên",
     description:
-      "Call FIRST on every candidate turn, before answering anything (even a short or policy question): find the candidate by zaloUserId (the sender) or create one. Phone/email matches only return outcome POSSIBLE_DUPLICATE (never another person's data); resend with confirmNewCandidate=true to create.",
+      "Call FIRST on every candidate turn, before answering anything (even a short or policy question): find the candidate by zaloUserId (the sender) or create one. On a real channel the sender identity is attached automatically and any zaloUserId you pass is ignored. Phone/email matches only return outcome POSSIBLE_DUPLICATE (never another person's data); resend with confirmNewCandidate=true to create.",
     parameters: Strict({
       zaloUserId: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9_-]{1,100}$", description: "Sender id from the channel" })),
       phone: Type.Optional(Str(30, "Số điện thoại")),
@@ -251,6 +263,7 @@ export default defineToolPlugin({
     apiKeyEnv: Type.Optional(Type.String({ description: "Name of the env var holding the API key (default RECRUITMENT_AI_API_KEY)" })),
     timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 60000 })),
   }),
+  // Factory: mỗi lượt chạy có `toolContext.sessionKey` — nguồn danh tính của kênh.
   tools: (tool) =>
     ENDPOINTS.map((e) =>
       tool({
@@ -258,14 +271,24 @@ export default defineToolPlugin({
         label: e.label,
         description: e.description,
         parameters: e.parameters,
-        outputSchema: ApiResultSchema,
-        execute: async (params, config, context) => {
-          const req = (e.request as (p: unknown) => ApiRequest)(params);
-          const started = Date.now();
-          const result = await callApi(resolveConfig(config as PluginConfig), req, context?.signal);
-          context?.api?.logger?.info(traceLine(e.name, context?.toolCallId, req, result, Date.now() - started));
-          return result;
-        },
+        factory: ({ api, config, toolContext }) => ({
+          name: e.name,
+          label: e.label,
+          description: e.description,
+          parameters: e.parameters,
+          outputSchema: ApiResultSchema,
+          execute: async (toolCallId: string, params: unknown, signal?: AbortSignal) => {
+            const resolved = resolveConfig(config as PluginConfig, process.env, toolContext?.sessionKey);
+            const args = resolved?.subject ? scrubIdentity(e.name, params) : params;
+            const req = (e.request as (p: unknown) => ApiRequest)(args);
+            const started = Date.now();
+            const result = await callApi(resolved, req, signal);
+            api?.logger?.info(
+              traceLine(e.name, toolCallId, req, result, Date.now() - started, resolved?.subject ? "channel" : "ai"),
+            );
+            return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result };
+          },
+        }),
       }),
     ),
 });

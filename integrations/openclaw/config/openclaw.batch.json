@@ -2,6 +2,7 @@
   {"path": "gateway.bind", "value": "lan"},
   {"path": "gateway.controlUi.allowedOrigins", "value": ["http://localhost:18789", "http://127.0.0.1:18789"]},
   {"path": "gateway.auth.rateLimit", "value": {"maxAttempts": 10, "windowMs": 60000, "lockoutMs": 300000}},
+  {"path": "gateway.http.endpoints.responses.enabled", "value": true},
   {"path": "agents.defaults.model.primary", "value": "openai/gpt-5.6-terra"},
   {"path": "agents.defaults.models", "value": {"openai/gpt-5.6-terra": {"agentRuntime": {"id": "openclaw"}}}},
   {"path": "agents.defaults.skills", "value": ["kido-recruiter"]},

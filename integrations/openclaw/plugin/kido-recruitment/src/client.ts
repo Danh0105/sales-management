@@ -14,6 +14,8 @@ import { randomUUID } from "node:crypto";
 export interface PluginConfig {
   baseUrl?: string;
   apiKeyEnv?: string;
+  /** Biến môi trường chứa key của kênh tin cậy (mặc định RECRUITMENT_CHANNEL_API_KEY). */
+  channelApiKeyEnv?: string;
   timeoutMs?: number;
 }
 
@@ -21,6 +23,8 @@ export interface ResolvedConfig {
   baseUrl: string;
   apiKey: string;
   timeoutMs: number;
+  /** Danh tính kênh do session (adapter) gắn — có thì gửi header subject + key kênh. */
+  subject?: string;
 }
 
 export type ApiResult =
@@ -37,17 +41,44 @@ export interface ApiRequest {
 }
 
 export const DEFAULT_API_KEY_ENV = "RECRUITMENT_AI_API_KEY";
+export const DEFAULT_CHANNEL_API_KEY_ENV = "RECRUITMENT_CHANNEL_API_KEY";
+export const SUBJECT_HEADER = "X-Recruitment-Subject";
+
+/**
+ * Session do adapter Zalo tạo: `agent:<agentId>:zalo:<oaId>:<zaloUserId>`.
+ * Model không đặt được session key — đây là nguồn danh tính tin cậy duy nhất.
+ */
+const CHANNEL_SESSION = /^agent:[^:]+:zalo:([A-Za-z0-9_-]{1,64}):([A-Za-z0-9_-]{1,100})$/;
+
+export function channelSubject(sessionKey: string | undefined | null): string | null {
+  const match = sessionKey ? CHANNEL_SESSION.exec(sessionKey) : null;
+  return match ? `zalo:${match[1]}:${match[2]}` : null;
+}
 export const DEFAULT_BASE_URL_ENV = "RECRUITMENT_API_BASE_URL";
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
+/**
+ * Session của kênh → key kênh + subject (thiếu key kênh thì `null`, **không**
+ * quay về key chung: request không subject sẽ bỏ qua ranh giới danh tính).
+ * Session khác (harness, tools.invoke) → key AI chung, không subject.
+ */
 export function resolveConfig(
   config: PluginConfig | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  sessionKey?: string | null,
 ): ResolvedConfig | null {
   const baseUrl = (config?.baseUrl || env[DEFAULT_BASE_URL_ENV] || "").replace(/\/+$/, "");
-  const apiKey = env[config?.apiKeyEnv || DEFAULT_API_KEY_ENV] || "";
+  const subject = channelSubject(sessionKey);
+  const apiKey = subject
+    ? env[config?.channelApiKeyEnv || DEFAULT_CHANNEL_API_KEY_ENV] || ""
+    : env[config?.apiKeyEnv || DEFAULT_API_KEY_ENV] || "";
   if (!baseUrl || !apiKey) return null;
-  return { baseUrl, apiKey, timeoutMs: config?.timeoutMs ?? DEFAULT_TIMEOUT_MS };
+  return {
+    baseUrl,
+    apiKey,
+    timeoutMs: config?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    ...(subject ? { subject } : {}),
+  };
 }
 
 function buildUrl(baseUrl: string, req: ApiRequest): string {
@@ -94,9 +125,11 @@ export function traceLine(
   req: ApiRequest,
   result: ApiResult,
   ms: number,
+  mode: "channel" | "ai" = "ai",
 ): string {
   return `kido-trace ${JSON.stringify({
     tool,
+    mode,
     call: toolCallId ?? null,
     method: req.method,
     path: req.path,
@@ -134,6 +167,7 @@ export async function callApi(
   };
   if (body) headers["Content-Type"] = "application/json";
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+  if (config.subject) headers[SUBJECT_HEADER] = config.subject;
 
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {

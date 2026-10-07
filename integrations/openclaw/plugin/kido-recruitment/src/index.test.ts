@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
-import entry, { ENDPOINTS, TOOL_NAMES } from "./index.js";
-import { callApi, resolveConfig, traceLine } from "./client.js";
+import entry, { ENDPOINTS, scrubIdentity, TOOL_NAMES } from "./index.js";
+import { callApi, channelSubject, resolveConfig, traceLine } from "./client.js";
 
 const KEY = "k".repeat(64);
 const config = { baseUrl: "http://staging-api:3021/", apiKey: KEY, timeoutMs: 1000 };
@@ -164,6 +164,7 @@ describe("callApi", () => {
     expect(line.startsWith("kido-trace ")).toBe(true);
     expect(JSON.parse(line.slice("kido-trace ".length))).toEqual({
       tool: "recruitment_update_candidate",
+      mode: "ai",
       call: "call-1",
       method: "PATCH",
       path: "candidates/7",
@@ -175,5 +176,40 @@ describe("callApi", () => {
     expect(line).not.toContain("0912345678");
     expect(line).not.toContain("Lê Văn A");
     expect(line).not.toContain(KEY);
+  });
+});
+
+describe("kênh tin cậy — danh tính từ session", () => {
+  const ENV = { RECRUITMENT_AI_API_KEY: "ai-key", RECRUITMENT_CHANNEL_API_KEY: "channel-key" };
+  const CFG = { baseUrl: "http://api" };
+
+  it("session của adapter Zalo → subject zalo:<oaId>:<userId>", () => {
+    expect(channelSubject("agent:main:zalo:4321:8765")).toBe("zalo:4321:8765");
+    expect(channelSubject("agent:main:probe:1")).toBeNull();
+    expect(channelSubject("agent:main:zalo:4321")).toBeNull();
+    expect(channelSubject(undefined)).toBeNull();
+  });
+
+  it("session kênh → key kênh + subject; session khác → key AI, không subject", () => {
+    expect(resolveConfig(CFG, ENV, "agent:main:zalo:1:2")).toMatchObject({ apiKey: "channel-key", subject: "zalo:1:2" });
+    const plain = resolveConfig(CFG, ENV, undefined);
+    expect(plain).toMatchObject({ apiKey: "ai-key" });
+    expect(plain).not.toHaveProperty("subject");
+  });
+
+  it("session kênh mà thiếu key kênh → không cấu hình (không quay về key chung)", () => {
+    expect(resolveConfig(CFG, { RECRUITMENT_AI_API_KEY: "ai-key" }, "agent:main:zalo:1:2")).toBeNull();
+  });
+
+  it("gửi header X-Recruitment-Subject khi có subject", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, {}));
+    await callApi({ baseUrl: "http://api", apiKey: "channel-key", timeoutMs: 1000, subject: "zalo:1:2" }, { method: "GET", path: "jobs/active" }, undefined, fetchImpl);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["X-Recruitment-Subject"]).toBe("zalo:1:2");
+  });
+
+  it("bỏ zaloUserId model khai khi tìm/tạo ứng viên; tool khác giữ nguyên", () => {
+    expect(scrubIdentity("recruitment_find_or_create_candidate", { zaloUserId: "victim", fullName: "A" })).toEqual({ fullName: "A" });
+    expect(scrubIdentity("recruitment_update_candidate", { candidateId: 5 })).toEqual({ candidateId: 5 });
   });
 });

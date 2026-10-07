@@ -13,8 +13,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: sales_db_staging
-      # Mật khẩu nằm ngoài repo. Cho tới khi sales-management đọc DB credential từ env,
-      # giá trị phải khớp mật khẩu app đang hard-code. DB chỉ ở mạng internal, không publish cổng.
+      # Mật khẩu nằm ngoài repo; staging-api nhận cùng giá trị qua DB_PASSWORD.
+      # DB chỉ ở mạng internal, không publish cổng.
       POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?set STAGING_DB_PASSWORD}
       TZ: Asia/Ho_Chi_Minh
     volumes:
@@ -44,9 +44,15 @@ services:
       PORT: "3021"
       DB_NAME: sales_db_staging
       DB_SYNCHRONIZE: "false"
+      DB_USER: postgres
+      DB_PASSWORD: ${STAGING_DB_PASSWORD:?set STAGING_DB_PASSWORD}
       JWT_SECRET: ${STAGING_JWT_SECRET:?set STAGING_JWT_SECRET}
       RECRUITMENT_AI_ENABLED: "true"
       RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      # Phase 3: key của kênh tin cậy (plugin trong session do adapter Zalo tạo). Bật
+      # REQUIRE_SUBJECT thì key AI chung bị từ chối — production bắt buộc "true".
+      RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
+      RECRUITMENT_AI_REQUIRE_SUBJECT: ${RECRUITMENT_AI_REQUIRE_SUBJECT:-false}
       TZ: Asia/Ho_Chi_Minh
 
   openclaw-gateway:
@@ -58,6 +64,7 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
       TZ: Asia/Ho_Chi_Minh
     volumes: &openclaw-volumes
       - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/openclaw-state:/home/node/.openclaw
