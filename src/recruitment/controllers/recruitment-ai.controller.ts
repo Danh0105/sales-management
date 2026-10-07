@@ -18,6 +18,7 @@ import { RecruitmentAiAuthGuard } from '../ai/recruitment-ai-auth.guard';
 import { RecruitmentAiOwnershipService } from '../ai/recruitment-ai-ownership.service';
 import {
   AiRequestContext,
+  channelConversationId,
   type RecruitmentAiRequestContext,
 } from '../ai/recruitment-ai-subject';
 import {
@@ -233,7 +234,7 @@ export class RecruitmentAiController {
       return this.conversations.saveMessage({
         ...dto,
         channel: ConversationChannel.ZALO,
-        externalConversationId: subject.userId,
+        externalConversationId: channelConversationId(subject),
       });
     }
     return this.conversations.saveMessage(dto);

@@ -48,6 +48,15 @@ export function formatRecruitmentSubject(subject: RecruitmentAiSubject) {
   return `${subject.channel}:${subject.oaId}:${subject.userId}`;
 }
 
+/**
+ * `externalConversationId` của hội thoại kênh: kèm OA vì id người dùng Zalo chỉ
+ * duy nhất trong một OA — hội thoại nhận diện theo (kênh, externalConversationId).
+ * Adapter và API AI phải dùng cùng quy ước này.
+ */
+export function channelConversationId(subject: RecruitmentAiSubject) {
+  return `${subject.oaId}:${subject.userId}`;
+}
+
 /** Context xác thực mà `RecruitmentAiAuthGuard` gắn vào request. */
 export const AiRequestContext = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): RecruitmentAiRequestContext =>

@@ -124,7 +124,8 @@ describe('RecruitmentAiController — kiểm ownership theo subject', () => {
     expect(conversations.saveMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         channel: ConversationChannel.ZALO,
-        externalConversationId: 'u1',
+        // Kèm OA: id người dùng Zalo chỉ duy nhất trong một OA.
+        externalConversationId: 'oa1:u1',
       }),
     );
   });
