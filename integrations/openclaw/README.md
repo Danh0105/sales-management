@@ -7,7 +7,8 @@ tách khỏi production. Chưa nối Zalo (Phase 3).
  ứng viên (giả lập: openclaw agent / tools.invoke)
         │
  openclaw-gateway  (Docker, OpenClaw 2026.9.8, model openai/gpt-5.6-terra)
-   │  skill  kido-recruiter        ← skills/kido-recruiter/SKILL.md
+   │  quy tắc + persona            ← workspace/AGENTS.md, SOUL.md, IDENTITY.md, USER.md (nạp mỗi phiên)
+   │  runtime openclaw (KHÔNG codex), Code Mode + Tool Search TẮT → 15 tool gọi trực tiếp
    │  plugin kido-recruitment      ← plugin/kido-recruitment (15 tool recruitment_*)
    │  mọi tool khác: TẮT (exec, file, web, browser, messaging, sessions...)
    ▼  HTTP + Bearer RECRUITMENT_AI_API_KEY (key staging)
@@ -30,7 +31,19 @@ tách khỏi production. Chưa nối Zalo (Phase 3).
 - Tool policy (`config/openclaw.batch.json`): `profile: minimal` + `alsoAllow: recruitment_*`,
   `deny` mọi nhóm core (deny thắng allow). `tools.elevated` và browser tắt.
   Đã kiểm: `exec`, `web_fetch` gọi qua gateway → "Tool not available".
-- Chỉ skill `kido-recruiter` được nạp cho agent (`agents.defaults.skills`).
+- **Runtime và bề mặt tool** (đều trong `config/openclaw.batch.json`, đừng bỏ):
+  - `agents.defaults.models["openai/gpt-5.6-terra"].agentRuntime.id = "openclaw"` — mặc định
+    `openai/*` chạy harness **Codex** (Codex app-server): model chỉ có tool `exec` chạy JS, tên
+    tool thành `openclaw__recruitment_*`, model lọc sai tên rồi báo "hệ thống không khả dụng".
+  - `tools.codeMode: {enabled: false}` — runtime openclaw tự bật Code Mode cho gpt-5.6
+    (`exec`/`wait`; executor mặc định `node:vm` không phải security boundary).
+  - `tools.toolSearch: false` — nếu không model chỉ thấy `tool_search/describe/call`.
+  - Kiểm: envelope `agentMeta.agentHarnessId == "openclaw"`, `codeModeEngaged == false`,
+    `systemPromptReport.tools.entries` đúng 15 tool `recruitment_*` (simulate script kiểm mỗi lượt).
+- **Quy tắc của trợ lý nằm ở `workspace/`**, không ở skill: OpenClaw chỉ đưa tên/mô tả skill vào
+  prompt và để model tự đọc file — agent không có tool đọc file. `workspace/` mount read-only làm
+  workspace của agent (`agents.defaults.workspace` + `agents.entries.main.workspace`,
+  `skipBootstrap: true`) — thay persona "personal assistant" và BOOTSTRAP.md mặc định.
 - API key / gateway token / OpenAI key của bot chỉ ở `/opt/kido-recruiter/.env`; `openclaw.json`
   dùng SecretRef (`source: env`). Plugin đọc key từ env, không bao giờ trả key trong kết quả.
 - `openclaw security audit`: 0 critical · 0 warn.

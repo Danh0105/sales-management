@@ -93,7 +93,7 @@ export const ENDPOINTS = [
     name: "recruitment_find_or_create_candidate",
     label: "Nhận diện ứng viên",
     description:
-      "Find the candidate by zaloUserId or create one. Phone/email matches only return outcome POSSIBLE_DUPLICATE (never another person's data); resend with confirmNewCandidate=true to create.",
+      "Call FIRST on every candidate turn, before answering anything (even a short or policy question): find the candidate by zaloUserId (the sender) or create one. Phone/email matches only return outcome POSSIBLE_DUPLICATE (never another person's data); resend with confirmNewCandidate=true to create.",
     parameters: Strict({
       zaloUserId: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9_-]{1,100}$", description: "Sender id from the channel" })),
       phone: Type.Optional(Str(30, "Số điện thoại")),
@@ -188,13 +188,13 @@ export const ENDPOINTS = [
     name: "recruitment_save_message",
     label: "Lưu tin nhắn",
     description:
-      "Store one chat message (candidate INBOUND or your OUTBOUND reply). Idempotent by externalMessageId. Always allowed, even after handoff.",
+      "Store one chat message — required on EVERY turn: the candidate's INBOUND message right after identifying them, and your OUTBOUND reply last. A turn that is not saved is invisible to HR. Idempotent by externalMessageId, so it is required: INBOUND = the msg value from the message header, OUTBOUND = that msg value + \"-reply\". Save your OUTBOUND reply last in the turn, with exactly the text you send. Always allowed, even after handoff.",
     parameters: Strict({
       candidateId: Id("Candidate id"),
       applicationId: Type.Optional(Id("Application id")),
       channel: Type.Union(["ZALO", "WEB", "FACEBOOK", "OTHER"].map((v) => Type.Literal(v))),
       externalConversationId: Type.Optional(Str(255, "Conversation id on the channel (use the sender id)")),
-      externalMessageId: Type.Optional(Str(255, "Message id on the channel")),
+      externalMessageId: Str(255, "INBOUND: msg value from the header. OUTBOUND: msg value + \"-reply\""),
       senderType: Type.Union(["CANDIDATE", "AI"].map((v) => Type.Literal(v))),
       direction: Type.Union(["INBOUND", "OUTBOUND"].map((v) => Type.Literal(v))),
       content: Str(10000, "Message text"),
