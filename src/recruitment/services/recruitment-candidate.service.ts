@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 
+import { LEGACY_ZALO_OA_ID } from '../ai/recruitment-ai-subject';
 import type {
   AiFindOrCreateCandidateDto,
   AiUpdateCandidateDto,
@@ -67,7 +68,9 @@ export class RecruitmentCandidateService {
 
   async create(dto: CreateCandidateDto, actor: RecruitmentActor) {
     const identity = this.normalizeIdentity(dto);
-    if (dto.zaloUserId) await this.assertZaloFree(dto.zaloUserId);
+    if (dto.zaloUserId) {
+      await this.assertZaloFree(LEGACY_ZALO_OA_ID, dto.zaloUserId);
+    }
 
     const duplicates = await this.findDuplicates(identity);
     if (duplicates.length && !dto.allowDuplicate) {
@@ -76,6 +79,7 @@ export class RecruitmentCandidateService {
 
     const candidate = this.candidateRepo.create({
       zaloUserId: dto.zaloUserId ?? null,
+      zaloOaId: dto.zaloUserId ? LEGACY_ZALO_OA_ID : null,
       source: dto.source ?? CandidateSource.MANUAL,
       notes: dto.notes ?? null,
       skills: [],
@@ -171,8 +175,10 @@ export class RecruitmentCandidateService {
       dto.zaloUserId !== undefined &&
       dto.zaloUserId !== candidate.zaloUserId
     ) {
-      if (dto.zaloUserId) await this.assertZaloFree(dto.zaloUserId, id);
+      const oaId = candidate.zaloOaId ?? LEGACY_ZALO_OA_ID;
+      if (dto.zaloUserId) await this.assertZaloFree(oaId, dto.zaloUserId, id);
       candidate.zaloUserId = dto.zaloUserId ?? null;
+      candidate.zaloOaId = dto.zaloUserId ? oaId : null;
     }
 
     const duplicates = await this.findDuplicates(
@@ -203,8 +209,12 @@ export class RecruitmentCandidateService {
   // ---------------------------------------------------------------- AI ----
 
   /**
-   * Idempotent khi OpenClaw retry: cùng `zaloUserId` luôn ra cùng ứng viên,
-   * kể cả hai request chạy song song (unique index + bắt lỗi 23505).
+   * Idempotent khi OpenClaw retry: cùng (OA, `zaloUserId`) luôn ra cùng ứng
+   * viên, kể cả hai request chạy song song (unique index + bắt lỗi 23505).
+   *
+   * `channel` là danh tính do kênh tin cậy gắn (subject) — khi có thì nó là danh
+   * tính duy nhất được dùng; controller đã chặn `zaloUserId` khác subject.
+   * Không có kênh (harness Phase 2) thì `zaloUserId` thuộc OA `legacy`.
    *
    * SĐT/email trùng **không** trả hồ sơ cũ: người nhắn có thể khai SĐT của
    * người khác để đọc hồ sơ của họ. Chỉ báo `POSSIBLE_DUPLICATE`, không kèm id
@@ -212,8 +222,11 @@ export class RecruitmentCandidateService {
    */
   async aiFindOrCreate(
     dto: AiFindOrCreateCandidateDto,
+    channel?: { oaId: string; userId: string } | null,
   ): Promise<AiFindOrCreateCandidateResult> {
-    if (!dto.zaloUserId && !dto.phone && !dto.email) {
+    const zaloUserId = channel?.userId ?? dto.zaloUserId ?? null;
+    const zaloOaId = channel?.oaId ?? (zaloUserId ? LEGACY_ZALO_OA_ID : null);
+    if (!zaloUserId && !dto.phone && !dto.email) {
       throw new BadRequestException({
         code: 'IDENTITY_REQUIRED',
         message: 'Cần ít nhất một trong zaloUserId, phone, email',
@@ -221,9 +234,9 @@ export class RecruitmentCandidateService {
     }
     const identity = this.normalizeIdentity(dto);
 
-    if (dto.zaloUserId) {
+    if (zaloUserId) {
       const existing = await this.candidateRepo.findOne({
-        where: { zaloUserId: dto.zaloUserId },
+        where: { zaloOaId: zaloOaId!, zaloUserId },
       });
       if (existing) return this.existingResult(existing);
     }
@@ -245,10 +258,11 @@ export class RecruitmentCandidateService {
     }
 
     const candidate = this.candidateRepo.create({
-      zaloUserId: dto.zaloUserId ?? null,
+      zaloUserId,
+      zaloOaId,
       source:
         dto.source ??
-        (dto.zaloUserId ? CandidateSource.ZALO : CandidateSource.OTHER),
+        (zaloUserId ? CandidateSource.ZALO : CandidateSource.OTHER),
       fullName: dto.fullName ?? null,
       location: dto.location ?? null,
       phone: identity.phone ?? null,
@@ -262,9 +276,9 @@ export class RecruitmentCandidateService {
     try {
       saved = await this.candidateRepo.save(candidate);
     } catch (error) {
-      if (isUniqueViolation(error) && dto.zaloUserId) {
+      if (isUniqueViolation(error) && zaloUserId) {
         const raced = await this.candidateRepo.findOne({
-          where: { zaloUserId: dto.zaloUserId },
+          where: { zaloOaId: zaloOaId!, zaloUserId },
         });
         if (raced) return this.existingResult(raced);
       }
@@ -446,9 +460,13 @@ export class RecruitmentCandidateService {
     if (dto.metadata !== undefined) candidate.metadata = dto.metadata ?? {};
   }
 
-  private async assertZaloFree(zaloUserId: string, excludeId?: number) {
+  private async assertZaloFree(
+    zaloOaId: string,
+    zaloUserId: string,
+    excludeId?: number,
+  ) {
     const existing = await this.candidateRepo.findOne({
-      where: { zaloUserId },
+      where: { zaloOaId, zaloUserId },
     });
     if (existing && existing.id !== excludeId) {
       throw new ConflictException({

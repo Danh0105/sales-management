@@ -1,11 +1,14 @@
-import { Module } from '@nestjs/common';
+import { Module, type OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
 import { RecruitmentAiAuthGuard } from './ai/recruitment-ai-auth.guard';
 import { RecruitmentAiIdempotencyInterceptor } from './ai/recruitment-ai-idempotency.interceptor';
+import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.service';
 import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guard';
+import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentAiController } from './controllers/recruitment-ai.controller';
 import { RecruitmentApplicationsController } from './controllers/recruitment-applications.controller';
 import { RecruitmentCandidatesController } from './controllers/recruitment-candidates.controller';
@@ -48,6 +51,9 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
  * Audit dùng `ActivityLogService` (module global). Nguồn slot phỏng vấn đi qua
  * token `INTERVIEW_SLOT_PROVIDER` — đổi sang Google Calendar chỉ cần đổi
  * `useClass` ở đây.
+ *
+ * Khởi động: production bật API AI mà không bắt buộc subject kênh thì dừng
+ * (`assertRecruitmentAiConfig`) — fail-closed.
  */
 @Module({
   imports: [
@@ -90,6 +96,13 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentAiAuthGuard,
     RecruitmentAiRateLimitGuard,
     RecruitmentAiIdempotencyInterceptor,
+    RecruitmentAiOwnershipService,
   ],
 })
-export class RecruitmentModule {}
+export class RecruitmentModule implements OnModuleInit {
+  constructor(private readonly config: ConfigService) {}
+
+  onModuleInit(): void {
+    assertRecruitmentAiConfig((key) => this.config.get<string>(key));
+  }
+}

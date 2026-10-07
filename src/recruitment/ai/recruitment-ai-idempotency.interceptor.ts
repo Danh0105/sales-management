@@ -17,6 +17,10 @@ import { catchError, mergeMap } from 'rxjs/operators';
 import { Repository } from 'typeorm';
 
 import { RecruitmentAiIdempotencyKey } from '../entities/recruitment-ai-idempotency-key.entity';
+import {
+  formatRecruitmentSubject,
+  type RecruitmentAiRequest,
+} from './recruitment-ai-subject';
 import { IdempotencyStatus } from '../recruitment.enums';
 import { isUniqueViolation } from '../recruitment.views';
 
@@ -103,7 +107,15 @@ export class RecruitmentAiIdempotencyInterceptor implements NestInterceptor {
         0,
         150,
       );
-    const requestHash = hashRequest(req.params, req.body);
+    // Kênh tin cậy: subject vào hash để người gửi khác dùng lại key thì 422,
+    // không bao giờ được replay response của người khác.
+    const subject = (req as RecruitmentAiRequest).recruitmentAi?.subject;
+    const requestHash = subject
+      ? hashRequest(req.params, {
+          body: req.body as unknown,
+          subject: formatRecruitmentSubject(subject),
+        })
+      : hashRequest(req.params, req.body);
     const where = { idempotencyKey: raw, endpoint };
     const res = http.getResponse<Response>();
 

@@ -276,3 +276,69 @@ describe('RecruitmentCandidateService — AI', () => {
     });
   });
 });
+
+describe('RecruitmentCandidateService — danh tính kênh (OA, zaloUserId)', () => {
+  it('kênh tin cậy: tìm theo đúng cặp (OA, user) của subject', async () => {
+    const { service, candidateRepo } = setup();
+    candidateRepo.findOne.mockResolvedValue({
+      ...existing,
+      zaloOaId: 'oa1',
+      zaloUserId: 'u1',
+    });
+
+    const result = await service.aiFindOrCreate(
+      { fullName: 'A' },
+      { oaId: 'oa1', userId: 'u1' },
+    );
+
+    expect(candidateRepo.findOne).toHaveBeenCalledWith({
+      where: { zaloOaId: 'oa1', zaloUserId: 'u1' },
+    });
+    expect(result).toMatchObject({ outcome: 'EXISTING' });
+  });
+
+  it('cùng user id nhưng OA khác → tạo ứng viên khác, gắn đúng OA', async () => {
+    const { service, candidateRepo } = setup();
+    candidateRepo.findOne.mockResolvedValue(null);
+
+    const result = await service.aiFindOrCreate(
+      { fullName: 'B' },
+      { oaId: 'oa2', userId: 'u1' },
+    );
+
+    expect(candidateRepo.findOne).toHaveBeenCalledWith({
+      where: { zaloOaId: 'oa2', zaloUserId: 'u1' },
+    });
+    expect(candidateRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        zaloOaId: 'oa2',
+        zaloUserId: 'u1',
+        source: CandidateSource.ZALO,
+      }),
+    );
+    expect(result).toMatchObject({ outcome: 'CREATED' });
+  });
+
+  it('không có kênh (harness Phase 2) → zaloUserId thuộc OA legacy', async () => {
+    const { service, candidateRepo } = setup();
+    await service.aiFindOrCreate({ zaloUserId: 'zalo-1' });
+    expect(candidateRepo.findOne).toHaveBeenCalledWith({
+      where: { zaloOaId: 'legacy', zaloUserId: 'zalo-1' },
+    });
+    expect(candidateRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ zaloOaId: 'legacy' }),
+    );
+  });
+
+  it('HR nhập tay zaloUserId → OA legacy; không có zaloUserId → không có OA', async () => {
+    const { service, candidateRepo } = setup();
+    await service.create({ fullName: 'C', zaloUserId: 'zalo-hr' } as any, HR);
+    expect(candidateRepo.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ zaloOaId: 'legacy' }),
+    );
+    await service.create({ fullName: 'D', phone: '0901999888' } as any, HR);
+    expect(candidateRepo.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ zaloOaId: null }),
+    );
+  });
+});

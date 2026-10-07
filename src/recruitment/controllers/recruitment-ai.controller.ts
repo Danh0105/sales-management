@@ -15,6 +15,11 @@ import {
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 
 import { RecruitmentAiAuthGuard } from '../ai/recruitment-ai-auth.guard';
+import { RecruitmentAiOwnershipService } from '../ai/recruitment-ai-ownership.service';
+import {
+  AiRequestContext,
+  type RecruitmentAiRequestContext,
+} from '../ai/recruitment-ai-subject';
 import {
   RecruitmentAiIdempotencyInterceptor,
   RequireIdempotencyKey,
@@ -31,6 +36,7 @@ import {
   AiScreenApplicationDto,
   AiUpdateCandidateDto,
 } from '../dto/ai.dto';
+import { ConversationChannel } from '../recruitment.enums';
 import { AI_ACTOR } from '../recruitment.roles';
 import { CandidatePrivacyService } from '../services/candidate-privacy.service';
 import { RecruitmentApplicationService } from '../services/recruitment-application.service';
@@ -52,6 +58,11 @@ import { recruitmentValidationPipe } from './validation';
  *
  * Mọi POST đều trả 200 và đều idempotent (khoá tự nhiên hoặc
  * `Idempotency-Key`). Lỗi nghiệp vụ trả `{ code, message }` để OpenClaw rẽ nhánh.
+ *
+ * Request của kênh tin cậy (có subject, xem `RecruitmentAiAuthGuard`) chỉ được
+ * đụng tới hồ sơ của đúng người gửi: mọi id trong request được kiểm qua quan hệ
+ * DB trước khi gọi service (`SUBJECT_MISMATCH`). Vị trí tuyển và slot phỏng vấn
+ * là dữ liệu chung, đọc tự do.
  */
 @ApiTags('Recruitment AI (OpenClaw)')
 @ApiBearerAuth()
@@ -70,6 +81,7 @@ export class RecruitmentAiController {
     private readonly interviews: RecruitmentInterviewService,
     private readonly handoffs: RecruitmentHandoffService,
     private readonly privacy: CandidatePrivacyService,
+    private readonly ownership: RecruitmentAiOwnershipService,
   ) {}
 
   // getActiveJobs()
@@ -87,77 +99,157 @@ export class RecruitmentAiController {
   // findOrCreateCandidate()
   @Post('candidates/find-or-create')
   @HttpCode(200)
-  findOrCreateCandidate(@Body() dto: AiFindOrCreateCandidateDto) {
-    return this.candidates.aiFindOrCreate(dto);
+  async findOrCreateCandidate(
+    @Body() dto: AiFindOrCreateCandidateDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    const { subject } = ai;
+    if (subject && dto.zaloUserId && dto.zaloUserId !== subject.userId) {
+      await this.ownership.denyIdentityClaim(subject, 'findOrCreateCandidate');
+    }
+    return this.candidates.aiFindOrCreate(dto, subject);
   }
 
   // getCandidate()
   @Get('candidates/:id')
-  getCandidate(@Param('id', ParseIntPipe) id: number) {
+  async getCandidate(
+    @Param('id', ParseIntPipe) id: number,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject)
+      await this.ownership.assertCandidate(ai.subject, id, 'getCandidate');
     return this.candidates.aiGet(id);
   }
 
   // updateCandidate()
   @Patch('candidates/:id')
-  updateCandidate(
+  async updateCandidate(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AiUpdateCandidateDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
   ) {
+    if (ai.subject)
+      await this.ownership.assertCandidate(ai.subject, id, 'updateCandidate');
     return this.candidates.aiUpdate(id, dto);
   }
 
   /** Ứng viên xin xoá dữ liệu khi chưa có hồ sơ nào (có hồ sơ thì dùng handoff `DATA_DELETION_REQUEST`). */
   @Post('candidates/:id/deletion-request')
   @HttpCode(200)
-  requestDeletion(
+  async requestDeletion(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AiDeletionRequestDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
   ) {
+    if (ai.subject)
+      await this.ownership.assertCandidate(
+        ai.subject,
+        id,
+        'requestCandidateDeletion',
+      );
     return this.privacy.requestDeletion(id, AI_ACTOR, { note: dto.note });
   }
 
   // findOrCreateApplication()
   @Post('applications/find-or-create')
   @HttpCode(200)
-  findOrCreateApplication(@Body() dto: AiFindOrCreateApplicationDto) {
+  async findOrCreateApplication(
+    @Body() dto: AiFindOrCreateApplicationDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject) {
+      await this.ownership.assertCandidate(
+        ai.subject,
+        dto.candidateId,
+        'findOrCreateApplication',
+      );
+    }
     return this.applications.aiFindOrCreate(dto);
   }
 
   // getApplicationContext()
   @Get('applications/:id/context')
-  getApplicationContext(@Param('id', ParseIntPipe) id: number) {
+  async getApplicationContext(
+    @Param('id', ParseIntPipe) id: number,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject)
+      await this.ownership.assertApplication(
+        ai.subject,
+        id,
+        'getApplicationContext',
+      );
     return this.applications.getAiContext(id);
   }
 
   // screenCandidate()
   @Post('applications/:id/screen')
   @HttpCode(200)
-  screenCandidate(
+  async screenCandidate(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AiScreenApplicationDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
   ) {
+    if (ai.subject)
+      await this.ownership.assertApplication(ai.subject, id, 'screenCandidate');
     return this.screening.screen(id, dto);
   }
 
   // handoffToHR()
   @Post('applications/:id/handoff')
   @HttpCode(200)
-  handoffToHr(
+  async handoffToHr(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AiHandoffDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
   ) {
+    if (ai.subject)
+      await this.ownership.assertApplication(ai.subject, id, 'handoffToHR');
     return this.handoffs.aiHandoff(id, dto);
   }
 
   // saveCandidateMessage()
   @Post('conversations/message')
   @HttpCode(200)
-  saveCandidateMessage(@Body() dto: AiSaveMessageDto) {
+  async saveCandidateMessage(
+    @Body() dto: AiSaveMessageDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    const { subject } = ai;
+    if (subject) {
+      await this.ownership.assertCandidate(
+        subject,
+        dto.candidateId,
+        'saveMessage',
+      );
+      if (dto.applicationId != null) {
+        await this.ownership.assertApplication(
+          subject,
+          dto.applicationId,
+          'saveMessage',
+        );
+      }
+      // Hội thoại của kênh luôn gắn đúng người gửi — không theo giá trị model khai.
+      return this.conversations.saveMessage({
+        ...dto,
+        channel: ConversationChannel.ZALO,
+        externalConversationId: subject.userId,
+      });
+    }
     return this.conversations.saveMessage(dto);
   }
 
   @Get('conversations/:id/context')
-  getConversationContext(@Param('id', ParseIntPipe) id: number) {
+  async getConversationContext(
+    @Param('id', ParseIntPipe) id: number,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject)
+      await this.ownership.assertConversation(
+        ai.subject,
+        id,
+        'getConversationContext',
+      );
     return this.conversations.getContext(id);
   }
 
@@ -171,14 +263,29 @@ export class RecruitmentAiController {
   @Post('interviews/propose')
   @HttpCode(200)
   @RequireIdempotencyKey()
-  proposeInterview(@Body() dto: AiProposeInterviewDto) {
+  async proposeInterview(
+    @Body() dto: AiProposeInterviewDto,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject) {
+      await this.ownership.assertApplication(
+        ai.subject,
+        dto.applicationId,
+        'proposeInterview',
+      );
+    }
     return this.interviews.aiPropose(dto);
   }
 
   // confirmInterview()
   @Post('interviews/:id/confirm')
   @HttpCode(200)
-  confirmInterview(@Param('id', ParseIntPipe) id: number) {
+  async confirmInterview(
+    @Param('id', ParseIntPipe) id: number,
+    @AiRequestContext() ai: RecruitmentAiRequestContext,
+  ) {
+    if (ai.subject)
+      await this.ownership.assertInterview(ai.subject, id, 'confirmInterview');
     return this.interviews.aiConfirm(id);
   }
 }

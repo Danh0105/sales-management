@@ -127,6 +127,29 @@ describe('RecruitmentAiIdempotencyInterceptor', () => {
     });
   });
 
+  it('kênh tin cậy: subject khác dùng lại cùng key + cùng body → 422, không replay của người khác', async () => {
+    const { interceptor } = setup(true);
+    const asSubject = (userId: string) => {
+      const c = ctx('key-abc-123');
+      const req = c.context.switchToHttp().getRequest();
+      req.recruitmentAi = {
+        credential: 'channel',
+        subject: { channel: 'zalo', oaId: 'oa1', userId },
+      };
+      return c;
+    };
+    await run(interceptor, asSubject('u1'), () => of({ interview: { id: 5 } }));
+
+    const replay = await run(interceptor, asSubject('u1'), () => of({}));
+    expect(replay.result).toEqual({ interview: { id: 5 } });
+
+    await expect(
+      run(interceptor, asSubject('u2'), () => of({})),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }),
+    });
+  });
+
   it('request trước còn đang chạy → 409 IDEMPOTENCY_IN_PROGRESS', async () => {
     const { interceptor, repo } = setup(true);
     repo.rows.push({

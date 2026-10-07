@@ -14,14 +14,19 @@ import { CandidateSource } from '../recruitment.enums';
 /**
  * Ứng viên. Một người có thể ứng tuyển nhiều vị trí (xem `RecruitmentApplication`).
  *
- * Chống trùng: `zaloUserId` là định danh mạnh (unique); `phone`/`email` chỉ để
- * **báo nghi trùng** — không unique vì không được tự gộp hồ sơ, HR quyết định.
+ * Chống trùng: cặp (`zaloOaId`, `zaloUserId`) là định danh mạnh (unique — id
+ * người dùng Zalo chỉ duy nhất trong một OA); `phone`/`email` chỉ để **báo nghi
+ * trùng** — không unique vì không được tự gộp hồ sơ, HR quyết định.
  */
 @Entity('recruitment_candidates')
-@Index('UQ_recruitment_candidates_zalo_user_id', ['zaloUserId'], {
+@Index('UQ_recruitment_candidates_zalo_identity', ['zaloOaId', 'zaloUserId'], {
   unique: true,
   where: '"zalo_user_id" IS NOT NULL',
 })
+@Check(
+  'CHK_recruitment_candidates_zalo_oa',
+  '"zalo_user_id" IS NULL OR "zalo_oa_id" IS NOT NULL',
+)
 @Index('IDX_recruitment_candidates_phone', ['phone'])
 @Index('IDX_recruitment_candidates_email', ['email'])
 @Check(
@@ -57,6 +62,18 @@ export class RecruitmentCandidate {
     nullable: true,
   })
   zaloUserId!: string | null;
+
+  /**
+   * OA mà `zaloUserId` thuộc về. Có `zaloUserId` thì bắt buộc có (CHECK); dữ
+   * liệu trước Phase 3 và hồ sơ HR nhập tay dùng `legacy`.
+   */
+  @Column({
+    name: 'zalo_oa_id',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+  })
+  zaloOaId!: string | null;
 
   @Column({
     type: 'enum',

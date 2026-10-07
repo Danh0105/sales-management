@@ -124,3 +124,115 @@ describe('RecruitmentAiRateLimitGuard', () => {
     }
   });
 });
+
+describe('RecruitmentAiAuthGuard — kênh tin cậy & subject', () => {
+  const CHANNEL = 'c'.repeat(40);
+
+  function request(authorization: string | undefined, subject?: unknown) {
+    const headers: Record<string, unknown> = {};
+    if (authorization !== undefined) headers.authorization = authorization;
+    if (subject !== undefined) headers['x-recruitment-subject'] = subject;
+    const req: any = {
+      headers,
+      method: 'POST',
+      url: '/recruitment/ai/x',
+      ip: '127.0.0.1',
+    };
+    const ctx = {
+      switchToHttp: () => ({ getRequest: () => req, getResponse: () => ({}) }),
+    } as any;
+    return { req, ctx };
+  }
+
+  function guard(extra: Record<string, string> = {}) {
+    return new RecruitmentAiAuthGuard(
+      config({
+        RECRUITMENT_AI_ENABLED: 'true',
+        RECRUITMENT_AI_API_KEY: KEY,
+        RECRUITMENT_CHANNEL_API_KEY: CHANNEL,
+        ...extra,
+      }),
+    );
+  }
+
+  function code(fn: () => unknown): string | undefined {
+    try {
+      fn();
+    } catch (error) {
+      return ((error as HttpException).getResponse() as { code?: string }).code;
+    }
+    return undefined;
+  }
+
+  it('key kênh + subject hợp lệ → cho qua, gắn subject vào request', () => {
+    const { req, ctx } = request(`Bearer ${CHANNEL}`, 'zalo:111:222');
+    expect(guard().canActivate(ctx)).toBe(true);
+    expect(req.recruitmentAi).toEqual({
+      credential: 'channel',
+      subject: { channel: 'zalo', oaId: '111', userId: '222' },
+    });
+  });
+
+  it('key AI chung, không subject → cho qua (chế độ Phase 2), subject = null', () => {
+    const { req, ctx } = request(`Bearer ${KEY}`);
+    expect(guard().canActivate(ctx)).toBe(true);
+    expect(req.recruitmentAi).toEqual({ credential: 'ai', subject: null });
+  });
+
+  it('key AI chung mà tự gửi subject → 403 SUBJECT_NOT_TRUSTED (không giả danh được)', () => {
+    const { ctx } = request(`Bearer ${KEY}`, 'zalo:111:victim');
+    expect(code(() => guard().canActivate(ctx))).toBe('SUBJECT_NOT_TRUSTED');
+  });
+
+  it('REQUIRE_SUBJECT=true → key AI chung bị từ chối: SUBJECT_REQUIRED', () => {
+    const { ctx } = request(`Bearer ${KEY}`);
+    expect(
+      code(() =>
+        guard({ RECRUITMENT_AI_REQUIRE_SUBJECT: 'true' }).canActivate(ctx),
+      ),
+    ).toBe('SUBJECT_REQUIRED');
+  });
+
+  it('REQUIRE_SUBJECT=true + key kênh + subject → cho qua', () => {
+    const { ctx } = request(`Bearer ${CHANNEL}`, 'zalo:111:222');
+    expect(
+      guard({ RECRUITMENT_AI_REQUIRE_SUBJECT: 'true' }).canActivate(ctx),
+    ).toBe(true);
+  });
+
+  it('key kênh nhưng thiếu subject → 403 SUBJECT_REQUIRED', () => {
+    const { ctx } = request(`Bearer ${CHANNEL}`);
+    expect(code(() => guard().canActivate(ctx))).toBe('SUBJECT_REQUIRED');
+  });
+
+  it.each([
+    ['sai định dạng', 'zalo:111'],
+    ['OA legacy', 'zalo:legacy:222'],
+    ['header lặp', ['zalo:1:2', 'zalo:1:3']],
+  ])('key kênh + subject %s → 403 SUBJECT_INVALID', (_label, subject) => {
+    const { ctx } = request(`Bearer ${CHANNEL}`, subject);
+    expect(code(() => guard().canActivate(ctx))).toBe('SUBJECT_INVALID');
+  });
+
+  it('key kênh trùng key AI → 503 RECRUITMENT_AI_MISCONFIGURED', () => {
+    const { ctx } = request(`Bearer ${KEY}`);
+    expect(
+      code(() => guard({ RECRUITMENT_CHANNEL_API_KEY: KEY }).canActivate(ctx)),
+    ).toBe('RECRUITMENT_AI_MISCONFIGURED');
+  });
+
+  it('chỉ cấu hình key kênh (production) → key kênh dùng được, key khác 401', () => {
+    const only = new RecruitmentAiAuthGuard(
+      config({
+        RECRUITMENT_AI_ENABLED: 'true',
+        RECRUITMENT_CHANNEL_API_KEY: CHANNEL,
+      }),
+    );
+    expect(only.canActivate(request(`Bearer ${CHANNEL}`, 'zalo:1:2').ctx)).toBe(
+      true,
+    );
+    expect(code(() => only.canActivate(request(`Bearer ${KEY}`).ctx))).toBe(
+      'INVALID_API_KEY',
+    );
+  });
+});

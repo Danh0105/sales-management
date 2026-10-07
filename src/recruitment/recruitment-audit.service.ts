@@ -19,7 +19,8 @@ export type RecruitmentAuditEntity =
   | 'applications'
   | 'interviews'
   | 'interview-slots'
-  | 'handoffs';
+  | 'handoffs'
+  | 'conversations';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -41,7 +42,9 @@ export type RecruitmentAuditAction =
   | 'INTERVIEW_CREATE'
   | 'INTERVIEW_PROPOSE'
   | 'INTERVIEW_CONFIRM'
-  | 'INTERVIEW_UPDATE';
+  | 'INTERVIEW_UPDATE'
+  /** Kênh tin cậy đòi truy cập dữ liệu không thuộc người gửi — bị chặn. */
+  | 'AI_SUBJECT_DENIED';
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng
@@ -69,6 +72,8 @@ export class RecruitmentAuditService {
     before?: unknown;
     after?: unknown;
     context?: Record<string, unknown>;
+    /** `false` cho thao tác bị từ chối (vd. `AI_SUBJECT_DENIED`). */
+    success?: boolean;
   }): Promise<void> {
     const { actor, action, entity, entityId } = params;
     const resource = `recruitment-${entity}`;
@@ -91,7 +96,7 @@ export class RecruitmentAuditService {
       afterData: capPayload(toPlain(params.after)) as unknown,
       changes: capPayload(diff(params.before, params.after)) as unknown,
       statusCode: null,
-      success: true,
+      success: params.success ?? true,
     });
   }
 }
