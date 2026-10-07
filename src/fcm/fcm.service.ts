@@ -4,6 +4,9 @@ import { Injectable }
 import * as admin
     from 'firebase-admin';
 
+import { readFileSync }
+    from 'fs';
+
 import * as path
     from 'path';
 
@@ -16,13 +19,19 @@ export class FcmService {
         private readonly employeeFcmTokenService: EmployeeFcmTokenService,
     ) {
         if (!admin.apps.length) {
-            const serviceAccount =
-                require(
-                    path.join(
-                        process.cwd(),
-                        '/src/config/kidoapp-1a672-firebase-adminsdk-fbsvc-078eef6c9c.json',
-                    ),
+            const configuredPath =
+                process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim();
+
+            if (!configuredPath) {
+                throw new Error(
+                    'FIREBASE_SERVICE_ACCOUNT_PATH is required',
                 );
+            }
+
+            const serviceAccountPath = path.resolve(configuredPath);
+            const serviceAccount = JSON.parse(
+                readFileSync(serviceAccountPath, 'utf8'),
+            );
 
             admin.initializeApp({
                 credential:
