@@ -37,6 +37,14 @@ if ! grep -qE '^STAGING_DB_PASSWORD=.+' "$ENV_FILE"; then
   exit 1
 fi
 mkdir -p "$DIR/staging-db" "$DIR/openclaw-state" "$DIR/build"
+# Service account Firebase GIẢ cho staging (FcmService bắt buộc lúc khởi động):
+# key RSA tự sinh, không phải key Google — không bao giờ dùng credential thật ở đây.
+if [ ! -s "$DIR/staging-fake-firebase.json" ]; then
+  KEY_PEM=$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)
+  python3 -c 'import json,sys; print(json.dumps({"type": "service_account", "project_id": "kido-staging-fake", "private_key_id": "fake", "private_key": sys.stdin.read(), "client_email": "fake@kido-staging-fake.iam.gserviceaccount.com", "client_id": "0", "token_uri": "https://oauth2.googleapis.com/token"}))' \
+    <<< "$KEY_PEM" > "$DIR/staging-fake-firebase.json"
+  chmod 644 "$DIR/staging-fake-firebase.json"   # container chạy user node; key giả, không phải secret
+fi
 
 step "1. Schema staging (chỉ schema, không dữ liệu)"
 if [ ! -s "$DIR/staging-db/01-schema.sql" ]; then

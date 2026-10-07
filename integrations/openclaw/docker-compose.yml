@@ -53,7 +53,12 @@ services:
       # REQUIRE_SUBJECT thì key AI chung bị từ chối — production bắt buộc "true".
       RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
       RECRUITMENT_AI_REQUIRE_SUBJECT: ${RECRUITMENT_AI_REQUIRE_SUBJECT:-false}
+      # FcmService bắt buộc có service account lúc khởi động. Staging KHÔNG dùng
+      # credential Firebase thật: file giả do bootstrap sinh, không gửi được thông báo.
+      FIREBASE_SERVICE_ACCOUNT_PATH: /run/kido/fake-firebase.json
       TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/staging-fake-firebase.json:/run/kido/fake-firebase.json:ro
 
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}

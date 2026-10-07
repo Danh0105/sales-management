@@ -15,8 +15,8 @@ ENV NODE_ENV=staging
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# FcmService đọc service account theo đường dẫn tương đối với cwd.
-COPY --from=build /app/src/config ./src/config
+# FcmService đọc service account qua FIREBASE_SERVICE_ACCOUNT_PATH — staging dùng file
+# giả (key RSA tự sinh, không phải key Google) mount từ /opt/kido-recruiter.
 # Nhiều module tạo ./uploads/<x> ngay lúc khởi động — user node phải ghi được.
 RUN mkdir -p /app/uploads && chown -R node:node /app/uploads
 USER node
