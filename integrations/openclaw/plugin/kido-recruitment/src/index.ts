@@ -1,7 +1,7 @@
 import { Type, type Static, type TSchema } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 
-import { callApi, resolveConfig, type ApiRequest, type PluginConfig } from "./client.js";
+import { callApi, resolveConfig, traceLine, type ApiRequest, type PluginConfig } from "./client.js";
 
 /**
  * Tool OpenClaw cho API tuyển dụng KIDO. Mỗi tool ánh xạ đúng một endpoint
@@ -259,12 +259,13 @@ export default defineToolPlugin({
         description: e.description,
         parameters: e.parameters,
         outputSchema: ApiResultSchema,
-        execute: (params, config, context) =>
-          callApi(
-            resolveConfig(config as PluginConfig),
-            (e.request as (p: unknown) => ApiRequest)(params),
-            context?.signal,
-          ),
+        execute: async (params, config, context) => {
+          const req = (e.request as (p: unknown) => ApiRequest)(params);
+          const started = Date.now();
+          const result = await callApi(resolveConfig(config as PluginConfig), req, context?.signal);
+          context?.api?.logger?.info(traceLine(e.name, context?.toolCallId, req, result, Date.now() - started));
+          return result;
+        },
       }),
     ),
 });

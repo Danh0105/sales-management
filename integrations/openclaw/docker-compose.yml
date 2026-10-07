@@ -56,7 +56,7 @@ services:
       - staging-api
     environment: &openclaw-env
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
       TZ: Asia/Ho_Chi_Minh
     volumes: &openclaw-volumes
@@ -81,7 +81,7 @@ networks:
   # Không có đường ra internet: staging-db/staging-api không gọi ra ngoài, không chạm Postgres prod.
   staging:
     internal: true
-  # Chỉ OpenClaw cần ra internet (gọi Anthropic).
+  # Chỉ OpenClaw cần ra internet (gọi OpenAI).
   egress: {}
 
 volumes:

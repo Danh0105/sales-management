@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
 import entry, { ENDPOINTS, TOOL_NAMES } from "./index.js";
-import { callApi, resolveConfig } from "./client.js";
+import { callApi, resolveConfig, traceLine } from "./client.js";
 
 const KEY = "k".repeat(64);
 const config = { baseUrl: "http://staging-api:3021/", apiKey: KEY, timeoutMs: 1000 };
@@ -151,5 +151,29 @@ describe("callApi", () => {
     await callApi(config, { method: "PATCH", path: "candidates/7", body: { phone: "0901", email: undefined } }, undefined, fetchImpl);
     const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({ phone: "0901" });
+  });
+
+  it("trace chỉ ghi tool/method/path/kết quả — không body, query, API key", () => {
+    const line = traceLine(
+      "recruitment_update_candidate",
+      "call-1",
+      { method: "PATCH", path: "candidates/7", query: { q: "0912345678" }, body: { phone: "0912345678", fullName: "Lê Văn A" } },
+      { ok: false, httpStatus: 400, error: { code: "VALIDATION_ERROR", message: "property gender should not exist" } },
+      12,
+    );
+    expect(line.startsWith("kido-trace ")).toBe(true);
+    expect(JSON.parse(line.slice("kido-trace ".length))).toEqual({
+      tool: "recruitment_update_candidate",
+      call: "call-1",
+      method: "PATCH",
+      path: "candidates/7",
+      httpStatus: 400,
+      ok: false,
+      code: "VALIDATION_ERROR",
+      ms: 12,
+    });
+    expect(line).not.toContain("0912345678");
+    expect(line).not.toContain("Lê Văn A");
+    expect(line).not.toContain(KEY);
   });
 });

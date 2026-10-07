@@ -22,10 +22,10 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)"
     echo "RECRUITMENT_AI_API_KEY=$(openssl rand -hex 32)"
     echo "STAGING_JWT_SECRET=$(openssl rand -hex 32)"
-    echo "ANTHROPIC_API_KEY="
+    echo "OPENAI_API_KEY="
     echo "STAGING_DB_PASSWORD="
   } > "$ENV_FILE")
-  echo "Đã tạo $ENV_FILE — điền STAGING_DB_PASSWORD (và ANTHROPIC_API_KEY trước khi chạy hội thoại giả lập)."
+  echo "Đã tạo $ENV_FILE — điền STAGING_DB_PASSWORD (và OPENAI_API_KEY riêng của bot tuyển dụng trước khi chạy hội thoại giả lập)."
 fi
 if ! grep -qE '^STAGING_DB_PASSWORD=.+' "$ENV_FILE"; then
   echo "Điền STAGING_DB_PASSWORD trong $ENV_FILE (khớp mật khẩu DB mà staging-api dùng)." >&2
@@ -80,4 +80,4 @@ done
 "${DC[@]}" exec -T openclaw-gateway openclaw security audit | sed -n 1,3p
 
 echo
-echo "Xong. Kiểm tra: scripts/tool-e2e.sh — Hội thoại với Claude: scripts/simulate-conversation.sh"
+echo "Xong. Kiểm tra: scripts/tool-e2e.sh — Hội thoại với LLM: scripts/simulate-conversation.sh"

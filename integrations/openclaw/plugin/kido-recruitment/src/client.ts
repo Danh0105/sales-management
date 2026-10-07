@@ -82,6 +82,31 @@ function errorFrom(httpStatus: number, body: unknown): ApiResult {
   return { ok: false, httpStatus, error: { code, message } };
 }
 
+/**
+ * Một dòng log cho mỗi lời gọi tool, để đối chiếu hội thoại với đúng thứ tự tool
+ * đã gọi (scripts/simulate-conversation.sh đọc dòng `kido-trace` từ log gateway).
+ * Chỉ ghi tên tool, method, đường dẫn (chỉ chứa id nội bộ) và kết quả — không
+ * ghi body, query, API key hay nội dung ứng viên.
+ */
+export function traceLine(
+  tool: string,
+  toolCallId: string | undefined,
+  req: ApiRequest,
+  result: ApiResult,
+  ms: number,
+): string {
+  return `kido-trace ${JSON.stringify({
+    tool,
+    call: toolCallId ?? null,
+    method: req.method,
+    path: req.path,
+    httpStatus: result.httpStatus,
+    ok: result.ok,
+    code: result.ok ? null : result.error.code,
+    ms,
+  })}`;
+}
+
 export async function callApi(
   config: ResolvedConfig | null,
   req: ApiRequest,
