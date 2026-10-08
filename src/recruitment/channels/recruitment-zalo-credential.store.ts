@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { HrAlertSeverity, HrAlertType } from '../recruitment.enums';
+import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import type { ZaloOutboundConfig } from './zalo-outbound.config';
 import { postRequest } from './zalo-send.transport';
 import { decryptToken, encryptToken } from './zalo-token.crypto';
@@ -41,7 +43,10 @@ interface CredentialRow {
 export class RecruitmentZaloCredentialStore {
   private readonly logger = new Logger('RecruitmentZaloCredential');
 
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly alerts: RecruitmentHrAlertService,
+  ) {}
 
   /** Access token còn hạn; sắp hết hạn thì refresh trước. */
   async accessToken(config: ZaloOutboundConfig): Promise<ZaloAccessToken> {
@@ -66,6 +71,31 @@ export class RecruitmentZaloCredentialStore {
    * refresh thì trả token mới của họ. Lỗi → `ZaloCredentialError`, không lộ token.
    */
   async refresh(
+    config: ZaloOutboundConfig,
+    seenVersion: number,
+  ): Promise<ZaloAccessToken> {
+    try {
+      return await this.refreshLocked(config, seenVersion);
+    } catch (error) {
+      if (
+        error instanceof ZaloCredentialError &&
+        error.code === 'REFRESH_OUTCOME_UNKNOWN'
+      ) {
+        // Cảnh báo bền (ngoài transaction đã rollback): token OA có thể đã bị xoay mất.
+        await this.alerts
+          .raise({
+            type: HrAlertType.REFRESH_OUTCOME_UNKNOWN,
+            severity: HrAlertSeverity.CRITICAL,
+            sourceKey: `credential:${config.oaId}:v${seenVersion}`,
+            details: { oaId: config.oaId, version: seenVersion },
+          })
+          .catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  private async refreshLocked(
     config: ZaloOutboundConfig,
     seenVersion: number,
   ): Promise<ZaloAccessToken> {

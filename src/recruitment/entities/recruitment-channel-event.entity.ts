@@ -9,7 +9,11 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
+import {
+  ChannelEventAiDecision,
+  ChannelEventChannel,
+  ChannelEventStatus,
+} from '../recruitment.enums';
 
 /**
  * Event webhook của kênh tuyển dụng (Zalo OA tuyển dụng) đã qua xác thực.
@@ -151,6 +155,19 @@ export class RecruitmentChannelEvent {
 
   @Column({ name: 'text_redacted_at', type: 'timestamptz', nullable: true })
   textRedactedAt!: Date | null;
+
+  /** Hội thoại canonical của tin đến (worker gắn khi lưu tin đến). */
+  @Column({ name: 'conversation_id', type: 'int', nullable: true })
+  conversationId!: number | null;
+
+  /** Worker đã gọi AI hay bỏ qua (AI tạm dừng / HR tiếp quản / đóng) — P3-6. */
+  @Column({
+    name: 'ai_decision',
+    type: 'enum',
+    enum: ChannelEventAiDecision,
+    nullable: true,
+  })
+  aiDecision!: ChannelEventAiDecision | null;
 
   /** SHA-256 (hex) của body thô — đối chiếu, không khôi phục được nội dung. */
   @Column({ name: 'payload_hash', type: 'varchar', length: 64 })

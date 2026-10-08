@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+
+import { ChannelEventAiDecision } from '../recruitment.enums';
 
 import { EVENT_TEXT_RETENTION_DAYS } from './recruitment-channel-worker.config';
 
@@ -27,6 +29,12 @@ export interface OutboxDraft {
   externalRecipientId: string;
   messageText: string;
   recruitmentMessageId: number | null;
+}
+
+/** Hội thoại + version điều khiển lúc bắt đầu lượt AI (fencing với HR). */
+export interface ControlFence {
+  conversationId: number;
+  expectedVersion: number;
 }
 
 /**
@@ -160,34 +168,64 @@ export class RecruitmentChannelEventQueue {
 
   /**
    * Xong một event trong **một transaction**: đánh dấu `PROCESSED` + xoá nội dung
-   * tin (fencing theo lease) rồi ghi outbox `ON CONFLICT (source_event_id) DO
-   * NOTHING`. Mất lease → rollback, không ghi gì.
+   * tin (fencing theo lease), rồi đối chiếu điều khiển hội thoại:
+   * - version vẫn như lúc bắt đầu lượt và còn `AI_ACTIVE` → ghi outbox
+   *   (`ON CONFLICT DO NOTHING`), xoá cờ nhắc làm mới context;
+   * - HR đã đổi chế độ trong lúc OpenClaw chạy → BỎ câu trả lời AI: không outbox,
+   *   tin AI trong hội thoại được đánh dấu không gửi.
+   * Khoá chia sẻ dòng hội thoại (`FOR SHARE`) nên không xen được với thao tác HR
+   * (`FOR UPDATE`): hoặc ghi outbox trước khi HR tiếp quản, hoặc bị bỏ.
+   * Mất lease → rollback, không ghi gì.
    */
   async complete(
     event: ClaimedChannelEvent,
     owner: string,
     outbox: OutboxDraft,
-  ): Promise<{ completed: boolean; outboxId: number | null }> {
+    fence: ControlFence,
+  ): Promise<{
+    completed: boolean;
+    outboxId: number | null;
+    discarded: boolean;
+  }> {
     return this.dataSource.transaction(async (em) => {
-      const done = returnedRows(
-        await em.query(
-          `UPDATE "recruitment_channel_events"
-         SET status = 'PROCESSED', processed_at = now(), normalized_message_text = NULL,
-             text_redacted_at = now(), lease_until = NULL, next_attempt_at = NULL,
-             last_error_code = NULL, failure_code = NULL, updated_at = now()
-         WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
-         RETURNING id`,
-          [event.id, owner],
-        ),
+      if (!(await this.markProcessed(em, event, owner, fence.conversationId))) {
+        return { completed: false, outboxId: null, discarded: false };
+      }
+      const [control]: Array<{
+        control_mode: string;
+        control_version: number;
+      }> = await em.query(
+        `SELECT control_mode, control_version FROM "recruitment_conversations"
+           WHERE id = $1 FOR SHARE`,
+        [fence.conversationId],
       );
-      if (!done.length) return { completed: false, outboxId: null };
+      if (
+        !control ||
+        control.control_mode !== 'AI_ACTIVE' ||
+        Number(control.control_version) !== fence.expectedVersion
+      ) {
+        await this.setDecision(
+          em,
+          event.id,
+          ChannelEventAiDecision.DISCARDED_CONTROL_CHANGED,
+        );
+        if (outbox.recruitmentMessageId) {
+          await em.query(
+            `UPDATE "recruitment_messages"
+             SET metadata = metadata || '{"delivery": "DISCARDED_CONTROL_CHANGED"}'::jsonb
+             WHERE id = $1`,
+            [outbox.recruitmentMessageId],
+          );
+        }
+        return { completed: true, outboxId: null, discarded: true };
+      }
 
       const inserted: Array<{ id: number }> = await em.query(
         `INSERT INTO "recruitment_channel_outbox"
-           ("source_event_id", "channel", "channel_account_id", "external_recipient_id",
-            "message_text", "recruitment_message_id")
-         VALUES ($1, 'ZALO', $2, $3, $4, $5)
-         ON CONFLICT ON CONSTRAINT "UQ_recruitment_channel_outbox_source_event" DO NOTHING
+           ("source_event_id", "source_type", "channel", "channel_account_id",
+            "external_recipient_id", "message_text", "recruitment_message_id", "control_version")
+         VALUES ($1, 'AI_REPLY', 'ZALO', $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING
          RETURNING id`,
         [
           event.id,
@@ -195,10 +233,73 @@ export class RecruitmentChannelEventQueue {
           outbox.externalRecipientId,
           outbox.messageText,
           outbox.recruitmentMessageId,
+          fence.expectedVersion,
         ],
       );
-      return { completed: true, outboxId: inserted[0]?.id ?? null };
+      await this.setDecision(em, event.id, ChannelEventAiDecision.AI_REPLIED);
+      await em.query(
+        `UPDATE "recruitment_conversations" SET resume_signal_pending = false
+         WHERE id = $1 AND control_version = $2 AND resume_signal_pending`,
+        [fence.conversationId, fence.expectedVersion],
+      );
+      return {
+        completed: true,
+        outboxId: inserted[0]?.id ?? null,
+        discarded: false,
+      };
     });
+  }
+
+  /**
+   * Hội thoại không ở `AI_ACTIVE` (AI tạm dừng / HR tiếp quản / đóng): tin đến đã
+   * vào hội thoại canonical, KHÔNG gọi OpenClaw — đánh dấu `PROCESSED` với lý do
+   * và chạy `alsoInTx` (vd. cảnh báo HR) trong cùng transaction.
+   */
+  async completeWithoutAi(
+    event: ClaimedChannelEvent,
+    owner: string,
+    conversationId: number,
+    decision: ChannelEventAiDecision,
+    alsoInTx?: (em: EntityManager) => Promise<unknown>,
+  ): Promise<boolean> {
+    return this.dataSource.transaction(async (em) => {
+      if (!(await this.markProcessed(em, event, owner, conversationId)))
+        return false;
+      await this.setDecision(em, event.id, decision);
+      if (alsoInTx) await alsoInTx(em);
+      return true;
+    });
+  }
+
+  private async markProcessed(
+    em: EntityManager,
+    event: ClaimedChannelEvent,
+    owner: string,
+    conversationId: number,
+  ): Promise<boolean> {
+    const done = returnedRows(
+      await em.query(
+        `UPDATE "recruitment_channel_events"
+         SET status = 'PROCESSED', processed_at = now(), normalized_message_text = NULL,
+             text_redacted_at = now(), lease_until = NULL, next_attempt_at = NULL,
+             last_error_code = NULL, failure_code = NULL, conversation_id = $3, updated_at = now()
+         WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
+         RETURNING id`,
+        [event.id, owner, conversationId],
+      ),
+    );
+    return done.length > 0;
+  }
+
+  private async setDecision(
+    em: EntityManager,
+    eventId: number,
+    decision: ChannelEventAiDecision,
+  ) {
+    await em.query(
+      `UPDATE "recruitment_channel_events" SET ai_decision = $2 WHERE id = $1`,
+      [eventId, decision],
+    );
   }
 
   /**

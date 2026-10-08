@@ -25,6 +25,7 @@ import {
   ROW_IGNORED_FIELDS,
   ID_FIELD_LOOKUPS,
   LOOKUP_PATH_SUFFIXES,
+  REDACTED_BODY_PATHS,
   SKIPPED_RESOURCES,
   SNAPSHOT_RELATIONS,
 } from './audited-entities';
@@ -147,6 +148,11 @@ export class ActivityLogInterceptor implements NestInterceptor {
       (await this.loadCreatedRows(req, data)) ??
       (req.method === 'DELETE' ? null : await this.loadRow(req));
     const changes = diffSnapshots(before, after, DIFF_IGNORED_FIELDS);
+    if (isRedactedBodyPath(snapshot.path)) {
+      // Nội dung tin nhắn: chỉ giữ ai/khi nào/ở đâu, không chép response/bản ghi.
+      void this.service.record({ ...snapshot, context: null, ...outcome });
+      return;
+    }
     const context = await this.buildContext(data, req.body, after ?? before);
 
     void this.service.record({
@@ -350,14 +356,17 @@ export class ActivityLogInterceptor implements NestInterceptor {
   private snapshot(req: any, user: AuthUser) {
     const path = req.originalUrl ?? req.url ?? '';
     const files = describeFiles(req);
-    const body = sanitizeBody(req.body ?? null);
+    const cleanPath = (path as string).split('?')[0];
+    const body = isRedactedBodyPath(cleanPath)
+      ? { _redacted: 'nội dung tin nhắn — không lưu vào nhật ký' }
+      : sanitizeBody(req.body ?? null);
 
     return {
       actorId: user.id,
       actorName: user.name ?? null,
       actorRoles: user.roles ?? (user.role ? [user.role] : []),
       method: req.method,
-      path: path.split('?')[0],
+      path: cleanPath,
       resource: resourceOf(path),
       body: capPayload(files ? { ...(body ?? {}), _files: files } : body),
       params: capPayload(req.params ?? null),
@@ -365,4 +374,8 @@ export class ActivityLogInterceptor implements NestInterceptor {
       ip: req.ip ?? req.headers?.['x-forwarded-for'] ?? null,
     };
   }
+}
+
+function isRedactedBodyPath(path: string): boolean {
+  return REDACTED_BODY_PATHS.some((pattern) => pattern.test(path));
 }

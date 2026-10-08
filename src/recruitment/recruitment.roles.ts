@@ -21,6 +21,19 @@ export const RECRUITMENT_VIEW_ROLES: readonly string[] = [
   ...RECRUITMENT_VIEW_ONLY_ROLES,
 ];
 
+/**
+ * Tiếp quản hội thoại kênh / gửi tin thay AI / trả lại AI / đóng (P3-6). Hiện
+ * trùng nhóm quản lý; tách hằng số để thu hẹp được mà không sửa controller.
+ */
+export const RECRUITMENT_TAKEOVER_ROLES: readonly string[] = [
+  ...RECRUITMENT_MANAGE_ROLES,
+];
+
+/** Vận hành kênh: đối soát outbox UNKNOWN, xác nhận cảnh báo (P3-6). */
+export const RECRUITMENT_OPERATIONS_ROLES: readonly string[] = [
+  ...RECRUITMENT_MANAGE_ROLES,
+];
+
 export function canManageRecruitment(user?: AuthUser): boolean {
   return (user?.roles ?? []).some((r) => RECRUITMENT_MANAGE_ROLES.includes(r));
 }

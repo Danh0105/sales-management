@@ -91,6 +91,7 @@ function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
     messageText: TEXT,
     recruitmentMessageId: 301,
     attemptCount: 1,
+    sourceType: 'AI_REPLY',
     ...patch,
   };
 }
@@ -107,20 +108,16 @@ function setup(
     markDeadLetter: jest.fn().mockResolvedValue(true),
   };
   const credentials = {
-    accessToken: jest
-      .fn()
-      .mockResolvedValue({
-        accessToken: TOKEN,
-        version: 4,
-        expiresAt: new Date(),
-      }),
-    refresh: jest
-      .fn()
-      .mockResolvedValue({
-        accessToken: `${TOKEN}-new`,
-        version: 5,
-        expiresAt: new Date(),
-      }),
+    accessToken: jest.fn().mockResolvedValue({
+      accessToken: TOKEN,
+      version: 4,
+      expiresAt: new Date(),
+    }),
+    refresh: jest.fn().mockResolvedValue({
+      accessToken: `${TOKEN}-new`,
+      version: 5,
+      expiresAt: new Date(),
+    }),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const canonical =
@@ -150,6 +147,7 @@ function setup(
     credentials as any,
     audit as any,
     dataSource as any,
+    { sweep: jest.fn().mockResolvedValue(0) } as any,
   );
   return { sender, queue, credentials, audit };
 }
@@ -260,6 +258,38 @@ describe('RecruitmentZaloSender.process', () => {
           entityId: 21,
           context: { code, status: 'DEAD_LETTER' },
         }),
+      );
+    },
+  );
+
+  it('tin HR (HR_MESSAGE) với tin canonical do HR viết → gửi', async () => {
+    zalo = await fakeZalo([json({ error: 0, data: { message_id: 'z-hr' } })]);
+    const { sender, queue } = setup({ canonical: { sender_type: 'HR' } });
+    await sender.process(
+      row({ sourceType: 'HR_MESSAGE' }),
+      'o1',
+      config(zalo.url),
+    );
+    expect(zalo.requests).toHaveLength(1);
+    expect(queue.markSent).toHaveBeenCalledWith(21, 'o1', 'z-hr');
+  });
+
+  it.each([
+    ['dòng HR_MESSAGE nhưng tin canonical là của AI', 'HR_MESSAGE', 'AI'],
+    ['dòng AI_REPLY nhưng tin canonical là của HR', 'AI_REPLY', 'HR'],
+  ])(
+    '%s → CANONICAL_INVALID, không gửi',
+    async (_name, sourceType, senderType) => {
+      zalo = await fakeZalo([]);
+      const { sender, queue } = setup({
+        canonical: { sender_type: senderType },
+      });
+      await sender.process(row({ sourceType }), 'o1', config(zalo.url));
+      expect(zalo.requests).toHaveLength(0);
+      expect(queue.markDeadLetter).toHaveBeenCalledWith(
+        21,
+        'o1',
+        'CANONICAL_INVALID',
       );
     },
   );
@@ -420,6 +450,7 @@ describe('RecruitmentZaloCredentialStore.refresh', () => {
   });
 
   function store(row: unknown) {
+    const alerts = { raise: jest.fn().mockResolvedValue(true) };
     const em = {
       query: jest.fn().mockResolvedValueOnce([row]).mockResolvedValue([]),
     };
@@ -428,7 +459,11 @@ describe('RecruitmentZaloCredentialStore.refresh', () => {
       query: jest.fn(),
     };
     return {
-      credentialStore: new RecruitmentZaloCredentialStore(dataSource as any),
+      credentialStore: new RecruitmentZaloCredentialStore(
+        dataSource as any,
+        alerts as any,
+      ),
+      alerts,
       em,
     };
   }
@@ -495,6 +530,24 @@ describe('RecruitmentZaloCredentialStore.refresh', () => {
         code: 'REFRESH_REJECTED',
       });
       expect(em.query).toHaveBeenCalledTimes(1);
+    } finally {
+      await zalo.close();
+    }
+  });
+
+  it('Zalo nhận refresh nhưng không trả lời → REFRESH_OUTCOME_UNKNOWN + cảnh báo CRITICAL bền (một nguồn / version)', async () => {
+    const zalo = await fakeZalo([() => undefined]);
+    try {
+      const { credentialStore, alerts } = store(stored(4));
+      await expect(
+        credentialStore.refresh(config(zalo.url), 4),
+      ).rejects.toMatchObject({ code: 'REFRESH_OUTCOME_UNKNOWN' });
+      expect(alerts.raise).toHaveBeenCalledWith({
+        type: 'REFRESH_OUTCOME_UNKNOWN',
+        severity: 'CRITICAL',
+        sourceKey: 'credential:oa-recruit:v4',
+        details: { oaId: 'oa-recruit', version: 4 },
+      });
     } finally {
       await zalo.close();
     }

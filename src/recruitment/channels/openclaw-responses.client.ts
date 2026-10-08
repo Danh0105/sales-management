@@ -44,7 +44,7 @@ const OPENCLAW_ERROR_TEXT = /^\s*⚠️/u;
 
 export async function invokeOpenClaw(
   config: OpenClawClientConfig,
-  request: { sessionKey: string; input: string },
+  request: { sessionKey: string; input: string; instructions?: string },
   options: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
 ): Promise<AgentOutcome> {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -69,6 +69,10 @@ export async function invokeOpenClaw(
         body: JSON.stringify({
           model: `openclaw/${config.agentId}`,
           input: request.input,
+          // Tín hiệu hệ thống một lượt (vd. HR vừa trả hội thoại) — gateway gộp vào system prompt.
+          ...(request.instructions
+            ? { instructions: request.instructions }
+            : {}),
         }),
         signal,
       },

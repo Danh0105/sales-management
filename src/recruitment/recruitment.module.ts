@@ -11,6 +11,9 @@ import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guar
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
 import { RecruitmentChannelOutboxQueue } from './channels/recruitment-channel-outbox.queue';
+import { RecruitmentConversationControlService } from './channels/recruitment-conversation-control.service';
+import { RecruitmentHrAlertService } from './channels/recruitment-hr-alert.service';
+import { RecruitmentOutboxOperationsService } from './channels/recruitment-outbox-operations.service';
 import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
 import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
 import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-webhook.controller';
@@ -22,6 +25,10 @@ import { assertRecruitmentZaloConfig } from './channels/zalo-recruitment-event';
 import { RecruitmentAiController } from './controllers/recruitment-ai.controller';
 import { RecruitmentApplicationsController } from './controllers/recruitment-applications.controller';
 import { RecruitmentCandidatesController } from './controllers/recruitment-candidates.controller';
+import {
+  RecruitmentConversationsController,
+  RecruitmentOperationsController,
+} from './controllers/recruitment-conversations.controller';
 import {
   RecruitmentDashboardController,
   RecruitmentHandoffsController,
@@ -38,6 +45,7 @@ import { RecruitmentChannelEvent } from './entities/recruitment-channel-event.en
 import { RecruitmentChannelOutbox } from './entities/recruitment-channel-outbox.entity';
 import { RecruitmentConversation } from './entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from './entities/recruitment-handoff.entity';
+import { RecruitmentHrAlert } from './entities/recruitment-hr-alert.entity';
 import { RecruitmentInterviewSlot } from './entities/recruitment-interview-slot.entity';
 import { RecruitmentInterview } from './entities/recruitment-interview.entity';
 import { RecruitmentJob } from './entities/recruitment-job.entity';
@@ -86,6 +94,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentChannelEvent,
       RecruitmentChannelOutbox,
       RecruitmentZaloCredential,
+      RecruitmentHrAlert,
       Department,
       Employee,
     ]),
@@ -100,6 +109,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentDashboardController,
     RecruitmentAiController,
     RecruitmentZaloWebhookController,
+    RecruitmentConversationsController,
+    RecruitmentOperationsController,
   ],
   providers: [
     RecruitmentAuditService,
@@ -123,6 +134,9 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentChannelOutboxQueue,
     RecruitmentZaloCredentialStore,
     RecruitmentZaloSender,
+    RecruitmentHrAlertService,
+    RecruitmentConversationControlService,
+    RecruitmentOutboxOperationsService,
   ],
 })
 export class RecruitmentModule implements OnModuleInit {

@@ -21,7 +21,11 @@ import { RecruitmentMessage } from '../entities/recruitment-message.entity';
 import { RecruitmentAuditService } from '../recruitment-audit.service';
 import {
   CandidateSource,
+  ChannelEventAiDecision,
   ConversationChannel,
+  ConversationControlState,
+  HrAlertSeverity,
+  HrAlertType,
   MessageContentType,
   MessageDirection,
   MessageSenderType,
@@ -33,6 +37,8 @@ import {
   invokeOpenClaw,
   type AgentFailureKind,
 } from './openclaw-responses.client';
+import { RecruitmentConversationControlService } from './recruitment-conversation-control.service';
+import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentChannelEventQueue,
   type ClaimedChannelEvent,
@@ -55,7 +61,27 @@ class CanonicalError extends Error {
   }
 }
 
+/**
+ * Tín hiệu một lượt sau khi HR trả hội thoại cho AI: không dựa vào trí nhớ hội
+ * thoại cũ của phiên — trạng thái nghiệp vụ lấy lại từ backend.
+ */
+export const RESUME_AFTER_TAKEOVER_INSTRUCTIONS =
+  'Human takeover has ended: HR handled this conversation and has handed it back to you. ' +
+  'Before replying, call recruitment_get_application_context to refresh the backend state ' +
+  '(recentMessages include what HR told the candidate). Do not rely on your earlier memory of this conversation.';
+
+const SKIP_DECISION: Partial<
+  Record<ConversationControlState, ChannelEventAiDecision>
+> = {
+  [ConversationControlState.AI_PAUSED]:
+    ChannelEventAiDecision.SKIPPED_AI_PAUSED,
+  [ConversationControlState.HUMAN_TAKEOVER]:
+    ChannelEventAiDecision.SKIPPED_HUMAN_TAKEOVER,
+  [ConversationControlState.CLOSED]: ChannelEventAiDecision.SKIPPED_CLOSED,
+};
+
 interface CanonicalInbound {
+  conversationId: number;
   candidateId: number;
   /** `existing` = lần thử trước (hoặc model) đã lưu tin này. */
   stored: 'new' | 'existing';
@@ -129,6 +155,8 @@ export class RecruitmentChannelWorker
     @InjectRepository(RecruitmentMessage)
     private readonly messages: Repository<RecruitmentMessage>,
     private readonly audit: RecruitmentAuditService,
+    private readonly control: RecruitmentConversationControlService,
+    private readonly alerts: RecruitmentHrAlertService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isRecruitmentWorkerEnabled(get);
@@ -219,6 +247,57 @@ export class RecruitmentChannelWorker
       );
     }
 
+    // Backend quyết định AI có được trả lời không (AGENTS.md §12) — không phó mặc
+    // cho skill tự nhớ đã chuyển HR.
+    let fence: { conversationId: number; expectedVersion: number };
+    let instructions: string | undefined;
+    try {
+      const control = await this.control.control(inbound.conversationId);
+      const skip = SKIP_DECISION[control.state];
+      if (skip) {
+        const written = await this.queue.completeWithoutAi(
+          event,
+          owner,
+          inbound.conversationId,
+          skip,
+          (em) =>
+            this.alerts.raise(
+              {
+                type: HrAlertType.CANDIDATE_MESSAGE_WAITING,
+                severity: HrAlertSeverity.MEDIUM,
+                // Một cảnh báo cho mỗi giai đoạn điều khiển của hội thoại.
+                sourceKey: `conversation:${inbound.conversationId}:v${control.version}`,
+                candidateId: inbound.candidateId,
+                conversationId: inbound.conversationId,
+                eventId: event.id,
+                details: { state: control.state },
+              },
+              em,
+            ),
+        );
+        this.logger.log(
+          `worker event=${event.id} attempt=${event.attemptCount} result=PROCESSED ai=${skip} ` +
+            `conversation=${inbound.conversationId}${written ? '' : ' (lease lost)'}`,
+        );
+        return;
+      }
+      fence = {
+        conversationId: inbound.conversationId,
+        expectedVersion: control.version,
+      };
+      instructions = control.resumeSignalPending
+        ? RESUME_AFTER_TAKEOVER_INSTRUCTIONS
+        : undefined;
+    } catch {
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'CONTROL_CHECK_FAILED',
+        'infra',
+      );
+    }
+
     const controller = new AbortController();
     this.inFlight.add(controller);
     let leaseLost = false;
@@ -243,6 +322,7 @@ export class RecruitmentChannelWorker
         {
           sessionKey: `agent:${config.openclaw.agentId}:zalo:${subject.oaId}:${subject.userId}`,
           input: `[channel=ZALO sender=${subject.userId} msg=${event.providerMessageId}]\n${event.messageText}`,
+          instructions,
         },
         { signal: controller.signal },
       );
@@ -276,13 +356,19 @@ export class RecruitmentChannelWorker
         );
       }
 
-      const result = await this.queue.complete(event, owner, {
-        externalRecipientId: subject.userId,
-        messageText: reply.text,
-        recruitmentMessageId: reply.messageId,
-      });
+      const result = await this.queue.complete(
+        event,
+        owner,
+        {
+          externalRecipientId: subject.userId,
+          messageText: reply.text,
+          recruitmentMessageId: reply.messageId,
+        },
+        fence,
+      );
       this.logger.log(
         `worker event=${event.id} attempt=${event.attemptCount} result=${result.completed ? 'PROCESSED' : 'LEASE_LOST'} ` +
+          `ai=${result.discarded ? ChannelEventAiDecision.DISCARDED_CONTROL_CHANGED : ChannelEventAiDecision.AI_REPLIED} ` +
           `outbox=${result.outboxId ?? '-'} inbound=${inbound.stored} replyBy=${reply.replyBy} ` +
           `replyMatches=${reply.replyMatches} sender=${maskSender(subject)} ms=${Date.now() - started}`,
       );
@@ -329,7 +415,11 @@ export class RecruitmentChannelWorker
       content: event.messageText as string,
     });
     await this.expectStored(saved.messageId, MessageDirection.INBOUND);
-    return { candidateId, stored: saved.duplicate ? 'existing' : 'new' };
+    return {
+      conversationId: saved.conversationId,
+      candidateId,
+      stored: saved.duplicate ? 'existing' : 'new',
+    };
   }
 
   /**
@@ -400,6 +490,11 @@ export class RecruitmentChannelWorker
   }
 
   private async expireRetention(): Promise<void> {
+    try {
+      await this.alerts.sweep();
+    } catch (error) {
+      this.logger.error(`worker hr-alert sweep error=${errorCode(error)}`);
+    }
     const expired = await this.queue.expireRetention();
     for (const row of expired) {
       this.logger.warn(

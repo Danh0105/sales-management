@@ -11,7 +11,12 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-import { ChannelEventChannel, ChannelOutboxStatus } from '../recruitment.enums';
+import {
+  ChannelEventChannel,
+  ChannelOutboxStatus,
+  OutboxResolution,
+  OutboxSourceType,
+} from '../recruitment.enums';
 import { RecruitmentChannelEvent } from './recruitment-channel-event.entity';
 import { RecruitmentMessage } from './recruitment-message.entity';
 
@@ -29,12 +34,17 @@ import { RecruitmentMessage } from './recruitment-message.entity';
  */
 @Entity('recruitment_channel_outbox')
 @Unique('UQ_recruitment_channel_outbox_source_event', ['sourceEventId'])
+@Unique('UQ_recruitment_channel_outbox_message', ['recruitmentMessageId'])
 @Index('IDX_recruitment_channel_outbox_status_created', ['status', 'createdAt'])
 @Index('IDX_recruitment_channel_outbox_recipient_queue', [
   'channelAccountId',
   'externalRecipientId',
   'status',
 ])
+@Check(
+  'CHK_recruitment_channel_outbox_source',
+  `"source_type" <> 'AI_REPLY' OR "source_event_id" IS NOT NULL`,
+)
 @Check(
   'CHK_recruitment_channel_outbox_text_status',
   `("status" <> 'SENT' OR "message_text" IS NULL) AND ("message_text" IS NOT NULL OR "status" IN ('SENT', 'UNKNOWN', 'DEAD_LETTER'))`,
@@ -45,11 +55,24 @@ export class RecruitmentChannelOutbox {
   })
   id!: number;
 
-  @Column({ name: 'source_event_id', type: 'int' })
-  sourceEventId!: number;
+  /** Tin đến sinh ra câu trả lời AI; `NULL` với tin HR viết tay. */
+  @Column({ name: 'source_event_id', type: 'int', nullable: true })
+  sourceEventId!: number | null;
+
+  @Column({
+    name: 'source_type',
+    type: 'enum',
+    enum: OutboxSourceType,
+    default: OutboxSourceType.AI_REPLY,
+  })
+  sourceType!: OutboxSourceType;
+
+  /** Version điều khiển hội thoại lúc AI_REPLY được xếp hàng (đối chiếu). */
+  @Column({ name: 'control_version', type: 'int', nullable: true })
+  controlVersion!: number | null;
 
   @ManyToOne(() => RecruitmentChannelEvent, {
-    nullable: false,
+    nullable: true,
     onDelete: 'RESTRICT',
     onUpdate: 'NO ACTION',
   })
@@ -143,4 +166,18 @@ export class RecruitmentChannelOutbox {
 
   @Column({ name: 'sent_at', type: 'timestamptz', nullable: true })
   sentAt!: Date | null;
+
+  /** Đối soát `UNKNOWN` của người vận hành (P3-6). */
+  @Column({
+    type: 'enum',
+    enum: OutboxResolution,
+    nullable: true,
+  })
+  resolution!: OutboxResolution | null;
+
+  @Column({ name: 'resolved_by', type: 'int', nullable: true })
+  resolvedBy!: number | null;
+
+  @Column({ name: 'resolved_at', type: 'timestamptz', nullable: true })
+  resolvedAt!: Date | null;
 }

@@ -62,21 +62,39 @@ function setup(
     inboundDuplicate?: boolean;
     replyDuplicate?: boolean;
     storedReply?: string;
+    controlState?: string;
+    resumeSignalPending?: boolean;
   } = {},
 ) {
   const queue = {
     heartbeat: jest.fn().mockResolvedValue(true),
-    complete: jest.fn().mockResolvedValue({ completed: true, outboxId: 5 }),
+    complete: jest
+      .fn()
+      .mockResolvedValue({ completed: true, outboxId: 5, discarded: false }),
+    completeWithoutAi: jest.fn(
+      async (
+        _event: unknown,
+        _owner: string,
+        _conversationId: number,
+        _decision: string,
+        alsoInTx?: (em: unknown) => Promise<unknown>,
+      ) => {
+        await alsoInTx?.({ tx: true });
+        return true;
+      },
+    ),
     fail: jest.fn().mockResolvedValue(true),
   };
   const conversations = {
     saveMessage: jest
       .fn()
       .mockResolvedValueOnce({
+        conversationId: 55,
         messageId: 100,
         duplicate: opts.inboundDuplicate ?? false,
       })
       .mockResolvedValueOnce({
+        conversationId: 55,
         messageId: 101,
         duplicate: opts.replyDuplicate ?? false,
       }),
@@ -107,6 +125,19 @@ function setup(
       .fn()
       .mockResolvedValue({ outcome: 'CREATED', candidate: { id: 8 } }),
   };
+  const control = {
+    control: jest.fn().mockResolvedValue({
+      conversationId: 55,
+      candidateId: 7,
+      state: opts.controlState ?? 'AI_ACTIVE',
+      mode: 'AI_ACTIVE',
+      version: 3,
+      pausedBy: [],
+      resumeSignalPending: opts.resumeSignalPending ?? false,
+      takenOverBy: null,
+    }),
+  };
+  const alerts = { raise: jest.fn().mockResolvedValue(true) };
   const worker = new RecruitmentChannelWorker(
     { get: () => undefined } as any,
     queue as any,
@@ -115,8 +146,19 @@ function setup(
     candidates as any,
     messages as any,
     audit as any,
+    control as any,
+    alerts as any,
   );
-  return { worker, queue, conversations, candidates, candidateService, audit };
+  return {
+    worker,
+    queue,
+    conversations,
+    candidates,
+    candidateService,
+    audit,
+    control,
+    alerts,
+  };
 }
 
 describe('RecruitmentChannelWorker.process', () => {
@@ -197,14 +239,20 @@ describe('RecruitmentChannelWorker.process', () => {
         content: REPLY,
       }),
     );
-    expect(queue.complete).toHaveBeenCalledWith(event(), 'w1:abc', {
-      externalRecipientId: SENDER,
-      messageText: REPLY,
-      recruitmentMessageId: 101,
-    });
+    expect(queue.complete).toHaveBeenCalledWith(
+      event(),
+      'w1:abc',
+      {
+        externalRecipientId: SENDER,
+        messageText: REPLY,
+        recruitmentMessageId: 101,
+      },
+      // Fencing: version điều khiển lúc bắt đầu lượt.
+      { conversationId: 55, expectedVersion: 3 },
+    );
     expect(queue.fail).not.toHaveBeenCalled();
     expect(logs.join('\n')).toMatch(
-      /result=PROCESSED outbox=5 inbound=new replyBy=worker replyMatches=true/,
+      /result=PROCESSED ai=AI_REPLIED outbox=5 inbound=new replyBy=worker replyMatches=true/,
     );
   });
 
@@ -222,6 +270,7 @@ describe('RecruitmentChannelWorker.process', () => {
         messageText: 'Câu trả lời lần chạy trước',
         recruitmentMessageId: 101,
       }),
+      expect.anything(),
     );
     expect(logs.join('\n')).toMatch(
       /inbound=existing replyBy=model replyMatches=false/,
@@ -385,5 +434,81 @@ describe('RecruitmentChannelWorker.process', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it.each([
+    ['AI_PAUSED', 'SKIPPED_AI_PAUSED'],
+    ['HUMAN_TAKEOVER', 'SKIPPED_HUMAN_TAKEOVER'],
+    ['CLOSED', 'SKIPPED_CLOSED'],
+  ])(
+    'hội thoại %s → tin đến vẫn lưu, KHÔNG gọi OpenClaw, PROCESSED (%s) + cảnh báo HR trong cùng transaction',
+    async (state, decision) => {
+      const { worker, queue, conversations, alerts } = setup({
+        controlState: state,
+      });
+      await worker.process(event(), 'w1:abc', CONFIG);
+      expect(conversations.saveMessage).toHaveBeenCalledTimes(1);
+      expect(conversations.saveMessage.mock.calls[0][0].direction).toBe(
+        'INBOUND',
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+      expect(queue.completeWithoutAi).toHaveBeenCalledWith(
+        expect.anything(),
+        'w1:abc',
+        55,
+        decision,
+        expect.any(Function),
+      );
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CANDIDATE_MESSAGE_WAITING',
+          sourceKey: 'conversation:55:v3',
+          conversationId: 55,
+          details: { state },
+        }),
+        { tx: true },
+      );
+    },
+  );
+
+  it('HR vừa trả lại AI → lượt kế tiếp gửi instructions nhắc làm mới context backend', async () => {
+    const { worker } = setup({ resumeSignalPending: true });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.instructions).toMatch(/Human takeover has ended/);
+    expect(body.instructions).toMatch(/recruitment_get_application_context/);
+  });
+
+  it('không có tín hiệu resume → không gửi instructions', async () => {
+    const { worker } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(
+      JSON.parse(fetchSpy.mock.calls[0][1].body).instructions,
+    ).toBeUndefined();
+  });
+
+  it('HR đổi chế độ giữa lượt → complete báo discarded, log ghi DISCARDED_CONTROL_CHANGED', async () => {
+    const { worker, queue } = setup();
+    queue.complete.mockResolvedValue({
+      completed: true,
+      outboxId: null,
+      discarded: true,
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(logs.join('\n')).toMatch(/ai=DISCARDED_CONTROL_CHANGED outbox=-/);
+  });
+
+  it('không đọc được trạng thái điều khiển → thử lại, KHÔNG gọi OpenClaw', async () => {
+    const { worker, queue, control } = setup();
+    control.control.mockRejectedValue(new Error('db'));
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.fail).toHaveBeenCalledWith(
+      expect.anything(),
+      'w1:abc',
+      'CONTROL_CHECK_FAILED',
+      1000,
+    );
   });
 });

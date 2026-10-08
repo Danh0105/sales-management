@@ -177,6 +177,15 @@ export const SKIPPED_RESOURCES = [
  * Đuôi path là **tra cứu** dù gọi bằng POST (payload lọc quá dài cho query
  * string). Tra cứu không đổi dữ liệu nên không thuộc phạm vi nhật ký.
  */
+/**
+ * Path mà body/response là NỘI DUNG TIN NHẮN gửi cho người ngoài (vd. HR nhắn ứng
+ * viên qua Zalo): vẫn ghi ai làm gì ở đâu, nhưng không chép body/response vào
+ * nhật ký — nội dung đã nằm ở nơi lưu chuẩn của module, có kiểm soát truy cập.
+ */
+export const REDACTED_BODY_PATHS: readonly RegExp[] = [
+  /^\/recruitment\/conversations\/\d+\/messages$/,
+];
+
 export const LOOKUP_PATH_SUFFIXES = [
   '/candidates',
   '/search',

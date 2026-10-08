@@ -17,6 +17,7 @@ import {
   type ClaimedOutbox,
 } from './recruitment-channel-outbox.queue';
 import { retryDelayMs } from './recruitment-channel-worker.config';
+import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentZaloCredentialStore,
   ZaloCredentialError,
@@ -74,6 +75,7 @@ export class RecruitmentZaloSender
     private readonly credentials: RecruitmentZaloCredentialStore,
     private readonly audit: RecruitmentAuditService,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly alerts: RecruitmentHrAlertService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isZaloOutboundEnabled(get);
@@ -282,7 +284,12 @@ export class RecruitmentZaloSender
       [row.recruitmentMessageId],
     );
     if (!canonical) return 'CANONICAL_MISSING';
-    if (canonical.direction !== 'OUTBOUND' || canonical.sender_type !== 'AI') {
+    // Tin AI phải là tin đi của AI; tin HR phải là tin đi do HR viết.
+    const expectedSender = row.sourceType === 'HR_MESSAGE' ? 'HR' : 'AI';
+    if (
+      canonical.direction !== 'OUTBOUND' ||
+      canonical.sender_type !== expectedSender
+    ) {
       return 'CANONICAL_INVALID';
     }
     if (
@@ -346,6 +353,11 @@ export class RecruitmentZaloSender
   }
 
   private async maintenance(config: ZaloOutboundConfig) {
+    try {
+      await this.alerts.sweep();
+    } catch (error) {
+      this.logger.error(`sender hr-alert sweep error=${errorCode(error)}`);
+    }
     for (const id of await this.queue.recoverDispatched(config.oaId)) {
       this.logger.warn(
         `sender outbox=${id} result=UNKNOWN code=LEASE_EXPIRED_AFTER_DISPATCH (sender chết sau khi gửi)`,

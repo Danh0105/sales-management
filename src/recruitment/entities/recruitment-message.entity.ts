@@ -81,6 +81,10 @@ export class RecruitmentMessage {
   @Column({ type: 'jsonb', default: {} })
   metadata!: Record<string, string | number | boolean | null>;
 
+  /** Nhân viên HR viết tin (tin `senderType = HR`). */
+  @Column({ name: 'author_employee_id', type: 'int', nullable: true })
+  authorEmployeeId!: number | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

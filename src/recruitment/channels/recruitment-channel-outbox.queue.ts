@@ -12,6 +12,8 @@ export interface ClaimedOutbox {
   messageText: string | null;
   recruitmentMessageId: number | null;
   attemptCount: number;
+  /** AI_REPLY (tin AI) hay HR_MESSAGE (tin HR viết tay). */
+  sourceType: string;
 }
 
 interface ClaimRow {
@@ -21,6 +23,7 @@ interface ClaimRow {
   message_text: string | null;
   recruitment_message_id: number | string | null;
   attempt_count: number | string;
+  source_type: string;
 }
 
 /** Dòng chưa xong (chặn các tin sau của cùng người nhận). */
@@ -103,7 +106,7 @@ export class RecruitmentChannelOutboxQueue {
                  AND ((o.status = 'SENDING' AND o.lease_until >= now())
                       OR (${UNFINISHED} AND (o.created_at, o.id) < (t.created_at, t.id))))
            RETURNING t.id, t.channel_account_id, t.external_recipient_id, t.message_text,
-                     t.recruitment_message_id, t.attempt_count`,
+                     t.recruitment_message_id, t.attempt_count, t.source_type`,
           [head.id, oaId, head.recipient, leaseMs, owner],
         ),
       );
@@ -119,6 +122,7 @@ export class RecruitmentChannelOutboxQueue {
             ? null
             : Number(row.recruitment_message_id),
         attemptCount: Number(row.attempt_count),
+        sourceType: row.source_type,
       };
     });
   }

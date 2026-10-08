@@ -178,3 +178,69 @@ export enum ChannelOutboxStatus {
   UNKNOWN = 'UNKNOWN',
   DEAD_LETTER = 'DEAD_LETTER',
 }
+
+/**
+ * Chế độ điều khiển hội thoại do **HR chọn tường minh** (lưu trên hội thoại).
+ * `AI_PAUSED` KHÔNG lưu ở đây — nó suy ra từ nguồn sự thật đã có (handoff đang mở,
+ * hồ sơ `aiPaused`/`NEEDS_HR_REVIEW`, ứng viên dừng AI) để không có state machine
+ * thứ hai cạnh tranh với handoff/hồ sơ.
+ */
+export enum ConversationControlMode {
+  AI_ACTIVE = 'AI_ACTIVE',
+  HUMAN_TAKEOVER = 'HUMAN_TAKEOVER',
+  CLOSED = 'CLOSED',
+}
+
+/** Trạng thái điều khiển hiệu lực (API trả về, worker dựa vào đó). */
+export enum ConversationControlState {
+  AI_ACTIVE = 'AI_ACTIVE',
+  AI_PAUSED = 'AI_PAUSED',
+  HUMAN_TAKEOVER = 'HUMAN_TAKEOVER',
+  CLOSED = 'CLOSED',
+}
+
+/** Nguồn của tin đi trong outbox. */
+export enum OutboxSourceType {
+  AI_REPLY = 'AI_REPLY',
+  HR_MESSAGE = 'HR_MESSAGE',
+}
+
+/** Thao tác đối soát dòng outbox `UNKNOWN` của người vận hành. */
+export enum OutboxResolution {
+  MARK_SENT = 'MARK_SENT',
+  RETRY = 'RETRY',
+  DEAD_LETTER = 'DEAD_LETTER',
+}
+
+/** Worker đã làm gì với một tin đến. */
+export enum ChannelEventAiDecision {
+  AI_REPLIED = 'AI_REPLIED',
+  SKIPPED_AI_PAUSED = 'SKIPPED_AI_PAUSED',
+  SKIPPED_HUMAN_TAKEOVER = 'SKIPPED_HUMAN_TAKEOVER',
+  SKIPPED_CLOSED = 'SKIPPED_CLOSED',
+  /** HR đổi chế độ điều khiển trong lúc OpenClaw đang chạy — bỏ câu trả lời của AI. */
+  DISCARDED_CONTROL_CHANGED = 'DISCARDED_CONTROL_CHANGED',
+}
+
+export enum HrAlertType {
+  CANDIDATE_REQUESTED_HUMAN = 'CANDIDATE_REQUESTED_HUMAN',
+  AI_POLICY_HANDOFF = 'AI_POLICY_HANDOFF',
+  CANDIDATE_MESSAGE_WAITING = 'CANDIDATE_MESSAGE_WAITING',
+  OUTBOUND_UNKNOWN = 'OUTBOUND_UNKNOWN',
+  OUTBOUND_DEAD_LETTER = 'OUTBOUND_DEAD_LETTER',
+  CHANNEL_EVENT_DEAD_LETTER = 'CHANNEL_EVENT_DEAD_LETTER',
+  REFRESH_OUTCOME_UNKNOWN = 'REFRESH_OUTCOME_UNKNOWN',
+  REPEATED_AI_FAILURE = 'REPEATED_AI_FAILURE',
+}
+
+export enum HrAlertSeverity {
+  LOW = 'LOW',
+  MEDIUM = 'MEDIUM',
+  HIGH = 'HIGH',
+  CRITICAL = 'CRITICAL',
+}
+
+export enum HrAlertStatus {
+  OPEN = 'OPEN',
+  ACKNOWLEDGED = 'ACKNOWLEDGED',
+}

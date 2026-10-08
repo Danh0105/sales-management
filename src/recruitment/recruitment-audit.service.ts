@@ -22,7 +22,8 @@ export type RecruitmentAuditEntity =
   | 'handoffs'
   | 'conversations'
   | 'channel-events'
-  | 'channel-outbox';
+  | 'channel-outbox'
+  | 'hr-alerts';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -52,7 +53,17 @@ export type RecruitmentAuditAction =
   /** Tin trả lời không gửi được ra Zalo — HR cần xem. */
   | 'CHANNEL_OUTBOX_DEAD_LETTER'
   /** Tin trả lời có thể đã tới Zalo nhưng không rõ — cần đối soát, không tự gửi lại. */
-  | 'CHANNEL_OUTBOX_UNKNOWN';
+  | 'CHANNEL_OUTBOX_UNKNOWN'
+  /** P3-6 — HR điều khiển hội thoại kênh. */
+  | 'CONVERSATION_TAKEOVER'
+  | 'CONVERSATION_RESUME_AI'
+  | 'CONVERSATION_CLOSE'
+  | 'CONVERSATION_HR_MESSAGE'
+  /** P3-6 — người vận hành đối soát outbox UNKNOWN. */
+  | 'OUTBOX_MARK_SENT'
+  | 'OUTBOX_RETRY'
+  | 'OUTBOX_DEAD_LETTER'
+  | 'HR_ALERT_ACKNOWLEDGE';
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng
