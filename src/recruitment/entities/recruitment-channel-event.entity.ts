@@ -160,6 +160,13 @@ export class RecruitmentChannelEvent {
   @Column({ name: 'conversation_id', type: 'int', nullable: true })
   conversationId!: number | null;
 
+  /**
+   * Version điều khiển hội thoại lúc lượt AI của event bắt đầu (ghi trước khi gọi
+   * OpenClaw). Lượt chạy lại chỉ bị chặn khi HR đã đổi version.
+   */
+  @Column({ name: 'ai_control_version', type: 'int', nullable: true })
+  aiControlVersion!: number | null;
+
   /** Worker đã gọi AI hay bỏ qua (AI tạm dừng / HR tiếp quản / đóng) — P3-6. */
   @Column({
     name: 'ai_decision',

@@ -23,6 +23,7 @@ import {
   CandidateSource,
   ChannelEventAiDecision,
   ConversationChannel,
+  ConversationControlMode,
   ConversationControlState,
   HrAlertSeverity,
   HrAlertType,
@@ -251,17 +252,34 @@ export class RecruitmentChannelWorker
     // cho skill tự nhớ đã chuyển HR.
     let fence: { conversationId: number; expectedVersion: number };
     let instructions: string | undefined;
+    let storedReply: { text: string; messageId: number } | null = null;
     try {
       const control = await this.control.control(inbound.conversationId);
-      const skip = SKIP_DECISION[control.state];
+      // Lượt AI của event đã BẮT ĐẦU ở lần thử trước (rồi worker chết / mất response):
+      // chỉ thao tác của HR (đổi chế độ/version) mới chặn được nó — tạm dừng do chính
+      // lượt đó gây ra (vd. AI vừa mở handoff) không được nuốt câu trả lời của lượt.
+      const turnStarted = event.aiControlVersion !== null;
+      const hrChanged =
+        turnStarted &&
+        (control.mode !== ConversationControlMode.AI_ACTIVE ||
+          control.version !== event.aiControlVersion);
+      const skip = turnStarted
+        ? hrChanged
+          ? (SKIP_DECISION[control.state] ??
+            ChannelEventAiDecision.DISCARDED_CONTROL_CHANGED)
+          : undefined
+        : SKIP_DECISION[control.state];
       if (skip) {
+        const prior = turnStarted
+          ? await this.findStoredReply(event, inbound.conversationId)
+          : null;
         const written = await this.queue.completeWithoutAi(
           event,
           owner,
           inbound.conversationId,
           skip,
-          (em) =>
-            this.alerts.raise(
+          async (em) => {
+            await this.alerts.raise(
               {
                 type: HrAlertType.CANDIDATE_MESSAGE_WAITING,
                 severity: HrAlertSeverity.MEDIUM,
@@ -273,7 +291,17 @@ export class RecruitmentChannelWorker
                 details: { state: control.state },
               },
               em,
-            ),
+            );
+            if (prior) {
+              // Câu trả lời của lượt cũ không còn hợp lệ sau thao tác của HR.
+              await em.query(
+                `UPDATE "recruitment_messages"
+                 SET metadata = metadata || '{"delivery": "DISCARDED_CONTROL_CHANGED"}'::jsonb
+                 WHERE id = $1`,
+                [prior.messageId],
+              );
+            }
+          },
         );
         this.logger.log(
           `worker event=${event.id} attempt=${event.attemptCount} result=PROCESSED ai=${skip} ` +
@@ -283,11 +311,23 @@ export class RecruitmentChannelWorker
       }
       fence = {
         conversationId: inbound.conversationId,
-        expectedVersion: control.version,
+        expectedVersion: turnStarted
+          ? (event.aiControlVersion as number)
+          : control.version,
       };
       instructions = control.resumeSignalPending
         ? RESUME_AFTER_TAKEOVER_INSTRUCTIONS
         : undefined;
+      if (turnStarted) {
+        storedReply = await this.findStoredReply(event, inbound.conversationId);
+      } else if (
+        !(await this.queue.markAiStarted(event, owner, control.version))
+      ) {
+        this.logger.warn(
+          `worker event=${event.id} lease lost trước khi gọi OpenClaw — bỏ`,
+        );
+        return;
+      }
     } catch {
       return this.finishFailure(
         event,
@@ -296,6 +336,27 @@ export class RecruitmentChannelWorker
         'CONTROL_CHECK_FAILED',
         'infra',
       );
+    }
+
+    if (storedReply) {
+      // Lượt trước đã xong (tin đi đã nằm trong hội thoại) nhưng chưa kịp ghi kết quả
+      // → gửi đúng bản đó, KHÔNG gọi OpenClaw lần hai.
+      const result = await this.queue.complete(
+        event,
+        owner,
+        {
+          externalRecipientId: subject.userId,
+          messageText: storedReply.text,
+          recruitmentMessageId: storedReply.messageId,
+        },
+        fence,
+      );
+      this.logger.log(
+        `worker event=${event.id} attempt=${event.attemptCount} result=${result.completed ? 'PROCESSED' : 'LEASE_LOST'} ` +
+          `ai=${result.discarded ? ChannelEventAiDecision.DISCARDED_CONTROL_CHANGED : ChannelEventAiDecision.AI_REPLIED} ` +
+          `outbox=${result.outboxId ?? '-'} reusedReply=true sender=${maskSender(subject)} ms=${Date.now() - started}`,
+      );
+      return;
     }
 
     const controller = new AbortController();
@@ -453,6 +514,23 @@ export class RecruitmentChannelWorker
       replyBy: saved.duplicate ? 'model' : 'worker',
       replyMatches: stored.content.trim() === responseText.trim(),
     };
+  }
+
+  /** Tin đi (`msg-reply`) mà một lần thử trước của event đã lưu, nếu có. */
+  private async findStoredReply(
+    event: ClaimedChannelEvent,
+    conversationId: number,
+  ): Promise<{ text: string; messageId: number } | null> {
+    const message = await this.messages.findOne({
+      where: {
+        conversationId,
+        externalMessageId: `${event.providerMessageId}-reply`,
+      },
+      select: { id: true, content: true, direction: true },
+    });
+    return message && message.direction === MessageDirection.OUTBOUND
+      ? { text: message.content, messageId: message.id }
+      : null;
   }
 
   private async expectStored(id: number, direction: MessageDirection) {

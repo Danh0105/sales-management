@@ -14,6 +14,8 @@ export interface ClaimedChannelEvent {
   providerMessageId: string | null;
   messageText: string | null;
   attemptCount: number;
+  /** Version điều khiển lúc lượt AI của event bắt đầu (lần thử trước), `null` nếu chưa. */
+  aiControlVersion: number | null;
 }
 
 interface ClaimRow {
@@ -23,6 +25,7 @@ interface ClaimRow {
   provider_message_id: string | null;
   normalized_message_text: string | null;
   attempt_count: number | string;
+  ai_control_version: number | string | null;
 }
 
 export interface OutboxDraft {
@@ -135,7 +138,7 @@ export class RecruitmentChannelEventQueue {
                         AND (coalesce(o.provider_created_at, o.received_at), o.id)
                           < (coalesce(e.provider_created_at, e.received_at), e.id))))
          RETURNING e.id, e.channel_account_id, e.external_sender_id, e.provider_message_id,
-                   e.normalized_message_text, e.attempt_count`,
+                   e.normalized_message_text, e.attempt_count, e.ai_control_version`,
           [head.id, oaId, head.sender, leaseMs, owner, settleMs],
         ),
       );
@@ -148,8 +151,32 @@ export class RecruitmentChannelEventQueue {
         providerMessageId: row.provider_message_id,
         messageText: row.normalized_message_text,
         attemptCount: Number(row.attempt_count),
+        aiControlVersion:
+          row.ai_control_version === null
+            ? null
+            : Number(row.ai_control_version),
       };
     });
+  }
+
+  /**
+   * Ghi bền "lượt AI bắt đầu dưới version điều khiển này" — TRƯỚC khi gọi
+   * OpenClaw (fencing theo lease). `false` = đã mất lease.
+   */
+  async markAiStarted(
+    event: ClaimedChannelEvent,
+    owner: string,
+    controlVersion: number,
+  ): Promise<boolean> {
+    const rows = returnedRows(
+      await this.dataSource.query(
+        `UPDATE "recruitment_channel_events" SET ai_control_version = $3, updated_at = now()
+         WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
+         RETURNING id`,
+        [event.id, owner, controlVersion],
+      ),
+    );
+    return rows.length > 0;
   }
 
   /** Gia hạn lease khi lượt còn chạy. `false` = đã mất lease → phải dừng, không ghi kết quả. */

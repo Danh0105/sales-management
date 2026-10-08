@@ -238,7 +238,8 @@ E11="p34-$RUN_ID-e11"
 mock ok-drop 0 1
 send "$E11" "s${RUN_ID}h" >/dev/null
 wait_sql 30 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E11'" || true
-same "11. lượt chạy 2 lần (lần 1 mất response) → PROCESSED ở attempt 2" "$(ev "$E11" "status || '/' || attempt_count")" "PROCESSED/2"
+same "11. lần 1 mất response → lần 2 dùng lại tin đi đã lưu, KHÔNG gọi OpenClaw lần hai" \
+  "$(ev "$E11" "status || '/' || attempt_count")|$(results_of "$E11")" "PROCESSED/2|dropped"
 same "10/11. retry không nhân bản: 1 ứng viên, 1 tin đến, 1 tin đi, 1 outbox" \
   "$(sql "select count(*) from recruitment_candidates where zalo_oa_id = '$OA' and zalo_user_id = 's${RUN_ID}h'")/$(sql "select count(*) from recruitment_messages where external_message_id = '$E11'")/$(sql "select count(*) from recruitment_messages where external_message_id = '$E11-reply'")/$(sql "select count(*) from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = '$E11'")" "1/1/1/1"
 DUP=$(sql "insert into recruitment_channel_outbox (source_event_id, channel, channel_account_id, external_recipient_id, message_text)
@@ -312,8 +313,8 @@ E11R="p34-$RUN_ID-rc1"
 mock proxy-drop 0 1
 send "$E11R" "$RC" "" "Mình tên Hùng, số 0911222333, muốn ứng tuyển kinh doanh ở Cà Mau, có 2 năm kinh nghiệm bán hàng" >/dev/null
 wait_sql 900 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E11R'" || true
-same "11. lượt thật: lần 1 mất response, lần 2 → PROCESSED" \
-  "$(ev "$E11R" "status || '/' || attempt_count")|$(analyze "import json,sys; print(','.join(e['result'] for e in json.load(sys.stdin) if e['msgId']=='$E11R'))")" "PROCESSED/2|dropped-after-200,200"
+same "11. lượt thật: lần 1 mất response → lần 2 gửi tin đi đã lưu, KHÔNG chạy model lần hai (kể cả khi chính lượt đó đã chuyển HR)" \
+  "$(ev "$E11R" "status || '/' || attempt_count")|$(analyze "import json,sys; print(','.join(e['result'] for e in json.load(sys.stdin) if e['msgId']=='$E11R'))")" "PROCESSED/2|dropped-after-200"
 same "11. lượt thật chạy 2 lần không nhân bản nghiệp vụ: ứng viên / hồ sơ / tin đến / tin đi / handoff mở / phỏng vấn / outbox" \
   "$(sql "select (select count(*) from recruitment_candidates c where c.zalo_oa_id = '$OA' and c.zalo_user_id = '$RC')
            || '/' || (select count(*) <= 1 from recruitment_applications a join recruitment_candidates c on c.id = a.candidate_id where c.zalo_oa_id = '$OA' and c.zalo_user_id = '$RC')

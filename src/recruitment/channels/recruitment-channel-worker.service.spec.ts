@@ -35,6 +35,7 @@ function event(
     providerMessageId: 'msg-1',
     messageText: TEXT,
     attemptCount: 1,
+    aiControlVersion: null,
     ...overrides,
   };
 }
@@ -63,11 +64,16 @@ function setup(
     replyDuplicate?: boolean;
     storedReply?: string;
     controlState?: string;
+    controlMode?: string;
+    controlVersion?: number;
     resumeSignalPending?: boolean;
+    priorReply?: boolean;
   } = {},
 ) {
+  const txEm = { tx: true, query: jest.fn().mockResolvedValue([]) };
   const queue = {
     heartbeat: jest.fn().mockResolvedValue(true),
+    markAiStarted: jest.fn().mockResolvedValue(true),
     complete: jest
       .fn()
       .mockResolvedValue({ completed: true, outboxId: 5, discarded: false }),
@@ -79,7 +85,7 @@ function setup(
         _decision: string,
         alsoInTx?: (em: unknown) => Promise<unknown>,
       ) => {
-        await alsoInTx?.({ tx: true });
+        await alsoInTx?.(txEm);
         return true;
       },
     ),
@@ -115,8 +121,19 @@ function setup(
       ),
   };
   const messages = {
-    findOne: jest.fn(({ where }: { where: { id: number } }) =>
-      Promise.resolve(stored[where.id] ?? null),
+    findOne: jest.fn(
+      ({ where }: { where: { id?: number; externalMessageId?: string } }) =>
+        Promise.resolve(
+          where.externalMessageId
+            ? opts.priorReply
+              ? {
+                  id: 77,
+                  content: 'Câu trả lời lượt trước',
+                  direction: MessageDirection.OUTBOUND,
+                }
+              : null
+            : (stored[where.id as number] ?? null),
+        ),
     ),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -130,8 +147,8 @@ function setup(
       conversationId: 55,
       candidateId: 7,
       state: opts.controlState ?? 'AI_ACTIVE',
-      mode: 'AI_ACTIVE',
-      version: 3,
+      mode: opts.controlMode ?? 'AI_ACTIVE',
+      version: opts.controlVersion ?? 3,
       pausedBy: [],
       resumeSignalPending: opts.resumeSignalPending ?? false,
       takenOverBy: null,
@@ -158,6 +175,7 @@ function setup(
     audit,
     control,
     alerts,
+    txEm,
   };
 }
 
@@ -467,7 +485,7 @@ describe('RecruitmentChannelWorker.process', () => {
           conversationId: 55,
           details: { state },
         }),
-        { tx: true },
+        expect.objectContaining({ tx: true }),
       );
     },
   );
@@ -509,6 +527,86 @@ describe('RecruitmentChannelWorker.process', () => {
       'w1:abc',
       'CONTROL_CHECK_FAILED',
       1000,
+    );
+  });
+
+  it('lượt mới: ghi bền version điều khiển (markAiStarted) TRƯỚC khi gọi OpenClaw', async () => {
+    const { worker, queue } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.markAiStarted).toHaveBeenCalledWith(event(), 'w1:abc', 3);
+    expect(queue.markAiStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchSpy.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('mất lease trước khi ghi version → không gọi OpenClaw, không ghi kết quả', async () => {
+    const { worker, queue } = setup();
+    queue.markAiStarted.mockResolvedValue(false);
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
+  });
+
+  it('chạy lại lượt đã bắt đầu, chính lượt đó mở handoff (AI_PAUSED, version không đổi), tin đi đã lưu → gửi đúng bản đã lưu, KHÔNG gọi OpenClaw lần hai', async () => {
+    const { worker, queue } = setup({
+      controlState: 'AI_PAUSED',
+      priorReply: true,
+    });
+    await worker.process(
+      event({ attemptCount: 2, aiControlVersion: 3 }),
+      'w2:def',
+      CONFIG,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.completeWithoutAi).not.toHaveBeenCalled();
+    expect(queue.markAiStarted).not.toHaveBeenCalled();
+    expect(queue.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      'w2:def',
+      {
+        externalRecipientId: SENDER,
+        messageText: 'Câu trả lời lượt trước',
+        recruitmentMessageId: 77,
+      },
+      { conversationId: 55, expectedVersion: 3 },
+    );
+    expect(logs.join('\n')).toMatch(/reusedReply=true/);
+  });
+
+  it('chạy lại lượt đã bắt đầu, chưa có tin đi → chạy lại lượt AI dưới version cũ (dù handoff của chính lượt làm AI_PAUSED)', async () => {
+    const { worker, queue } = setup({ controlState: 'AI_PAUSED' });
+    await worker.process(
+      event({ attemptCount: 2, aiControlVersion: 3 }),
+      'w2:def',
+      CONFIG,
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(queue.complete.mock.calls[0][3]).toEqual({
+      conversationId: 55,
+      expectedVersion: 3,
+    });
+  });
+
+  it('chạy lại lượt đã bắt đầu nhưng HR đã tiếp quản (version đổi) → không gọi AI, tin đi cũ đánh dấu không gửi', async () => {
+    const { worker, queue, txEm } = setup({
+      controlState: 'HUMAN_TAKEOVER',
+      controlMode: 'HUMAN_TAKEOVER',
+      controlVersion: 4,
+      priorReply: true,
+    });
+    await worker.process(
+      event({ attemptCount: 2, aiControlVersion: 3 }),
+      'w2:def',
+      CONFIG,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(queue.completeWithoutAi.mock.calls[0][3]).toBe(
+      'SKIPPED_HUMAN_TAKEOVER',
+    );
+    expect(txEm.query).toHaveBeenCalledWith(
+      expect.stringMatching(/DISCARDED_CONTROL_CHANGED/),
+      [77],
     );
   });
 });
