@@ -7,6 +7,7 @@
 //                POST /__expire               access token hiện tại hết hiệu lực (refresh token còn)
 //                POST /__down {"ms"}          đóng cổng API (kết nối bị từ chối) trong ms
 //                POST /__refresh-delay {"ms"} refresh chậm (mở rộng cửa sổ tranh chấp)
+//                POST /__oauth-mode {"mode"}  ok | hang (nhận refresh rồi không trả lời)
 //                GET  /__seed                 token hiện tại — CHỈ để script nạp DB đọc, không in
 //                GET  /__state                số lần refresh, version token (không có token)
 //                GET  /__log                  request Send API (người nhận, hash nội dung, kết quả)
@@ -23,8 +24,10 @@ const fresh = () => randomBytes(24).toString('base64url');
 
 let tokens = { access: fresh(), refresh: fresh(), version: 1 };
 let refreshCount = 0;
+let oauthHung = 0;
 let refreshRejected = 0;
 let refreshDelayMs = 0;
+let oauthMode = 'ok';
 let state = { mode: 'ok', delayMs: 0 };
 let log = [];
 let messageSeq = 0;
@@ -110,6 +113,10 @@ async function sendApi(req, res, raw) {
 
 async function oauth(req, res, raw) {
   const form = Object.fromEntries(new URLSearchParams(raw));
+  if (oauthMode === 'hang') {
+    oauthHung += 1;
+    return; // nhận refresh rồi không trả lời — app không biết token đã xoay chưa
+  }
   if (refreshDelayMs) await sleep(refreshDelayMs);
   const valid =
     req.headers.secret_key === APP_SECRET &&
@@ -151,6 +158,9 @@ const admin = http.createServer(async (req, res) => {
       api.closeAllConnections();
       setTimeout(listenApi, Number(body.ms) || 3000);
       return json(res, 200, { ok: true });
+    case 'POST /__oauth-mode':
+      oauthMode = body.mode === 'hang' ? 'hang' : 'ok';
+      return json(res, 200, { ok: true });
     case 'POST /__refresh-delay':
       refreshDelayMs = Number(body.ms) || 0;
       return json(res, 200, { ok: true });
@@ -160,7 +170,7 @@ const admin = http.createServer(async (req, res) => {
       // Mọi token từng cấp — để acceptance dò rò rỉ trong log (đọc qua pipe, không in).
       return json(res, 200, issued);
     case 'GET /__state':
-      return json(res, 200, { refreshCount, refreshRejected, version: tokens.version, mode: state.mode });
+      return json(res, 200, { refreshCount, refreshRejected, oauthHung, version: tokens.version, mode: state.mode });
     case 'GET /__log':
       return json(res, 200, log);
     default:

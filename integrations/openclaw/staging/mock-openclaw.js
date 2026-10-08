@@ -108,8 +108,11 @@ const server = http.createServer(async (req, res) => {
 
   const sessionKey = String(req.headers['x-openclaw-session-key'] || '');
   let input = '';
+  let instructions = '';
   try {
-    input = String(JSON.parse(raw).input || '');
+    const parsed = JSON.parse(raw);
+    input = String(parsed.input || '');
+    instructions = String(parsed.instructions || '');
   } catch {
     // ghi log với input rỗng
   }
@@ -121,6 +124,8 @@ const server = http.createServer(async (req, res) => {
     msgId: /msg=([^ \]]+)\]/.exec(input)?.[1] ?? null,
     authOk: req.headers.authorization === `Bearer ${TOKEN}`,
     agentId: req.headers['x-openclaw-agent-id'] ?? null,
+    // Tín hiệu hệ thống một lượt (vd. HR vừa trả hội thoại cho AI).
+    resumeSignal: /Human takeover has ended/.test(instructions),
     result: null,
   };
   log.push(entry);
