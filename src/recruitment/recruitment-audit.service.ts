@@ -20,7 +20,8 @@ export type RecruitmentAuditEntity =
   | 'interviews'
   | 'interview-slots'
   | 'handoffs'
-  | 'conversations';
+  | 'conversations'
+  | 'channel-events';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -44,7 +45,9 @@ export type RecruitmentAuditAction =
   | 'INTERVIEW_CONFIRM'
   | 'INTERVIEW_UPDATE'
   /** Kênh tin cậy đòi truy cập dữ liệu không thuộc người gửi — bị chặn. */
-  | 'AI_SUBJECT_DENIED';
+  | 'AI_SUBJECT_DENIED'
+  /** Tin ứng viên không xử lý được (lỗi cuối hoặc quá hạn giữ) — HR cần xem. */
+  | 'CHANNEL_EVENT_DEAD_LETTER';
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng

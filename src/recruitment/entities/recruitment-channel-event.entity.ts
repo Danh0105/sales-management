@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -19,6 +20,12 @@ import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
  * hash tất định của các trường bất biến), không bao giờ do model tạo.
  *
  * Không lưu raw payload: chỉ `payload_hash` + metadata đã chuẩn hoá.
+ *
+ * P3-4 — bảng còn là **hàng đợi bền** (durable inbox) cho worker: nội dung tin đã
+ * chuẩn hoá nằm tạm ở `normalized_message_text` tới khi tin được ghi vào hội thoại
+ * canonical (`recruitment_messages`), rồi bị xoá ngay khi `PROCESSED`. CHECK bảo đảm
+ * ở DB: chỉ `RECEIVED` / `PROCESSING` / `FAILED` mới được giữ nội dung; quá 7 ngày
+ * thì worker xoá nốt (dead-letter).
  */
 @Entity('recruitment_channel_events')
 @Unique('UQ_recruitment_channel_events_dedupe', [
@@ -30,6 +37,15 @@ import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
   'status',
   'receivedAt',
 ])
+@Index('IDX_recruitment_channel_events_sender_queue', [
+  'channelAccountId',
+  'externalSenderId',
+  'status',
+])
+@Check(
+  'CHK_recruitment_channel_events_text_status',
+  `"normalized_message_text" IS NULL OR "status" IN ('RECEIVED', 'PROCESSING', 'FAILED')`,
+)
 export class RecruitmentChannelEvent {
   @PrimaryGeneratedColumn({
     primaryKeyConstraintName: 'PK_recruitment_channel_events',
@@ -94,6 +110,47 @@ export class RecruitmentChannelEvent {
 
   @Column({ name: 'failure_code', type: 'varchar', length: 64, nullable: true })
   failureCode!: string | null;
+
+  /**
+   * Nội dung tin (NFC, bỏ ký tự điều khiển) — chỉ có với event `RECEIVED` cần xử
+   * lý; `NULL` sau khi xử lý xong hoặc quá hạn giữ (7 ngày).
+   */
+  @Column({ name: 'normalized_message_text', type: 'text', nullable: true })
+  normalizedMessageText!: string | null;
+
+  /** Số lần worker đã claim event (kể cả lần claim lại sau khi lease hết hạn). */
+  @Column({ name: 'attempt_count', type: 'int', default: 0 })
+  attemptCount!: number;
+
+  @Column({
+    name: 'processing_started_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  processingStartedAt!: Date | null;
+
+  /** Hết hạn mà vẫn `PROCESSING` = worker đã chết → worker khác được claim lại. */
+  @Column({ name: 'lease_until', type: 'timestamptz', nullable: true })
+  leaseUntil!: Date | null;
+
+  /** Worker + nonce của lần claim gần nhất — mọi cập nhật kết quả đều phải khớp (fencing). */
+  @Column({ name: 'lease_owner', type: 'varchar', length: 100, nullable: true })
+  leaseOwner!: string | null;
+
+  /** `FAILED` có giá trị = lỗi tạm, thử lại từ thời điểm này; `NULL` = lỗi cuối (dead-letter). */
+  @Column({ name: 'next_attempt_at', type: 'timestamptz', nullable: true })
+  nextAttemptAt!: Date | null;
+
+  @Column({
+    name: 'last_error_code',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+  })
+  lastErrorCode!: string | null;
+
+  @Column({ name: 'text_redacted_at', type: 'timestamptz', nullable: true })
+  textRedactedAt!: Date | null;
 
   /** SHA-256 (hex) của body thô — đối chiếu, không khôi phục được nội dung. */
   @Column({ name: 'payload_hash', type: 'varchar', length: 64 })

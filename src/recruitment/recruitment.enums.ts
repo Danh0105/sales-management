@@ -160,3 +160,11 @@ export enum ChannelEventStatus {
   PROCESSED = 'PROCESSED',
   FAILED = 'FAILED',
 }
+
+/** Tin trả lời chờ gửi ra kênh. P3-4 chỉ tạo `PENDING`; gửi thật là bước sau. */
+export enum ChannelOutboxStatus {
+  PENDING = 'PENDING',
+  SENDING = 'SENDING',
+  SENT = 'SENT',
+  FAILED = 'FAILED',
+}

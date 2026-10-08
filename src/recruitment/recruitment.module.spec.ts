@@ -1,4 +1,5 @@
 import { REQUIRE_SUBJECT_CONFIG_ERROR } from './ai/recruitment-ai-subject';
+import { RECRUITMENT_WORKER_CONFIG_ERROR } from './channels/recruitment-channel-worker.config';
 import { RECRUITMENT_ZALO_CONFIG_ERROR } from './channels/zalo-recruitment-event';
 import { RecruitmentModule } from './recruitment.module';
 
@@ -30,5 +31,14 @@ describe('RecruitmentModule — kiểm cấu hình lúc khởi động (fail-clo
     expect(() =>
       moduleWith({ RECRUITMENT_ZALO_ENABLED: 'true' }).onModuleInit(),
     ).toThrow(RECRUITMENT_ZALO_CONFIG_ERROR);
+  });
+
+  it('bật worker OpenClaw mà thiếu gateway URL/token → không khởi động', () => {
+    expect(() =>
+      moduleWith({
+        RECRUITMENT_WORKER_ENABLED: 'true',
+        RECRUITMENT_ZALO_OA_ID: 'oa-recruit',
+      }).onModuleInit(),
+    ).toThrow(RECRUITMENT_WORKER_CONFIG_ERROR);
   });
 });

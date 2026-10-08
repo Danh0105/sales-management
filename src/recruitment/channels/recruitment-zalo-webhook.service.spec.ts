@@ -121,6 +121,7 @@ describe('RecruitmentZaloWebhookService', () => {
       expect.any(Date),
       'RECEIVED',
       expect.stringMatching(/^[0-9a-f]{64}$/),
+      TEXT,
     ]);
     expect(repo.findOne).not.toHaveBeenCalled();
   });
@@ -159,6 +160,8 @@ describe('RecruitmentZaloWebhookService', () => {
       status: ChannelEventStatus.IGNORED,
     });
     expect(repo.query.mock.calls[0][1][8]).toBe('IGNORED');
+    // Event không xử lý thì không giữ nội dung.
+    expect(repo.query.mock.calls[0][1][10]).toBeNull();
   });
 
   it('DB lỗi → 503, không ACK giả', async () => {

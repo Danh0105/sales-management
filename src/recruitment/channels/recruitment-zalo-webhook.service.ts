@@ -34,8 +34,9 @@ export interface ZaloWebhookAck {
  * Nhận webhook Zalo OA tuyển dụng: kiểm chữ ký → gắn OA theo cấu hình → chuẩn
  * hoá → ghi event (chống trùng nguyên tử) → ACK.
  *
- * P3-3 chỉ **nhận và lưu**: không gọi OpenClaw, không gửi tin Zalo, không tạo
- * ứng viên/hội thoại. Event `RECEIVED` chờ worker ở bước sau.
+ * Webhook chỉ **nhận và lưu** (giữ mỏng): không gọi OpenClaw, không gửi tin Zalo,
+ * không tạo ứng viên/hội thoại. Event `RECEIVED` mang nội dung tin đã chuẩn hoá và
+ * chờ `RecruitmentChannelWorker` xử lý.
  *
  * ACK chỉ trả sau khi dòng event đã nằm trong DB (hoặc DB xác nhận đã có) —
  * lỗi DB thì 503 để Zalo gửi lại, không bao giờ báo thành công giả.
@@ -111,8 +112,9 @@ export class RecruitmentZaloWebhookService {
     const inserted: Array<{ id: number }> = await this.events.query(
       `INSERT INTO "recruitment_channel_events"
         ("channel", "channel_account_id", "provider_event_id", "dedupe_key", "external_sender_id",
-         "event_type", "provider_message_id", "provider_created_at", "status", "payload_hash")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         "event_type", "provider_message_id", "provider_created_at", "status", "payload_hash",
+         "normalized_message_text")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT ON CONSTRAINT "UQ_recruitment_channel_events_dedupe" DO NOTHING
        RETURNING "id"`,
       [
@@ -126,6 +128,7 @@ export class RecruitmentZaloWebhookService {
         event.providerCreatedAt,
         event.status,
         event.payloadHash,
+        event.messageText,
       ],
     );
     if (inserted.length) {

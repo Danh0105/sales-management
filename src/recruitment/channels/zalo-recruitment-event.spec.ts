@@ -3,6 +3,8 @@ import { createHash } from 'crypto';
 import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
 import {
   assertRecruitmentZaloConfig,
+  MAX_MESSAGE_TEXT_LENGTH,
+  normalizeMessageText,
   parseZaloRecruitmentEvent,
   RECRUITMENT_ZALO_CONFIG_ERROR,
   readRecruitmentZaloConfig,
@@ -73,6 +75,7 @@ describe('parseZaloRecruitmentEvent — chữ ký', () => {
         providerMessageId: 'msg-0001',
         providerCreatedAt: new Date(Number(TS)),
         status: ChannelEventStatus.RECEIVED,
+        messageText: 'Chào bạn, mình muốn ứng tuyển',
         payloadHash: createHash('sha256').update(body).digest('hex'),
       },
     });
@@ -355,4 +358,48 @@ describe('cấu hình OA tuyển dụng', () => {
       }
     },
   );
+});
+
+describe('nội dung tin cho worker', () => {
+  it('chuẩn hoá: NFC, xuống dòng, bỏ ký tự điều khiển, bỏ khoảng trắng hai đầu', () => {
+    const decomposed = 'Tie\u0302\u0301ng Vie\u0323\u0302t'; // "Tiếng Việt" dạng tổ hợp
+    expect(
+      normalizeMessageText(`  ${decomposed}\r\ndòng 2\u0000\u0007\t!  `),
+    ).toBe('Tiếng Việt\ndòng 2\t!');
+  });
+
+  it('chỉ event RECEIVED mang nội dung; event IGNORED luôn null', () => {
+    const image = parse(
+      textEvent({
+        event_name: 'user_send_image',
+        message: { msg_id: 'i1', text: 'caption' },
+      }),
+    );
+    expect(image).toMatchObject({
+      ok: true,
+      event: { status: 'IGNORED', messageText: null },
+    });
+  });
+
+  it('tin chỉ có khoảng trắng → IGNORED, không giữ nội dung', () => {
+    expect(
+      parse(textEvent({ message: { text: ' \n\u0000 ', msg_id: 'm-blank' } })),
+    ).toMatchObject({
+      ok: true,
+      event: { status: 'IGNORED', messageText: null },
+    });
+  });
+
+  it(`tin dài hơn ${MAX_MESSAGE_TEXT_LENGTH} ký tự → MALFORMED_EVENT`, () => {
+    expect(
+      parse(
+        textEvent({
+          message: {
+            text: 'a'.repeat(MAX_MESSAGE_TEXT_LENGTH + 1),
+            msg_id: 'm-long',
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false, code: 'MALFORMED_EVENT' });
+  });
 });

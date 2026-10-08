@@ -9,6 +9,9 @@ import { RecruitmentAiIdempotencyInterceptor } from './ai/recruitment-ai-idempot
 import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.service';
 import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guard';
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
+import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
+import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
+import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
 import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-webhook.controller';
 import { RecruitmentZaloWebhookService } from './channels/recruitment-zalo-webhook.service';
 import { assertRecruitmentZaloConfig } from './channels/zalo-recruitment-event';
@@ -28,6 +31,7 @@ import { RecruitmentAiIdempotencyKey } from './entities/recruitment-ai-idempoten
 import { RecruitmentApplication } from './entities/recruitment-application.entity';
 import { RecruitmentCandidate } from './entities/recruitment-candidate.entity';
 import { RecruitmentChannelEvent } from './entities/recruitment-channel-event.entity';
+import { RecruitmentChannelOutbox } from './entities/recruitment-channel-outbox.entity';
 import { RecruitmentConversation } from './entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from './entities/recruitment-handoff.entity';
 import { RecruitmentInterviewSlot } from './entities/recruitment-interview-slot.entity';
@@ -58,7 +62,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
  *
  * Khởi động: production bật API AI mà không bắt buộc subject kênh thì dừng
  * (`assertRecruitmentAiConfig`); bật webhook Zalo OA tuyển dụng mà thiếu/sai
- * cấu hình OA cũng dừng (`assertRecruitmentZaloConfig`) — fail-closed.
+ * cấu hình OA cũng dừng (`assertRecruitmentZaloConfig`); bật worker OpenClaw mà
+ * thiếu/sai cấu hình cũng dừng (`assertRecruitmentWorkerConfig`) — fail-closed.
  */
 @Module({
   imports: [
@@ -73,6 +78,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentHandoff,
       RecruitmentAiIdempotencyKey,
       RecruitmentChannelEvent,
+      RecruitmentChannelOutbox,
       Department,
       Employee,
     ]),
@@ -105,6 +111,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentAiIdempotencyInterceptor,
     RecruitmentAiOwnershipService,
     RecruitmentZaloWebhookService,
+    RecruitmentChannelEventQueue,
+    RecruitmentChannelWorker,
   ],
 })
 export class RecruitmentModule implements OnModuleInit {
@@ -114,5 +122,6 @@ export class RecruitmentModule implements OnModuleInit {
     const get = (key: string) => this.config.get<string>(key);
     assertRecruitmentAiConfig(get);
     assertRecruitmentZaloConfig(get);
+    assertRecruitmentWorkerConfig(get);
   }
 }

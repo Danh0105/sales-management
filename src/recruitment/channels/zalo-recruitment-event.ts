@@ -31,6 +31,8 @@ const EVENT_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const TIMESTAMP = /^\d{1,16}$/;
 const MIN_SECRET_LENGTH = 16;
+/** Bằng giới hạn `content` của tin nhắn tuyển dụng (`AiSaveMessageDto`). */
+export const MAX_MESSAGE_TEXT_LENGTH = 10000;
 
 /** Event được xử lý tiếp (worker sau này); event hợp lệ khác → `IGNORED`. */
 export const SUPPORTED_ZALO_EVENTS: ReadonlySet<string> = new Set([
@@ -139,6 +141,8 @@ export interface NormalizedZaloEvent {
   providerMessageId: string | null;
   providerCreatedAt: Date | null;
   status: ChannelEventStatus.RECEIVED | ChannelEventStatus.IGNORED;
+  /** Chỉ event `RECEIVED` mới mang nội dung (để worker xử lý); event khác luôn `null`. */
+  messageText: string | null;
   payloadHash: string;
 }
 
@@ -217,6 +221,17 @@ export function parseZaloRecruitmentEvent(
   ) {
     return { ok: false, code: 'MALFORMED_EVENT', eventType };
   }
+  const messageText = supported
+    ? normalizeMessageText(message?.text as string)
+    : null;
+  if (messageText !== null && messageText.length > MAX_MESSAGE_TEXT_LENGTH) {
+    return { ok: false, code: 'MALFORMED_EVENT', eventType };
+  }
+  // Tin chỉ có khoảng trắng/ký tự điều khiển: hợp lệ nhưng không có gì để trả lời.
+  const status =
+    supported && messageText
+      ? ChannelEventStatus.RECEIVED
+      : ChannelEventStatus.IGNORED;
 
   return {
     ok: true,
@@ -235,9 +250,8 @@ export function parseZaloRecruitmentEvent(
       eventType,
       providerMessageId: msgId,
       providerCreatedAt: providerTime(rawTimestamp, now),
-      status: supported
-        ? ChannelEventStatus.RECEIVED
-        : ChannelEventStatus.IGNORED,
+      status,
+      messageText: status === ChannelEventStatus.RECEIVED ? messageText : null,
       payloadHash: createHash('sha256').update(rawBody).digest('hex'),
     },
   };
@@ -303,6 +317,22 @@ function dedupeKeyOf(
     )
     .digest('hex');
   return `${eventType}:h:${digest}`;
+}
+
+/**
+ * Nội dung tin đưa cho worker: Unicode NFC (tiếng Việt gõ tổ hợp/dựng sẵn về một
+ * dạng), xuống dòng `\n`, bỏ ký tự điều khiển (trừ xuống dòng/tab), bỏ khoảng
+ * trắng hai đầu. Không đổi chữ — đây là lời ứng viên.
+ */
+export function normalizeMessageText(text: string): string {
+  return (
+    text
+      .normalize('NFC')
+      .replace(/\r\n?/g, '\n')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim()
+  );
 }
 
 /** `timestamp` của Zalo tính bằng mili giây; giá trị vô lý → không ghi. */
