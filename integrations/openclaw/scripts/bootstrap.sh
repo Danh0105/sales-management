@@ -38,6 +38,13 @@ fi
 if ! grep -qE '^STAGING_ZALO_OA_SECRET_KEY=.+' "$ENV_FILE"; then
   echo "STAGING_ZALO_OA_SECRET_KEY=$(openssl rand -hex 32)" >> "$ENV_FILE"
 fi
+# P3-5: App Secret GIẢ (refresh token với Zalo giả) + khoá mã hoá token OA tuyển dụng.
+if ! grep -qE '^STAGING_ZALO_APP_SECRET=.+' "$ENV_FILE"; then
+  echo "STAGING_ZALO_APP_SECRET=$(openssl rand -hex 32)" >> "$ENV_FILE"
+fi
+if ! grep -qE '^STAGING_ZALO_TOKEN_KEY=.+' "$ENV_FILE"; then
+  echo "STAGING_ZALO_TOKEN_KEY=$(openssl rand -base64 32)" >> "$ENV_FILE"
+fi
 if ! grep -qE '^STAGING_DB_PASSWORD=.+' "$ENV_FILE"; then
   echo "Điền STAGING_DB_PASSWORD trong $ENV_FILE (khớp mật khẩu DB mà staging-api dùng)." >&2
   exit 1
