@@ -30,6 +30,7 @@ describe('cấu hình worker OpenClaw', () => {
         concurrency: 2,
         pollMs: 2_000,
         leaseMs: 300_000,
+        settleMs: 2_000,
         retryBaseMs: 30_000,
         retryMaxMs: 900_000,
         janitorMs: 60_000,

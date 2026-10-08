@@ -167,6 +167,7 @@ export class RecruitmentChannelWorker
           config.oaId,
           owner,
           config.leaseMs,
+          config.settleMs,
         );
         if (!event) {
           await sleep(config.pollMs + Math.floor(Math.random() * 250));

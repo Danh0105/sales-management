@@ -16,6 +16,7 @@ const CONFIG: RecruitmentWorkerConfig = {
   concurrency: 1,
   pollMs: 100,
   leaseMs: 60_000,
+  settleMs: 0,
   retryBaseMs: 1000,
   retryMaxMs: 8000,
   janitorMs: 60_000,

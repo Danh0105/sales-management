@@ -14,6 +14,8 @@ export interface RecruitmentWorkerConfig {
   concurrency: number;
   pollMs: number;
   leaseMs: number;
+  /** Chờ chừng này kể từ lúc nhận mới xử lý — để tin tới lệch thứ tự kịp xếp hàng. */
+  settleMs: number;
   retryBaseMs: number;
   retryMaxMs: number;
   janitorMs: number;
@@ -72,6 +74,7 @@ export function readRecruitmentWorkerConfig(
   const concurrency = int('RECRUITMENT_WORKER_CONCURRENCY', 2, 1, 16);
   const pollMs = int('RECRUITMENT_WORKER_POLL_MS', 2_000, 100, 60_000);
   const leaseMs = int('RECRUITMENT_WORKER_LEASE_MS', 300_000, 3_000, 3_600_000);
+  const settleMs = int('RECRUITMENT_WORKER_SETTLE_MS', 2_000, 0, 60_000);
   const retryBaseMs = int(
     'RECRUITMENT_WORKER_RETRY_BASE_MS',
     30_000,
@@ -100,6 +103,7 @@ export function readRecruitmentWorkerConfig(
       concurrency,
       pollMs,
       leaseMs,
+      settleMs,
       retryBaseMs,
       retryMaxMs,
       janitorMs,

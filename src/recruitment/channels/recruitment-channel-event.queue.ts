@@ -33,11 +33,15 @@ export interface OutboxDraft {
  * Hàng đợi trên PostgreSQL (`recruitment_channel_events`) — không cần Redis.
  *
  * **Tuần tự theo người gửi** (`zalo:<OA>:<sender>`): chỉ event "đầu hàng" — event
- * sớm nhất chưa xong của người gửi đó — mới được claim, và không bao giờ khi người
+ * sớm nhất (theo timestamp Zalo) chưa xong của người gửi đó — mới được claim, và không bao giờ khi người
  * đó còn một event `PROCESSING` với lease còn hạn. Hai worker cùng nhắm một người
  * gửi bị xếp hàng bằng advisory lock theo người gửi (giữ tới hết transaction
  * claim); `UPDATE ... WHERE` kiểm lại mọi điều kiện trên dữ liệu đã commit, nên
  * không có khe SELECT-rồi-UPDATE.
+ *
+ * Event mới chỉ được claim sau `settleMs` kể từ lúc nhận: webhook của các tin gửi
+ * liền nhau có thể tới lệch thứ tự — chờ một nhịp để tin đến muộn kịp vào hàng
+ * và được xếp theo timestamp của Zalo.
  *
  * "Chưa xong" = `RECEIVED`, `PROCESSING`, hoặc `FAILED` còn lịch thử lại
  * (`next_attempt_at`). `FAILED` không còn lịch thử là dead-letter — không chặn
@@ -54,13 +58,14 @@ export class RecruitmentChannelEventQueue {
     oaId: string,
     owner: string,
     leaseMs: number,
+    settleMs = 0,
   ): Promise<ClaimedChannelEvent | null> {
     const heads: Array<{ id: number; sender: string }> =
       await this.dataSource.query(
         `SELECT head.id, head.external_sender_id AS sender FROM (
            SELECT DISTINCT ON (e.external_sender_id)
              e.id, e.external_sender_id, e.status, e.lease_until, e.next_attempt_at,
-             coalesce(e.provider_created_at, e.received_at) AS ord
+             e.received_at, coalesce(e.provider_created_at, e.received_at) AS ord
            FROM "recruitment_channel_events" e
            WHERE e.channel = 'ZALO' AND e.channel_account_id = $1
              AND e.event_type = 'user_send_text' AND e.external_sender_id IS NOT NULL
@@ -68,16 +73,17 @@ export class RecruitmentChannelEventQueue {
                   OR (e.status = 'FAILED' AND e.next_attempt_at IS NOT NULL))
            ORDER BY e.external_sender_id, coalesce(e.provider_created_at, e.received_at), e.id
          ) head
-         WHERE head.status = 'RECEIVED'
+         WHERE (head.status = 'RECEIVED'
+                AND head.received_at <= now() - $2::int * interval '1 millisecond')
             OR (head.status = 'FAILED' AND head.next_attempt_at <= now())
             OR (head.status = 'PROCESSING' AND head.lease_until < now())
          ORDER BY head.ord, head.id
          LIMIT 20`,
-        [oaId],
+        [oaId, settleMs],
       );
 
     for (const head of heads) {
-      const claimed = await this.tryClaim(oaId, head, owner, leaseMs);
+      const claimed = await this.tryClaim(oaId, head, owner, leaseMs, settleMs);
       if (claimed) return claimed;
     }
     return null;
@@ -88,6 +94,7 @@ export class RecruitmentChannelEventQueue {
     head: { id: number; sender: string },
     owner: string,
     leaseMs: number,
+    settleMs: number,
   ): Promise<ClaimedChannelEvent | null> {
     return this.dataSource.transaction(async (em) => {
       const [lock]: Array<{ locked: boolean }> = await em.query(
@@ -107,6 +114,8 @@ export class RecruitmentChannelEventQueue {
            AND (e.status = 'RECEIVED'
                 OR (e.status = 'FAILED' AND e.next_attempt_at <= now())
                 OR (e.status = 'PROCESSING' AND e.lease_until < now()))
+           AND (e.status <> 'RECEIVED'
+                OR e.received_at <= now() - $6::int * interval '1 millisecond')
            AND NOT EXISTS (
              SELECT 1 FROM "recruitment_channel_events" o
              WHERE o.channel = e.channel AND o.channel_account_id = e.channel_account_id
@@ -119,7 +128,7 @@ export class RecruitmentChannelEventQueue {
                           < (coalesce(e.provider_created_at, e.received_at), e.id))))
          RETURNING e.id, e.channel_account_id, e.external_sender_id, e.provider_message_id,
                    e.normalized_message_text, e.attempt_count`,
-          [head.id, oaId, head.sender, leaseMs, owner],
+          [head.id, oaId, head.sender, leaseMs, owner, settleMs],
         ),
       );
       const row = rows[0];
