@@ -10,10 +10,14 @@ import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.ser
 import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guard';
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
+import { RecruitmentChannelOutboxQueue } from './channels/recruitment-channel-outbox.queue';
 import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
 import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
 import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-webhook.controller';
+import { RecruitmentZaloCredentialStore } from './channels/recruitment-zalo-credential.store';
+import { RecruitmentZaloSender } from './channels/recruitment-zalo-sender.service';
 import { RecruitmentZaloWebhookService } from './channels/recruitment-zalo-webhook.service';
+import { assertZaloOutboundConfig } from './channels/zalo-outbound.config';
 import { assertRecruitmentZaloConfig } from './channels/zalo-recruitment-event';
 import { RecruitmentAiController } from './controllers/recruitment-ai.controller';
 import { RecruitmentApplicationsController } from './controllers/recruitment-applications.controller';
@@ -38,6 +42,7 @@ import { RecruitmentInterviewSlot } from './entities/recruitment-interview-slot.
 import { RecruitmentInterview } from './entities/recruitment-interview.entity';
 import { RecruitmentJob } from './entities/recruitment-job.entity';
 import { RecruitmentMessage } from './entities/recruitment-message.entity';
+import { RecruitmentZaloCredential } from './entities/recruitment-zalo-credential.entity';
 import { RecruitmentAuditService } from './recruitment-audit.service';
 import { CandidatePrivacyService } from './services/candidate-privacy.service';
 import {
@@ -63,7 +68,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
  * Khởi động: production bật API AI mà không bắt buộc subject kênh thì dừng
  * (`assertRecruitmentAiConfig`); bật webhook Zalo OA tuyển dụng mà thiếu/sai
  * cấu hình OA cũng dừng (`assertRecruitmentZaloConfig`); bật worker OpenClaw mà
- * thiếu/sai cấu hình cũng dừng (`assertRecruitmentWorkerConfig`) — fail-closed.
+ * thiếu/sai cấu hình cũng dừng (`assertRecruitmentWorkerConfig`); bật gửi tin ra
+ * Zalo mà thiếu credential/khoá cũng dừng (`assertZaloOutboundConfig`) — fail-closed.
  */
 @Module({
   imports: [
@@ -79,6 +85,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentAiIdempotencyKey,
       RecruitmentChannelEvent,
       RecruitmentChannelOutbox,
+      RecruitmentZaloCredential,
       Department,
       Employee,
     ]),
@@ -113,6 +120,9 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentZaloWebhookService,
     RecruitmentChannelEventQueue,
     RecruitmentChannelWorker,
+    RecruitmentChannelOutboxQueue,
+    RecruitmentZaloCredentialStore,
+    RecruitmentZaloSender,
   ],
 })
 export class RecruitmentModule implements OnModuleInit {
@@ -123,5 +133,6 @@ export class RecruitmentModule implements OnModuleInit {
     assertRecruitmentAiConfig(get);
     assertRecruitmentZaloConfig(get);
     assertRecruitmentWorkerConfig(get);
+    assertZaloOutboundConfig(get);
   }
 }

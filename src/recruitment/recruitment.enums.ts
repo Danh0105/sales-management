@@ -161,10 +161,20 @@ export enum ChannelEventStatus {
   FAILED = 'FAILED',
 }
 
-/** Tin trả lời chờ gửi ra kênh. P3-4 chỉ tạo `PENDING`; gửi thật là bước sau. */
+/**
+ * Tin trả lời chờ gửi ra kênh (worker P3-4 tạo `PENDING`, sender P3-5 gửi).
+ *
+ * - `SENDING`: đã claim; `dispatched_at` có giá trị = request có thể đã tới Zalo.
+ * - `RETRY`: chắc chắn CHƯA gửi được (429, 5xx, lỗi trước khi kết nối...) — thử lại.
+ * - `UNKNOWN`: request có thể đã tới Zalo nhưng không biết kết quả — KHÔNG tự gửi
+ *   lại (tránh trùng tin), chờ đối soát; chặn các tin sau của cùng người nhận.
+ * - `DEAD_LETTER`: không bao giờ gửi (bị từ chối hẳn, dữ liệu sai, quá hạn).
+ */
 export enum ChannelOutboxStatus {
   PENDING = 'PENDING',
   SENDING = 'SENDING',
   SENT = 'SENT',
-  FAILED = 'FAILED',
+  RETRY = 'RETRY',
+  UNKNOWN = 'UNKNOWN',
+  DEAD_LETTER = 'DEAD_LETTER',
 }

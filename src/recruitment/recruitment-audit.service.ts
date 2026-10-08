@@ -21,7 +21,8 @@ export type RecruitmentAuditEntity =
   | 'interview-slots'
   | 'handoffs'
   | 'conversations'
-  | 'channel-events';
+  | 'channel-events'
+  | 'channel-outbox';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -47,7 +48,11 @@ export type RecruitmentAuditAction =
   /** Kênh tin cậy đòi truy cập dữ liệu không thuộc người gửi — bị chặn. */
   | 'AI_SUBJECT_DENIED'
   /** Tin ứng viên không xử lý được (lỗi cuối hoặc quá hạn giữ) — HR cần xem. */
-  | 'CHANNEL_EVENT_DEAD_LETTER';
+  | 'CHANNEL_EVENT_DEAD_LETTER'
+  /** Tin trả lời không gửi được ra Zalo — HR cần xem. */
+  | 'CHANNEL_OUTBOX_DEAD_LETTER'
+  /** Tin trả lời có thể đã tới Zalo nhưng không rõ — cần đối soát, không tự gửi lại. */
+  | 'CHANNEL_OUTBOX_UNKNOWN';
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng
