@@ -5,6 +5,7 @@
 //   TARGET_PORT=3022 node - full <runId>                 # các case HTTP 1–7, 9
 //   TARGET_PORT=3022 node - send <runId> <msgId> <sender> [oaId] [path]
 //                                                         # gửi lại đúng một event (byte y hệt)
+//   (send) env EVENT_TS / EVENT_TEXT: đặt timestamp (ms) / nội dung tin thay cho mặc định
 //
 // In ra một dòng JSON cuối: { results: [{name, ok, detail}], ids: {...} } hoặc {status, body}.
 const { createHash } = require('crypto');
@@ -31,10 +32,10 @@ function textEvent({ msgId, sender, oa = OA, overrides = {} }) {
     app_id: APP,
     user_id_by_app: `byapp-${sender}`,
     event_name: 'user_send_text',
-    timestamp: timestampOf(msgId),
+    timestamp: process.env.EVENT_TS || timestampOf(msgId),
     sender: { id: sender },
     recipient: { id: oa },
-    message: { text: 'Xin chào, em muốn ứng tuyển vị trí tư vấn', msg_id: msgId },
+    message: { text: process.env.EVENT_TEXT || 'Xin chào, em muốn ứng tuyển vị trí tư vấn', msg_id: msgId },
     ...overrides,
   };
 }

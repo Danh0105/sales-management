@@ -24,7 +24,7 @@ FAIL=0
 
 sql() { "${DC[@]}" exec -T staging-db psql -U postgres -d sales_db_staging -At -c "$1"; }
 ok() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
-ko() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; [ -n "${2:-}" ] && echo "    → $2"; }
+ko() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; if [ -n "${2:-}" ]; then echo "    → $2"; fi; }
 same() { if [ "$2" = "$3" ]; then ok "$1"; else ko "$1" "thực tế [$2], mong đợi [$3]"; fi; }
 jget() { echo "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); v=d; [v:=v[k] for k in sys.argv[1].split('.')]; print(v if not isinstance(v,(list,dict)) else json.dumps(v))" "$2"; }
 report() {
@@ -97,6 +97,8 @@ same "4/5/6. chữ ký sai, sai OA/app, payload hỏng → 0 dòng" \
 same "6. event hợp lệ sau payload hỏng đã được ghi" "$(rows "$(jget "$OUT" ids.c6g)")" 1
 same "7. follow → 1 dòng IGNORED (khoá hash), sender = follower" \
   "$(sql "select count(*) || '|' || string_agg(status || '|' || external_sender_id || '|' || (dedupe_key ~ '^follow:h:[0-9a-f]{64}$'), ',') from $TABLE where event_type = 'follow' and external_sender_id = '$A'")" "1|IGNORED|$A|true"
+same "P3-4: event RECEIVED giữ nội dung tin đã chuẩn hoá cho worker; IGNORED không giữ" \
+  "$(sql "select count(*) filter (where status = 'RECEIVED' and normalized_message_text = 'Xin chào, em muốn ứng tuyển vị trí tư vấn') || '/' || count(*) filter (where status = 'IGNORED' and normalized_message_text is not null) from $TABLE where dedupe_key in ('$(key "$C1")', 'user_send_image:msg:$(jget "$OUT" ids.c7b)')")" "1/0"
 same "7. user_send_image → IGNORED" "$(sql "select status from $TABLE where dedupe_key = 'user_send_image:msg:$(jget "$OUT" ids.c7b)'")" IGNORED
 C9=$(jget "$OUT" ids.c9)
 EXPECTED9=$(echo "$C9" | python3 -c "import json,sys; d=json.load(sys.stdin); print(','.join('%s=%s@stg-recruit-oa' % (m, d[m]) for m in sorted(d)))")

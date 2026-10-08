@@ -65,7 +65,13 @@ check "cập nhật SĐT + khu vực" '.ok' "$R"
 R=$(invoke recruitment_screen_candidate "{\"applicationId\":$APP,\"extractedSkills\":[\"sales\",\"CRM\"],\"totalExperienceMonths\":24,\"expectedSalary\":12000000,\"availableFrom\":\"$(date -d '+3 day' +%F)\",\"aiSummary\":\"2 năm sales B2B, dùng CRM.\"}")
 check "sàng lọc HIGH_MATCH → QUALIFIED, đề xuất phỏng vấn" '.ok and .data.matchLevel=="HIGH_MATCH" and .data.status=="QUALIFIED" and .data.recommendedAction=="PROPOSE_INTERVIEW"' "$R"
 
-R=$(invoke recruitment_get_interview_slots "{\"jobId\":$JOB,\"limit\":50}")
+# Hỏi đúng khung giờ của slot vừa mở: slot test của các lần chạy trước dồn lại trên
+# staging có thể đẩy slot mới ra ngoài 50 slot gần nhất (WARN fixture dùng chung).
+SLOT_WINDOW=$(sql "select to_char((start_at - interval '1 minute') at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') || ' ' ||
+                          to_char((end_at + interval '1 minute') at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                   from recruitment_interview_slots where id = $SLOT")
+read -r SLOT_FROM SLOT_TO <<< "$SLOT_WINDOW"
+R=$(invoke recruitment_get_interview_slots "{\"jobId\":$JOB,\"from\":\"$SLOT_FROM\",\"to\":\"$SLOT_TO\",\"limit\":50}")
 check "slot HR vừa mở có trong danh sách AI thấy" ".ok and (.data.data|map(.id)|index($SLOT)) != null" "$R"
 
 R=$(invoke recruitment_propose_interview "{\"applicationId\":$APP,\"slotId\":$SLOT}")

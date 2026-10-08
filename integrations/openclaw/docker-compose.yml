@@ -59,6 +59,11 @@ services:
       RECRUITMENT_ZALO_APP_ID: stg-recruit-app
       RECRUITMENT_ZALO_OA_ID: stg-recruit-oa
       RECRUITMENT_ZALO_OA_SECRET_KEY: ${STAGING_ZALO_OA_SECRET_KEY:?set STAGING_ZALO_OA_SECRET_KEY}
+      # P3-4: worker inbox → OpenClaw → outbox. TẮT trên staging-api chính (acceptance bật
+      # trên instance tạm) để test webhook không kéo theo lượt model tốn tiền.
+      RECRUITMENT_WORKER_ENABLED: ${RECRUITMENT_WORKER_ENABLED:-false}
+      RECRUITMENT_OPENCLAW_URL: http://openclaw-gateway:18789
+      RECRUITMENT_OPENCLAW_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
       # FcmService bắt buộc có service account lúc khởi động. Staging KHÔNG dùng
       # credential Firebase thật: file giả do bootstrap sinh, không gửi được thông báo.
       FIREBASE_SERVICE_ACCOUNT_PATH: /run/kido/fake-firebase.json
