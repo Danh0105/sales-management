@@ -109,7 +109,11 @@ export class RecruitmentChannelWorker
   private readonly logger = new Logger('RecruitmentChannelWorker');
   private readonly enabled: boolean;
   private readonly config: RecruitmentWorkerConfig | null;
-  private readonly workerId = `${hostname()}:${process.pid}`.slice(0, 80);
+  /**
+   * Định danh process worker. Container dùng chung network namespace có thể
+   * trùng hostname và PID 1 → thêm phần ngẫu nhiên theo mỗi lần khởi động.
+   */
+  private readonly workerId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
   private loops: Promise<void>[] = [];
   private readonly inFlight = new Set<AbortController>();
