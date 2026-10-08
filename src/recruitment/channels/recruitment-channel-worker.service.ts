@@ -20,12 +20,14 @@ import { RecruitmentCandidate } from '../entities/recruitment-candidate.entity';
 import { RecruitmentMessage } from '../entities/recruitment-message.entity';
 import { RecruitmentAuditService } from '../recruitment-audit.service';
 import {
+  CandidateSource,
   ConversationChannel,
   MessageContentType,
   MessageDirection,
   MessageSenderType,
 } from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
+import { RecruitmentCandidateService } from '../services/recruitment-candidate.service';
 import { RecruitmentConversationService } from '../services/recruitment-conversation.service';
 import {
   invokeOpenClaw,
@@ -53,12 +55,29 @@ class CanonicalError extends Error {
   }
 }
 
+interface CanonicalInbound {
+  candidateId: number;
+  /** `existing` = lần thử trước (hoặc model) đã lưu tin này. */
+  stored: 'new' | 'existing';
+}
+
 interface CanonicalReply {
   text: string;
   messageId: number;
-  inboundBy: 'model' | 'worker';
   replyBy: 'model' | 'worker';
   replyMatches: boolean;
+}
+
+/**
+ * Lỗi 4xx của service (vd. `CONVERSATION_CANDIDATE_MISMATCH`) = dữ liệu không nhất
+ * quán, thử lại vô ích; lỗi khác (DB) = tạm thời.
+ */
+function asCanonicalError(error: unknown): CanonicalError {
+  if (error instanceof CanonicalError) return error;
+  if (error instanceof HttpException && error.getStatus() < 500) {
+    return new CanonicalError('CANONICAL_CONFLICT', 'rejected');
+  }
+  return new CanonicalError('CANONICAL_STORE_FAILED', 'infra');
 }
 
 /**
@@ -70,9 +89,10 @@ interface CanonicalReply {
  * Mỗi lượt:
  * 1. Session key **do worker dựng từ DB**: `agent:<agent>:zalo:<OA>:<người gửi>`.
  * 2. `POST /v1/responses` — chỉ câu trả lời `completed` có text thật mới là xong.
- * 3. Hội thoại canonical (`recruitment_messages`) phải có tin đến (`msg`) và tin đi
- *    (`msg-reply`). Model lưu theo skill; thiếu thì worker lưu, idempotent theo
- *    cùng khoá. Tin đi đã lưu là bản canonical — outbox gửi đúng bản đó.
+ * 3. Hội thoại canonical (`recruitment_messages`): worker nhận diện ứng viên theo
+ *    (OA, người gửi) và lưu tin đến nguyên văn (`msg`) TRƯỚC lượt model; tin đi
+ *    (`msg-reply`) do model lưu theo skill, thiếu thì worker lưu — idempotent theo
+ *    cùng khoá. Tin đi đã lưu là bản canonical, outbox gửi đúng bản đó.
  * 4. Một transaction: outbox (`ON CONFLICT (source_event_id) DO NOTHING`) +
  *    `PROCESSED` + xoá nội dung tin khỏi inbox.
  *
@@ -99,6 +119,7 @@ export class RecruitmentChannelWorker
     configService: ConfigService,
     private readonly queue: RecruitmentChannelEventQueue,
     private readonly conversations: RecruitmentConversationService,
+    private readonly candidateService: RecruitmentCandidateService,
     @InjectRepository(RecruitmentCandidate)
     private readonly candidates: Repository<RecruitmentCandidate>,
     @InjectRepository(RecruitmentMessage)
@@ -177,6 +198,22 @@ export class RecruitmentChannelWorker
       );
     }
 
+    // Tin đến vào hội thoại canonical TRƯỚC lượt model: đúng nguyên văn ứng viên,
+    // đúng thứ tự, và không phụ thuộc model có lưu hay không.
+    let inbound: CanonicalInbound;
+    try {
+      inbound = await this.ensureInbound(event, subject);
+    } catch (error) {
+      const failure = asCanonicalError(error);
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        failure.code,
+        failure.kind,
+      );
+    }
+
     const controller = new AbortController();
     this.inFlight.add(controller);
     let leaseLost = false;
@@ -222,12 +259,9 @@ export class RecruitmentChannelWorker
 
       let reply: CanonicalReply;
       try {
-        reply = await this.ensureCanonical(event, subject, outcome.text);
+        reply = await this.ensureReply(event, subject, inbound, outcome.text);
       } catch (error) {
-        const failure =
-          error instanceof CanonicalError
-            ? error
-            : new CanonicalError('CANONICAL_STORE_FAILED', 'infra');
+        const failure = asCanonicalError(error);
         return this.finishFailure(
           event,
           owner,
@@ -244,7 +278,7 @@ export class RecruitmentChannelWorker
       });
       this.logger.log(
         `worker event=${event.id} attempt=${event.attemptCount} result=${result.completed ? 'PROCESSED' : 'LEASE_LOST'} ` +
-          `outbox=${result.outboxId ?? '-'} inboundBy=${reply.inboundBy} replyBy=${reply.replyBy} ` +
+          `outbox=${result.outboxId ?? '-'} inbound=${inbound.stored} replyBy=${reply.replyBy} ` +
           `replyMatches=${reply.replyMatches} sender=${maskSender(subject)} ms=${Date.now() - started}`,
       );
     } finally {
@@ -254,65 +288,76 @@ export class RecruitmentChannelWorker
   }
 
   /**
-   * Bảo đảm tin đến + tin đi của lượt này nằm trong hội thoại canonical của đúng
-   * người gửi (`ZALO`, `<OA>:<người gửi>`), idempotent theo `externalMessageId`
-   * — cùng khoá với skill (`msg`, `msg-reply`), nên model đã lưu thì không lưu lại.
+   * Danh tính do tầng kênh gắn (AGENTS.md §33): ứng viên của (OA, người gửi) —
+   * chưa có thì tạo với đúng danh tính Zalo đó — rồi lưu tin đến nguyên văn với
+   * `externalMessageId = msg` (cùng khoá skill dùng → model lưu lại chỉ là trùng).
    */
-  private async ensureCanonical(
+  private async ensureInbound(
     event: ClaimedChannelEvent,
     subject: RecruitmentAiSubject,
-    responseText: string,
-  ): Promise<CanonicalReply> {
-    const candidate = await this.candidates.findOne({
-      where: { zaloOaId: subject.oaId, zaloUserId: subject.userId },
-      select: { id: true },
-    });
-    // Lượt nào cũng phải nhận diện ứng viên (skill bước 1) — không có là lượt hỏng.
-    if (!candidate) throw new CanonicalError('CANDIDATE_NOT_RESOLVED', 'agent');
+  ): Promise<CanonicalInbound> {
+    let candidateId = (
+      await this.candidates.findOne({
+        where: { zaloOaId: subject.oaId, zaloUserId: subject.userId },
+        select: { id: true },
+      })
+    )?.id;
+    if (!candidateId) {
+      const created = await this.candidateService.aiFindOrCreate(
+        { source: CandidateSource.ZALO },
+        { oaId: subject.oaId, userId: subject.userId },
+      );
+      candidateId = created.candidate?.id;
+    }
+    if (!candidateId) {
+      throw new CanonicalError('CANDIDATE_NOT_RESOLVED', 'infra');
+    }
 
-    const base = {
-      candidateId: candidate.id,
+    const saved = await this.conversations.saveMessage({
+      candidateId,
       channel: ConversationChannel.ZALO,
       externalConversationId: channelConversationId(subject),
       contentType: MessageContentType.TEXT,
-    };
-    const msgId = event.providerMessageId as string;
-    try {
-      const inbound = await this.conversations.saveMessage({
-        ...base,
-        externalMessageId: msgId,
-        senderType: MessageSenderType.CANDIDATE,
-        direction: MessageDirection.INBOUND,
-        content: event.messageText as string,
-      });
-      await this.expectStored(inbound.messageId, MessageDirection.INBOUND);
+      externalMessageId: event.providerMessageId as string,
+      senderType: MessageSenderType.CANDIDATE,
+      direction: MessageDirection.INBOUND,
+      content: event.messageText as string,
+    });
+    await this.expectStored(saved.messageId, MessageDirection.INBOUND);
+    return { candidateId, stored: saved.duplicate ? 'existing' : 'new' };
+  }
 
-      const reply = await this.conversations.saveMessage({
-        ...base,
-        externalMessageId: `${msgId}-reply`,
-        senderType: MessageSenderType.AI,
-        direction: MessageDirection.OUTBOUND,
-        content: responseText,
-      });
-      const stored = await this.expectStored(
-        reply.messageId,
-        MessageDirection.OUTBOUND,
-      );
-      return {
-        text: stored.content,
-        messageId: stored.id,
-        inboundBy: inbound.duplicate ? 'model' : 'worker',
-        replyBy: reply.duplicate ? 'model' : 'worker',
-        replyMatches: stored.content.trim() === responseText.trim(),
-      };
-    } catch (error) {
-      if (error instanceof CanonicalError) throw error;
-      // vd. CONVERSATION_CANDIDATE_MISMATCH — dữ liệu không nhất quán, thử lại vô ích.
-      if (error instanceof HttpException && error.getStatus() < 500) {
-        throw new CanonicalError('CANONICAL_CONFLICT', 'rejected');
-      }
-      throw error;
-    }
+  /**
+   * Tin đi canonical của lượt: model lưu theo skill (`msg-reply`); chưa có thì
+   * worker lưu câu trả lời vừa nhận với cùng khoá. Bản đã lưu là bản được gửi —
+   * kể cả khi lượt chạy lại sau crash trả câu khác.
+   */
+  private async ensureReply(
+    event: ClaimedChannelEvent,
+    subject: RecruitmentAiSubject,
+    inbound: CanonicalInbound,
+    responseText: string,
+  ): Promise<CanonicalReply> {
+    const saved = await this.conversations.saveMessage({
+      candidateId: inbound.candidateId,
+      channel: ConversationChannel.ZALO,
+      externalConversationId: channelConversationId(subject),
+      contentType: MessageContentType.TEXT,
+      externalMessageId: `${event.providerMessageId}-reply`,
+      senderType: MessageSenderType.AI,
+      direction: MessageDirection.OUTBOUND,
+      content: responseText,
+    });
+    const stored = await this.expectStored(
+      saved.messageId,
+      MessageDirection.OUTBOUND,
+    );
+    return {
+      text: stored.content,
+      messageId: stored.id,
+      replyBy: saved.duplicate ? 'model' : 'worker',
+      replyMatches: stored.content.trim() === responseText.trim(),
+    };
   }
 
   private async expectStored(id: number, direction: MessageDirection) {

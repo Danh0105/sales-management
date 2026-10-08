@@ -101,15 +101,21 @@ function setup(
     ),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const candidateService = {
+    aiFindOrCreate: jest
+      .fn()
+      .mockResolvedValue({ outcome: 'CREATED', candidate: { id: 8 } }),
+  };
   const worker = new RecruitmentChannelWorker(
     { get: () => undefined } as any,
     queue as any,
     conversations as any,
+    candidateService as any,
     candidates as any,
     messages as any,
     audit as any,
   );
-  return { worker, queue, conversations, candidates, audit };
+  return { worker, queue, conversations, candidates, candidateService, audit };
 }
 
 describe('RecruitmentChannelWorker.process', () => {
@@ -161,10 +167,16 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('thành công: lưu tin đến/đi canonical rồi complete (outbox + PROCESSED) với bản đã lưu', async () => {
+  it('thành công: tin đến lưu TRƯỚC lượt model, tin đi sau; complete (outbox + PROCESSED) với bản đã lưu', async () => {
     const { worker, queue, conversations } = setup();
     await worker.process(event(), 'w1:abc', CONFIG);
 
+    expect(conversations.saveMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchSpy.mock.invocationCallOrder[0],
+    );
+    expect(
+      conversations.saveMessage.mock.invocationCallOrder[1],
+    ).toBeGreaterThan(fetchSpy.mock.invocationCallOrder[0]);
     expect(conversations.saveMessage).toHaveBeenNthCalledWith(1, {
       candidateId: 7,
       channel: 'ZALO',
@@ -191,11 +203,11 @@ describe('RecruitmentChannelWorker.process', () => {
     });
     expect(queue.fail).not.toHaveBeenCalled();
     expect(logs.join('\n')).toMatch(
-      /result=PROCESSED outbox=5 inboundBy=worker replyBy=worker replyMatches=true/,
+      /result=PROCESSED outbox=5 inbound=new replyBy=worker replyMatches=true/,
     );
   });
 
-  it('model đã lưu cả hai (retry sau crash): outbox gửi bản canonical đã lưu, không phải câu mới', async () => {
+  it('retry sau crash (tin đến + tin đi đã có): outbox gửi bản canonical đã lưu, không phải câu mới', async () => {
     const { worker, queue } = setup({
       inboundDuplicate: true,
       replyDuplicate: true,
@@ -211,11 +223,11 @@ describe('RecruitmentChannelWorker.process', () => {
       }),
     );
     expect(logs.join('\n')).toMatch(
-      /inboundBy=model replyBy=model replyMatches=false/,
+      /inbound=existing replyBy=model replyMatches=false/,
     );
   });
 
-  it('OpenAI hết quota (429) → FAILED có lịch thử lại, không PROCESSED, không đụng hội thoại', async () => {
+  it('OpenAI hết quota (429) → FAILED có lịch thử lại, không PROCESSED, không có tin đi', async () => {
     fetchSpy.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -234,7 +246,11 @@ describe('RecruitmentChannelWorker.process', () => {
       4000,
     );
     expect(queue.complete).not.toHaveBeenCalled();
-    expect(conversations.saveMessage).not.toHaveBeenCalled();
+    // Chỉ tin đến (idempotent) — không có tin đi nào cho lượt lỗi.
+    expect(conversations.saveMessage).toHaveBeenCalledTimes(1);
+    expect(conversations.saveMessage.mock.calls[0][0].direction).toBe(
+      'INBOUND',
+    );
   });
 
   it('OpenClaw 5xx → thử lại', async () => {
@@ -274,19 +290,35 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('model không nhận diện ứng viên → lỗi lượt (thử lại), không complete', async () => {
-    const { worker, queue } = setup({ candidate: null });
+  it('người gửi mới: worker tạo ứng viên theo đúng (OA, người gửi) trước lượt model', async () => {
+    const { worker, queue, conversations, candidateService } = setup({
+      candidate: null,
+    });
     await worker.process(event(), 'w1:abc', CONFIG);
+    expect(candidateService.aiFindOrCreate).toHaveBeenCalledWith(
+      { source: 'ZALO' },
+      { oaId: 'oa-recruit', userId: SENDER },
+    );
+    expect(conversations.saveMessage.mock.calls[0][0].candidateId).toBe(8);
+    expect(queue.complete).toHaveBeenCalled();
+  });
+
+  it('lưu tin đến lỗi DB → thử lại, KHÔNG gọi OpenClaw', async () => {
+    const { worker, queue, conversations } = setup();
+    conversations.saveMessage
+      .mockReset()
+      .mockRejectedValue(new Error('db down'));
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(queue.fail).toHaveBeenCalledWith(
       expect.anything(),
       'w1:abc',
-      'CANDIDATE_NOT_RESOLVED',
+      'CANONICAL_STORE_FAILED',
       1000,
     );
-    expect(queue.complete).not.toHaveBeenCalled();
   });
 
-  it('hội thoại thuộc ứng viên khác → dừng hẳn (CANONICAL_CONFLICT)', async () => {
+  it('hội thoại thuộc ứng viên khác → dừng hẳn (CANONICAL_CONFLICT), không gọi OpenClaw', async () => {
     const { worker, queue, conversations } = setup();
     conversations.saveMessage
       .mockReset()
@@ -300,6 +332,7 @@ describe('RecruitmentChannelWorker.process', () => {
       'CANONICAL_CONFLICT',
       null,
     );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('event không có nội dung → dead-letter, không gọi OpenClaw', async () => {
