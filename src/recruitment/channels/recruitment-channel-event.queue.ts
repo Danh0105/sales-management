@@ -205,10 +205,10 @@ export class RecruitmentChannelEventQueue {
     const rows = returnedRows(
       await this.dataSource.query(
         `UPDATE "recruitment_channel_events"
-       SET status = 'FAILED', last_error_code = $3, lease_until = NULL,
+       SET status = 'FAILED', last_error_code = $3::varchar, lease_until = NULL,
            next_attempt_at = CASE WHEN $4::int IS NULL THEN NULL
                                   ELSE now() + $4::int * interval '1 millisecond' END,
-           failure_code = CASE WHEN $4::int IS NULL THEN $3 ELSE NULL END,
+           failure_code = CASE WHEN $4::int IS NULL THEN $3::varchar ELSE NULL END,
            updated_at = now()
        WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
        RETURNING id`,
