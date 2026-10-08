@@ -33,10 +33,10 @@ Zalo OA tuyển dụng
 | P3-2 | Backend: cột `zalo_oa_id` + unique (OA, zaloUserId) — migration review, không synchronize; API AI nhận header subject, chặn truy cập hồ sơ không thuộc subject. Plugin gửi subject từ session key, bỏ `zaloUserId` khỏi tham số model | **DONE** staging: `subject-acceptance.sh` 38/38, tool-e2e 20/20 |
 | P3-3 | Webhook nhận event: chữ ký + gắn OA theo cấu hình + chuẩn hoá + chống trùng nguyên tử (`recruitment_channel_events`, migration `1792000000000`) + ACK. **Không** gọi OpenClaw, **không** gửi tin Zalo | **DONE** staging: `zalo-webhook-acceptance.sh` 54/54 ×2 (55/55 sau P3-4) |
 | P3-4 | Inbox bền (nội dung tin tạm, xoá khi xong, tối đa 7 ngày) → worker tuần tự theo người gửi → OpenClaw (session tin cậy) → hội thoại canonical → outbox `PENDING` (migration `1792100000000`). **Không** gửi tin Zalo | **DONE** staging: `channel-worker-acceptance.sh` 53/53 ×2 |
-| P3-5 | Outbox → Zalo Send API của OA tuyển dụng: kill switch, claim/lease/fencing theo người nhận, kiểm trước khi gửi, `dispatched_at`, RETRY/UNKNOWN/DEAD_LETTER, kho token riêng mã hoá + refresh có khoá, redact sau SENT (migration `1792200000000`). Chỉ Zalo GIẢ trên staging | `zalo-outbound-acceptance.sh` 41/41 (Zalo giả) |
-| P3-6 | Human handoff / takeover / báo HR thật / đối soát UNKNOWN / điều khiển vận hành | — |
+| P3-5 | Outbox → Zalo Send API của OA tuyển dụng: kill switch, claim/lease/fencing theo người nhận, kiểm trước khi gửi, `dispatched_at`, RETRY/UNKNOWN/DEAD_LETTER, kho token riêng mã hoá + refresh có khoá, redact sau SENT (migration `1792200000000`). Chỉ Zalo GIẢ trên staging | **DONE** staging: `zalo-outbound-acceptance.sh` 41/41 ×5 |
+| P3-6 | Điều khiển hội thoại (AI_ACTIVE/AI_PAUSED/HUMAN_TAKEOVER/CLOSED) do backend/worker cưỡng chế, HR tiếp quản + gửi tin qua outbox, trả lại AI, đóng, fencing `control_version` khi tiếp quản giữa lượt AI, cảnh báo HR bền, đối soát UNKNOWN, API vận hành (migration `1792300000000`) | `channel-control-acceptance.sh` 44/44 ×2 |
+| P3-7 | OA thật (tài khoản test) → shadow mode → rollout production có kiểm soát | — |
 | P3-6 | E2E staging: webhook giả có chữ ký thật + mock API Zalo; chạy lại A/B/C/isolation qua webhook; thêm test tấn công (ứng viên tự khai id người khác / prompt injection) | report như Phase 2 |
-| P3-7 | OA thật với tài khoản test (cần credentials), rồi cổng production: key prod riêng, `RECRUITMENT_AI_ENABLED`, thông báo HR, rollback — deploy 3010/3011 cần duyệt riêng | — |
 
 ## Cần từ phía KIDO trước P3-7
 
@@ -128,3 +128,46 @@ dispatch — **không bao giờ tự gửi lại**) | `DEAD_LETTER` (từ chối
 quá 7 ngày). Cấp token ban đầu: `RecruitmentZaloCredentialStore.saveInitial` (staging:
 `staging/seed-zalo-credentials.js`). Trước khi bật sender ở môi trường có dữ liệu cũ:
 `scripts/outbox-fixture-cleanup.sh` (chỉ staging).
+
+## Điều khiển hội thoại & vận hành (P3-6)
+
+Trạng thái hiệu lực (worker kiểm SAU khi lưu tin đến, TRƯỚC khi gọi OpenClaw — không phó mặc skill):
+
+| Trạng thái | Nguồn | Tin đến |
+|---|---|---|
+| `AI_ACTIVE` | `control_mode` = AI_ACTIVE, không gì chặn | lưu → OpenClaw → outbox |
+| `AI_PAUSED` | suy ra: handoff mở / hồ sơ `aiPaused`·`NEEDS_HR_REVIEW` / ứng viên dừng AI | lưu, KHÔNG gọi AI, cảnh báo tin-chờ |
+| `HUMAN_TAKEOVER` | `control_mode` (HR chọn) | lưu, KHÔNG gọi AI, cảnh báo tin-chờ |
+| `CLOSED` | `control_mode` (HR chọn) | lưu, KHÔNG gọi AI, cảnh báo tin-chờ |
+
+Mỗi thao tác HR khoá dòng hội thoại và tăng `control_version`; transaction ghi kết quả của worker đọc
+lại version (`FOR SHARE`) — HR tiếp quản trong lúc OpenClaw chạy thì câu trả lời AI bị bỏ (event
+`DISCARDED_CONTROL_CHANGED`, tin AI gắn `metadata.delivery`), không bao giờ vào outbox. Handoff do
+chính lượt AI mở không chặn câu trả lời của lượt đó (chỉ version do HR đổi mới chặn).
+
+Chạy lại sau crash: worker ghi `ai_control_version` lên event TRƯỚC khi gọi OpenClaw. Lần thử sau của
+một lượt đã bắt đầu chỉ bị chặn khi HR đổi chế độ/version; tin đi của lượt đã có trong hội thoại thì
+gửi đúng bản đó, không gọi OpenClaw lần hai; chưa có thì chạy lại lượt dưới version cũ. (Tìm ra khi
+regression P3-4 lượt thật: lượt đầu tự mở handoff SPECIAL_CASE rồi mất response — bản trước bỏ qua
+lần thử lại và câu trả lời đã lưu không bao giờ được gửi.)
+
+API (JWT; đọc: `RECRUITMENT_VIEW_ROLES`; thao tác: `RECRUITMENT_TAKEOVER_ROLES` /
+`RECRUITMENT_OPERATIONS_ROLES` — hiện = `nhansu`; audit bằng nhân viên thật):
+
+- `GET /recruitment/conversations/:id/control`
+- `POST /recruitment/conversations/:id/takeover | resume-ai | close`
+- `POST /recruitment/conversations/:id/messages {content, clientMessageId}` — tin HR canonical + đúng
+  một outbox `HR_MESSAGE`; đang AI thì tự chuyển HUMAN_TAKEOVER; idempotent theo `clientMessageId`;
+  `activity_log` của request này không chép body.
+- `GET /recruitment/operations/outbox?status=UNKNOWN`
+- `POST /recruitment/operations/outbox/:id/mark-sent | retry {confirmDuplicateRisk: true} | dead-letter`
+  — chỉ từ UNKNOWN, idempotent; mark-sent không kết nối mạng; retry lấy lại nội dung từ tin canonical.
+- `GET /recruitment/operations/handoffs`, `GET /recruitment/operations/alerts`,
+  `POST /recruitment/operations/alerts/:id/acknowledge`
+
+Cảnh báo `recruitment_hr_alerts` (unique `type` + `source_key`, chỉ metadata): CANDIDATE_REQUESTED_HUMAN,
+AI_POLICY_HANDOFF (`handoff:<id>`), CANDIDATE_MESSAGE_WAITING (`conversation:<id>:v<version>`),
+OUTBOUND_UNKNOWN / OUTBOUND_DEAD_LETTER (`outbox:<id>`), CHANNEL_EVENT_DEAD_LETTER (`event:<id>`),
+REPEATED_AI_FAILURE (`ai:<OA>:<giờ UTC>`), REFRESH_OUTCOME_UNKNOWN (`credential:<OA>:v<version>`).
+Tạo bằng `raise()` (trong transaction nơi gọi) hoặc `sweep()` định kỳ trong worker/sender. Chưa có kênh
+đẩy thông báo thật (push/email) — đọc qua API.
