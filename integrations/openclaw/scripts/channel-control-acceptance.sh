@@ -1,7 +1,8 @@
 #!/bin/bash
 # Acceptance P3-6 — điều khiển hội thoại (AI_ACTIVE / AI_PAUSED / HUMAN_TAKEOVER / CLOSED),
 # tin HR qua outbox, trả lại AI, đóng, tiếp quản giữa lượt AI, đối soát outbox UNKNOWN,
-# cảnh báo HR, phân quyền, audit — trên staging (PostgreSQL thật), OpenClaw GIẢ
+# cảnh báo HR, phân quyền, audit — và P3-6.5: HR tiếp quản chặn mọi tin AI chưa dispatch
+# (mục 11) — trên staging (PostgreSQL thật), OpenClaw GIẢ
 # (staging/mock-openclaw.js) + Zalo GIẢ (staging/fake-zalo.js). API HR gọi bằng tài khoản
 # test thật (đăng nhập /auth/login; mật khẩu ngẫu nhiên mỗi lần chạy, truyền qua stdin).
 #
@@ -74,11 +75,19 @@ ob() { sql "select $2 from recruitment_channel_outbox where id = $1"; }
 alerts_for() { sql "select count(*) from recruitment_hr_alerts where type = '$1' and source_key = '$2'"; }
 conv_of() { sql "select conversation_id from recruitment_channel_events where channel_account_id = '$OA' and provider_message_id = '$1'"; }
 wait_event() { wait_sql "${2:-30}" "select status = 'PROCESSED' from recruitment_channel_events where channel_account_id = '$OA' and provider_message_id = '$1'" || true; }
+ai_ob() { sql "select o.id from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.channel_account_id = '$OA' and e.provider_message_id = '$1'"; }
+ob_text() { sql "select m.content from recruitment_messages m join recruitment_channel_outbox o on o.recruitment_message_id = m.id where o.id = $1"; }
+conv_ver() { sql "select control_version from recruitment_conversations where id = $1"; }
+audit_ctx() { sql "select count(*) || '|' || coalesce(string_agg(success::text || '|' || (context #>> '$3'), ','), '-') from activity_log where method = '$1' and path = '$2'"; } # audit_ctx <action> <path> <jsonpath {a,b}>
+sender_stop() { docker stop "$S" >/dev/null; }
+release_hold() { sql "select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'p365-hold'" >/dev/null; }
+sender_start() { docker start "$S" >/dev/null; wait_http 3023 /recruitment/ai/jobs/active; }
 hr_send() { # hr_send <conv> <clientId> <text> → id outbox
   local out; out=$(hr hr POST "/recruitment/conversations/$1/messages" "{\"content\":\"$3\",\"clientMessageId\":\"$2\"}")
   jq_get "$out" outboxId
 }
 cleanup() {
+  release_hold 2>/dev/null || true
   docker rm -f "$MOCK" "$W" "$FAKE" "$S" >/dev/null 2>&1 || true
   sql "delete from employee where id in (${HR_ID:-0}, ${DIR_ID:-0}, ${SALES_ID:-0})" >/dev/null 2>&1 || true
 }
@@ -314,6 +323,102 @@ wait_sql 20 "select status = 'SENT' from recruitment_channel_outbox where id = $
 same "16. OAuth hồi phục → refresh xong → tin giao đúng 1 lần (các lần trước chỉ bị Zalo từ chối -216 vì token cũ)" \
   "$(ob "$U7" status)|$(fz_delivery "$U7_T")" "SENT|1/0"
 
+echo "== 11. P3-6.5 — HR tiếp quản chặn mọi tin AI chưa dispatch"
+# (a) AI reply PENDING → takeover → sender: 0 request; HR_MESSAGE sau đó vẫn gửi
+F="c${RUN_ID}f"
+send_in "p365-$RUN_ID-f1" "$F" "Chào bạn"
+wait_event "p365-$RUN_ID-f1"
+CONV_F=$(conv_of "p365-$RUN_ID-f1")
+wait_sql 20 "select count(*) = 1 and bool_and(o.status = 'SENT') from recruitment_channel_outbox o where o.external_recipient_id = '$F'" || true
+sender_stop
+send_in "p365-$RUN_ID-f2" "$F" "Mình muốn ứng tuyển vị trí bán hàng"
+wait_event "p365-$RUN_ID-f2"
+OB_F2=$(ai_ob "p365-$RUN_ID-f2"); F2_T=$(ob_text "$OB_F2")
+same "P3-6.5 a. tin AI nằm PENDING (sender dừng), version lúc xếp hàng = version hội thoại" "$(ob "$OB_F2" "status || '/' || control_version")" "PENDING/$(conv_ver "$CONV_F")"
+T=$(hr hr POST "/recruitment/conversations/$CONV_F/takeover")
+same "P3-6.5 a. takeover báo tin AI chưa dispatch sẽ bị chặn, không có tin nào đã đi" "$(jq_get "$T" aiOutbound.willBeSuppressed)|$(jq_get "$T" aiOutbound.alreadyDispatched)" "[$OB_F2]|[]"
+T_HR_F="Nhân sự KIDO đây, mình hỗ trợ bạn tiếp nhé run $RUN_ID"
+OB_HR_F=$(hr_send "$CONV_F" "hrf-$RUN_ID-1" "$T_HR_F")
+sender_start
+wait_sql 30 "select status = 'SENT' from recruitment_channel_outbox where id = $OB_HR_F" || true
+same "P3-6.5 a. PENDING → takeover → sender: SUPPRESSED (CONTROL_HUMAN_TAKEOVER), bản sao xoá, chưa từng dispatch, Zalo 0 request" \
+  "$(ob "$OB_F2" "status || '/' || last_error_code || '/' || (message_text is null) || '/' || (dispatched_at is null)")|$(fz_count "$F2_T")" "SUPPRESSED/CONTROL_HUMAN_TAKEOVER/true/true|0"
+same "P3-6.5 a. tin AI canonical vẫn còn, đánh dấu không gửi; audit CHANNEL_OUTBOX_SUPPRESSED (chính sách, network=false)" \
+  "$(sql "select metadata->>'delivery' from recruitment_messages m join recruitment_channel_outbox o on o.recruitment_message_id = m.id where o.id = $OB_F2")|$(audit_ctx CHANNEL_OUTBOX_SUPPRESSED "/recruitment-channel-outbox/$OB_F2" '{network}')" \
+  "SUPPRESSED_CONTROL_CHANGED|1|true|false"
+same "P3-6.5 d. HR_MESSAGE lúc HUMAN_TAKEOVER → gửi bình thường (tin AI bị chặn không chặn hàng)" "$(ob "$OB_HR_F" status)|$(fz_count "$T_HR_F")" "SENT|1"
+
+# (e) trả lại AI → tin AI mới gửi bình thường; tin cũ vẫn bị chặn
+R=$(hr hr POST "/recruitment/conversations/$CONV_F/resume-ai" '{}')
+send_in "p365-$RUN_ID-f3" "$F" "Vâng, mình hỏi tiếp về ca làm"
+wait_event "p365-$RUN_ID-f3"
+OB_F3=$(ai_ob "p365-$RUN_ID-f3")
+wait_sql 20 "select status = 'SENT' from recruitment_channel_outbox where id = $OB_F3" || true
+same "P3-6.5 e. resume AI → tin AI mới (version mới) gửi đúng 1 lần; tin AI cũ vẫn SUPPRESSED, 0 request" \
+  "$(jq_get "$R" state)|$(ob "$OB_F3" "status || '/' || control_version")|$(fz_count "$(ob_text "$OB_F3")")|$(ob "$OB_F2" status)|$(fz_count "$F2_T")" \
+  "AI_ACTIVE|SENT/$(conv_ver "$CONV_F")|1|SUPPRESSED|0"
+
+# (f) takeover rồi trả lại AI TRƯỚC khi sender chạy → version đổi → vẫn chặn
+sender_stop
+send_in "p365-$RUN_ID-f4" "$F" "Lương khởi điểm thế nào ạ"
+wait_event "p365-$RUN_ID-f4"
+OB_F4=$(ai_ob "p365-$RUN_ID-f4"); V_F4=$(ob "$OB_F4" control_version)
+hr hr POST "/recruitment/conversations/$CONV_F/takeover" >/dev/null
+hr hr POST "/recruitment/conversations/$CONV_F/resume-ai" '{}' >/dev/null
+sender_start
+wait_sql 30 "select status <> 'PENDING' from recruitment_channel_outbox where id = $OB_F4" || true
+same "P3-6.5 f. hội thoại lại AI_ACTIVE nhưng version đổi ($V_F4 → $(conv_ver "$CONV_F")) → SUPPRESSED (CONTROL_VERSION_CHANGED), 0 request" \
+  "$(ob "$OB_F4" "status || '/' || last_error_code")|$(fz_count "$(ob_text "$OB_F4")")" "SUPPRESSED/CONTROL_VERSION_CHANGED|0"
+
+# (b) SENDING, chưa dispatch → takeover → chặn. Token sắp hết hạn → sender refresh TRƯỚC
+#     dispatch; một phiên psql giữ khoá dòng credential (refresh cần FOR UPDATE) nên
+#     sender đứng ngay trước cửa kiểm — không phụ thuộc timeout, không làm lệch chuỗi token.
+G="c${RUN_ID}g"
+send_in "p365-$RUN_ID-g1" "$G" "Chào bạn"
+wait_event "p365-$RUN_ID-g1"
+CONV_G=$(conv_of "p365-$RUN_ID-g1")
+wait_sql 20 "select count(*) = 1 and bool_and(status = 'SENT') from recruitment_channel_outbox where external_recipient_id = '$G'" || true
+sql "update recruitment_zalo_credentials set access_expires_at = now() where oa_id = '$OA'" >/dev/null
+"${DC[@]}" exec -T -e PGAPPNAME=p365-hold staging-db psql -U postgres -d sales_db_staging \
+  -c "BEGIN; SELECT 1 FROM recruitment_zalo_credentials WHERE oa_id = '$OA' FOR UPDATE; SELECT pg_sleep(30); COMMIT;" >/dev/null 2>&1 &
+HOLD=$!
+wait_sql 10 "select count(*) = 1 from pg_stat_activity where application_name = 'p365-hold' and state = 'active'" || true
+send_in "p365-$RUN_ID-g2" "$G" "Mình muốn hỏi lịch phỏng vấn"
+wait_sql 20 "select o.status = 'SENDING' from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = 'p365-$RUN_ID-g2'" || true
+OB_G2=$(ai_ob "p365-$RUN_ID-g2")
+AT_TAKEOVER=$(ob "$OB_G2" "status || '/' || (dispatched_at is null)")
+T=$(hr hr POST "/recruitment/conversations/$CONV_G/takeover")
+release_hold; wait "$HOLD" 2>/dev/null || true
+wait_sql 20 "select status not in ('PENDING', 'SENDING') from recruitment_channel_outbox where id = $OB_G2" || true
+same "P3-6.5 b. SENDING chưa dispatch (đang refresh token) → takeover → SUPPRESSED, Zalo 0 request" \
+  "$AT_TAKEOVER|$(jq_get "$T" aiOutbound.willBeSuppressed)|$(ob "$OB_G2" "status || '/' || last_error_code || '/' || (dispatched_at is null)")|$(fz_count "$(ob_text "$OB_G2")")" \
+  "SENDING/true|[$OB_G2]|SUPPRESSED/CONTROL_HUMAN_TAKEOVER/true|0"
+
+# (c) đã dispatch → takeover → không huỷ giả, không gửi lại giả; audit ghi rõ
+H="c${RUN_ID}h"
+send_in "p365-$RUN_ID-h1" "$H" "Chào bạn"
+wait_event "p365-$RUN_ID-h1"
+CONV_H=$(conv_of "p365-$RUN_ID-h1")
+wait_sql 20 "select count(*) = 1 and bool_and(status = 'SENT') from recruitment_channel_outbox where external_recipient_id = '$H'" || true
+fz /__mode "{mode:'hang',times:1,then:{mode:'ok'}}"
+send_in "p365-$RUN_ID-h2" "$H" "Công ty ở quận nào ạ"
+wait_sql 20 "select o.dispatched_at is not null from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = 'p365-$RUN_ID-h2'" || true
+OB_H2=$(ai_ob "p365-$RUN_ID-h2"); H2_T=$(ob_text "$OB_H2")
+T=$(hr hr POST "/recruitment/conversations/$CONV_H/takeover")
+wait_sql 20 "select status = 'UNKNOWN' from recruitment_channel_outbox where id = $OB_H2" || true
+timeout 3 tail -f /dev/null || true
+same "P3-6.5 c. đã dispatch → takeover: báo 'đã đi, không thu hồi được'; dòng giữ kết quả thật (UNKNOWN), không SUPPRESSED, Zalo đúng 1 request" \
+  "$(jq_get "$T" aiOutbound.alreadyDispatched)|$(jq_get "$T" aiOutbound.willBeSuppressed)|$(ob "$OB_H2" "status || '/' || (dispatched_at is not null)")|$(fz_count "$H2_T")" \
+  "[$OB_H2]|[]|UNKNOWN/true|1"
+same "P3-6.5 c. audit CONVERSATION_TAKEOVER ghi tin AI đã đi trước khi tiếp quản" \
+  "$(audit_ctx CONVERSATION_TAKEOVER "/recruitment-conversations/$CONV_H" '{aiOutbound,alreadyDispatched}')|$(audit_ctx CONVERSATION_TAKEOVER "/recruitment-conversations/$CONV_H" '{aiOutbound,willBeSuppressed}')" "1|true|[$OB_H2]|1|true|[]"
+R=$(hr hr POST "/recruitment/operations/outbox/$OB_H2/retry" '{"confirmDuplicateRisk":true}')
+wait_sql 20 "select status not in ('PENDING', 'SENDING', 'UNKNOWN') from recruitment_channel_outbox where id = $OB_H2" || true
+same "P3-6.5 c. vận hành RETRY tin AI đó lúc HUMAN_TAKEOVER → cửa kiểm vẫn chặn: SUPPRESSED, Zalo vẫn 1 request" \
+  "$(status_of "$R")|$(ob "$OB_H2" "status || '/' || last_error_code")|$(fz_count "$H2_T")" "200|SUPPRESSED/CONTROL_HUMAN_TAKEOVER|1"
+same "P3-6.5 tin bị chặn không gây cảnh báo HR (đúng chính sách, không phải lỗi gửi)" \
+  "$(sql "select count(*) from recruitment_hr_alerts where outbox_id in ($OB_F2, $OB_F4, $OB_G2) and created_at >= '$T0'")" 0
+
 echo "== 10. Audit / log / OA giáo viên"
 LEAK_SQL="select count(*) from activity_log where \"createdAt\" >= '$T0' and (coalesce(body::text,'') || coalesce(context::text,'') || coalesce(\"beforeData\"::text,'') || coalesce(\"afterData\"::text,'') || coalesce(changes::text,'')) ~ '(run $RUN_ID|chiều nay nhé|Mock đã nhận|Tôi muốn gặp|cảm ơn chị)'"
 same "17. activity_log của run: không nội dung tin HR/ứng viên/AI" "$(sql "$LEAK_SQL")" 0
@@ -321,7 +426,7 @@ same "17. request gửi tin HR (kể cả bị 409) vẫn có dấu vết ai/khi
   "$(sql "select count(*) >= 3 and bool_and(body::text like '%_redacted%' and \"actorId\" = $HR_ID) from activity_log where path = '/recruitment/conversations/$CONV_A/messages'")" t
 same "17. cảnh báo HR chỉ chứa metadata (không nội dung tin)" \
   "$(sql "select count(*) from recruitment_hr_alerts where created_at >= '$T0' and details::text ~ '(run $RUN_ID|Mock đã nhận|Tôi muốn gặp)'")" 0
-LEAK=$( { docker logs "$W" 2>&1; docker logs "$S" 2>&1; } | grep -cF -f <(printf '%s\n' "$A" "$B" "$CC" "Tôi muốn gặp" "run $RUN_ID"; sed -n 's/^STAGING_ZALO_APP_SECRET=//p;s/^OPENCLAW_GATEWAY_TOKEN=//p' "$ENV_FILE") || true)
+LEAK=$( { docker logs "$W" 2>&1; docker logs "$S" 2>&1; } | grep -cF -f <(printf '%s\n' "$A" "$B" "$CC" "$F" "$G" "$H" "Tôi muốn gặp" "run $RUN_ID"; sed -n 's/^STAGING_ZALO_APP_SECRET=//p;s/^OPENCLAW_GATEWAY_TOKEN=//p' "$ENV_FILE") || true)
 same "17. log worker/sender: 0 id người gửi, 0 nội dung, 0 secret" "$LEAK" 0
 same "18. token OA giáo viên không đổi" "$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || access_token || refresh_token, ',' order by id)), '-') from zalo_tokens")" "$TEACHER_BEFORE"
 if git -C "$REPO" diff --quiet master HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "18. code OA giáo viên không đổi so với master"; else ko "18. code OA giáo viên không đổi so với master"; fi

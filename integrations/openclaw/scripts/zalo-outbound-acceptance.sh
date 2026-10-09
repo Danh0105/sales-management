@@ -65,7 +65,8 @@ print(','.join(e['result'] or '?' for e in json.load(sys.stdin) if e['textSha'] 
 ob() { sql "select $2 from recruitment_channel_outbox where id = $1"; }
 text_of() { echo "Tin nhắn $2 cho $1 — run $RUN_ID"; }
 # mk <người nhận> <khoá> [OA] [người nhận của hội thoại] [trạng thái] → id outbox. Dựng đủ chuỗi
-# tin cậy: ứng viên (OA, người) → hội thoại ZALO <OA>:<người> → event đã xử lý → tin đi AI → outbox.
+# tin cậy: ứng viên (OA, người) → hội thoại ZALO <OA>:<người> → event đã xử lý → tin đi AI → outbox
+# (kèm version điều khiển hội thoại lúc xếp hàng, như worker — thiếu thì cửa kiểm P3-6.5 chặn).
 mk() {
   local r=$1 key=$2 oa=${3:-$OA} conv=${4:-$1} status=${5:-PENDING}
   local text; text=$(text_of "$r" "$key")
@@ -76,7 +77,7 @@ mk() {
      INSERT INTO recruitment_conversations (candidate_id, channel, external_conversation_id)
      SELECT id, 'ZALO', '$oa:$conv' FROM cand
      ON CONFLICT (channel, external_conversation_id) WHERE external_conversation_id IS NOT NULL
-     DO UPDATE SET updated_at = now() RETURNING id),
+     DO UPDATE SET updated_at = now() RETURNING id, control_version),
    ev AS (
      INSERT INTO recruitment_channel_events (channel, channel_account_id, dedupe_key, external_sender_id,
        event_type, provider_message_id, status, payload_hash, processed_at)
@@ -86,12 +87,12 @@ mk() {
      INSERT INTO recruitment_messages (conversation_id, external_message_id, sender_type, direction, content)
      SELECT id, 'p35-$RUN_ID-$key-reply', 'AI', 'OUTBOUND', '$text' FROM conv RETURNING id)
    INSERT INTO recruitment_channel_outbox (source_event_id, channel, channel_account_id, external_recipient_id,
-     message_text, recruitment_message_id, status, lease_owner, lease_until, attempt_count)
+     message_text, recruitment_message_id, status, lease_owner, lease_until, attempt_count, control_version)
    SELECT ev.id, 'ZALO', '$oa', '$r', '$text', msg.id, '$status',
      CASE WHEN '$status' = 'SENDING' THEN 'dead-host:1:dead00:nonce' END,
      CASE WHEN '$status' = 'SENDING' THEN now() - interval '1 minute' END,
-     CASE WHEN '$status' = 'SENDING' THEN 1 ELSE 0 END
-   FROM ev, msg RETURNING id" | head -1
+     CASE WHEN '$status' = 'SENDING' THEN 1 ELSE 0 END, conv.control_version
+   FROM ev, msg, conv RETURNING id" | head -1
 }
 start_sender() { # start_sender <tên> <cổng> [-e ...]
   local name=$1 port=$2; shift 2
