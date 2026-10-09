@@ -25,6 +25,8 @@ OA=stg-recruit-oa
 MOCK="kido-p34-mock-$RUN_ID"
 W1="kido-p34-w1-$RUN_ID"
 W2="kido-p34-w2-$RUN_ID"
+# Code OA giáo viên được so với bản đang chạy production (tag bất biến), không phải master.
+TEACHER_BASELINE="${TEACHER_BASELINE:-production-20261009-zalo-hardening}"
 PASS=0
 FAIL=0
 
@@ -362,7 +364,7 @@ fi
 echo "== D. Regression OA giáo viên"
 RT=$(node_in_api "fetch('http://localhost:3021/zalo/oa/webhook',{method:'POST',headers:{'content-type':'application/json'},body:'{\"event_name\":\"user_send_text\"}'}).then(r=>console.log(r.status))")
 same "17. /zalo/oa/webhook không chữ ký → 403 như trước" "$RT" 403
-if git -C "$REPO" diff --quiet master HEAD -- src/zalo-oa src/main.ts; then ok "17. src/zalo-oa và main.ts không đổi so với master"; else ko "17. src/zalo-oa và main.ts không đổi so với master"; fi
+if git -C "$REPO" diff --quiet "$TEACHER_BASELINE" HEAD -- src/zalo-oa src/main.ts; then ok "17. src/zalo-oa và main.ts không đổi so với production baseline"; else ko "17. src/zalo-oa và main.ts không đổi so với production baseline"; fi
 JEST=$(cd "$REPO" && npx jest src/zalo-oa 2>&1 | grep -E '^Tests:' || true)
 if echo "$JEST" | grep -qE 'Tests: +[0-9]+ passed, [0-9]+ total' && ! echo "$JEST" | grep -q failed; then ok "17. unit test OA giáo viên: $JEST"; else ko "17. unit test OA giáo viên" "$JEST"; fi
 same "không có tin Zalo nào được gửi: outbox của run chỉ PENDING, chưa SENT" \

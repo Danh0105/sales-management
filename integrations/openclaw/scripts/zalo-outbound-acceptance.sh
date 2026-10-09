@@ -21,6 +21,8 @@ OA=stg-recruit-oa
 Z="z${RUN_ID}"
 FAKE="kido-p35-zalo-$RUN_ID"; S1="kido-p35-s1-$RUN_ID"; S2="kido-p35-s2-$RUN_ID"
 OFF="kido-p35-off-$RUN_ID"; MOCK="kido-p35-mock-$RUN_ID"; W="kido-p35-w-$RUN_ID"
+# Code OA giáo viên được so với bản đang chạy production (tag bất biến), không phải master.
+TEACHER_BASELINE="${TEACHER_BASELINE:-production-20261009-zalo-hardening}"
 PASS=0
 FAIL=0
 
@@ -332,7 +334,7 @@ LEAK=$( { docker logs "$S1" 2>&1; docker logs "$S2" 2>&1; docker logs "$W" 2>&1;
 same "18. log sender/worker: 0 token, 0 id người nhận, 0 nội dung tin, 0 secret" "$LEAK" 0
 same "19. token + liên kết Zalo của OA giáo viên không đổi" \
   "$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || access_token || refresh_token, ',' order by id)), '-') from zalo_tokens")|$(sql "select count(*) from employee where zalo_user_id is not null")" "$TEACHER_BEFORE"
-if git -C "$REPO" diff --quiet master HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "19. code OA giáo viên (zalo-oa, zalo-token, notify-zalo, main.ts) không đổi so với master"; else ko "19. code OA giáo viên không đổi so với master"; fi
+if git -C "$REPO" diff --quiet "$TEACHER_BASELINE" HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "19. code OA giáo viên (zalo-oa, zalo-token, notify-zalo, main.ts) không đổi so với production baseline"; else ko "19. code OA giáo viên không đổi so với production baseline"; fi
 RT=$(node_in_api "fetch('http://localhost:3021/zalo/oa/webhook',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>console.log(r.status))")
 same "19. /zalo/oa/webhook không chữ ký → 403 như trước" "$RT" 403
 JEST=$(cd "$REPO" && npx jest src/zalo-oa 2>&1 | grep -E '^Tests:' || true)

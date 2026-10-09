@@ -15,6 +15,8 @@ DC=(docker compose --env-file "$ENV_FILE")
 RUN_ID="$(date +%s)"
 OA=stg-recruit-oa
 MOCK="kido-p36-mock-$RUN_ID"; W="kido-p36-w-$RUN_ID"; FAKE="kido-p36-zalo-$RUN_ID"; S="kido-p36-s-$RUN_ID"
+# Code OA giáo viên được so với bản đang chạy production (tag bất biến), không phải master.
+TEACHER_BASELINE="${TEACHER_BASELINE:-production-20261009-zalo-hardening}"
 PASS=0
 FAIL=0
 
@@ -429,7 +431,7 @@ same "17. cảnh báo HR chỉ chứa metadata (không nội dung tin)" \
 LEAK=$( { docker logs "$W" 2>&1; docker logs "$S" 2>&1; } | grep -cF -f <(printf '%s\n' "$A" "$B" "$CC" "$F" "$G" "$H" "Tôi muốn gặp" "run $RUN_ID"; sed -n 's/^STAGING_ZALO_APP_SECRET=//p;s/^OPENCLAW_GATEWAY_TOKEN=//p' "$ENV_FILE") || true)
 same "17. log worker/sender: 0 id người gửi, 0 nội dung, 0 secret" "$LEAK" 0
 same "18. token OA giáo viên không đổi" "$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || access_token || refresh_token, ',' order by id)), '-') from zalo_tokens")" "$TEACHER_BEFORE"
-if git -C "$REPO" diff --quiet master HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "18. code OA giáo viên không đổi so với master"; else ko "18. code OA giáo viên không đổi so với master"; fi
+if git -C "$REPO" diff --quiet "$TEACHER_BASELINE" HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "18. code OA giáo viên không đổi so với production baseline"; else ko "18. code OA giáo viên không đổi so với production baseline"; fi
 JEST=$(cd "$REPO" && npx jest src/zalo-oa 2>&1 | grep -E '^Tests:' || true)
 if echo "$JEST" | grep -qE 'Tests: +[0-9]+ passed, [0-9]+ total' && ! echo "$JEST" | grep -q failed; then ok "18. unit test OA giáo viên: $JEST"; else ko "18. unit test OA giáo viên" "$JEST"; fi
 

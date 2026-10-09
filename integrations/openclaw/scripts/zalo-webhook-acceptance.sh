@@ -19,6 +19,8 @@ ACC="kido-p33-acc-$RUN_ID"
 OTHER="kido-p33-other-$RUN_ID"
 TABLE=recruitment_channel_events
 PARKED=recruitment_channel_events_p33_off
+# Code OA giáo viên được so với bản đang chạy production (tag bất biến), không phải master.
+TEACHER_BASELINE="${TEACHER_BASELINE:-production-20261009-zalo-hardening}"
 PASS=0
 FAIL=0
 
@@ -164,7 +166,7 @@ RT2=$(send 3022 "p33-$RUN_ID-c14" "$A" stg-recruit-oa /zalo/oa/webhook)
 same "14. event ký bằng secret OA tuyển dụng gửi vào webhook giáo viên → 403" "$(jget "$RT2" status)" 403
 same "14. liên kết Zalo nhân viên + token OA giáo viên không đổi" \
   "$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || ':' || zalo_user_id, ',' order by id)), '-') from employee where zalo_user_id is not null")|$(sql "select count(*) from zalo_tokens")" "$LINKED_BEFORE|$TOKENS_BEFORE"
-if git -C "$REPO" diff --quiet master HEAD -- src/zalo-oa src/main.ts; then ok "14. src/zalo-oa và main.ts không đổi so với master"; else ko "14. src/zalo-oa và main.ts không đổi so với master"; fi
+if git -C "$REPO" diff --quiet "$TEACHER_BASELINE" HEAD -- src/zalo-oa src/main.ts; then ok "14. src/zalo-oa và main.ts không đổi so với production baseline"; else ko "14. src/zalo-oa và main.ts không đổi so với production baseline"; fi
 JEST=$(cd "$REPO" && npx jest src/zalo-oa 2>&1 | grep -E '^Tests:' || true)
 if echo "$JEST" | grep -qE 'Tests: +[0-9]+ passed, [0-9]+ total' && ! echo "$JEST" | grep -q failed; then ok "14. unit test OA giáo viên: $JEST"; else ko "14. unit test OA giáo viên" "$JEST"; fi
 
