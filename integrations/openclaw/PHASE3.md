@@ -39,6 +39,18 @@ Zalo OA tuyển dụng
 | P3-7 | OA thật (tài khoản test) → shadow mode → rollout production có kiểm soát | — |
 | P3-6 | E2E staging: webhook giả có chữ ký thật + mock API Zalo; chạy lại A/B/C/isolation qua webhook; thêm test tấn công (ứng viên tự khai id người khác / prompt injection) | report như Phase 2 |
 
+## RELEASE BLOCKER — lineage production (09/10/2026)
+
+Production 3010 + 3011 chạy build `cf7b51c` (tag `production-20261009-zalo-hardening`) = `19c8a18`
+(`chore/wavec-sales-db-roles`: DB credentials qua `DB_USER`, Firebase đọc `FIREBASE_SERVICE_ACCOUNT_PATH`)
++ hardening token OA giáo viên. Commit này **không nằm trên master, cũng không nằm trên
+`feat/openclaw-phase3`**. Trước BẤT KỲ production deploy nào của Phase 3 phải reconcile `cf7b51c`/`19c8a18`
+vào nhánh release chính và dựng release từ đó. **Không** build production từ `c601161` hay `8f9225f`
+(c601161 hard-code `postgres/postgres`; 8f9225f cần file Firebase JSON cũ đã bị xoá — cả hai không boot).
+
+DB production (`sales_db`) mới có bảng Phase 1; schema Phase 2/3 (migration `1791900000000`…`1792500000000`)
+chưa chạy — thuộc đợt production deploy Phase 3 (sau khi reconcile, review migration trên bản clone).
+
 ## Cần từ phía KIDO trước P3-7
 
 - OA tuyển dụng + Zalo app: App ID, App Secret, OA Secret Key, OA ID; access/refresh token ban đầu
