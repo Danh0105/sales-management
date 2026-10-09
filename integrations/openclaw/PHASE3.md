@@ -34,7 +34,8 @@ Zalo OA tuyển dụng
 | P3-3 | Webhook nhận event: chữ ký + gắn OA theo cấu hình + chuẩn hoá + chống trùng nguyên tử (`recruitment_channel_events`, migration `1792000000000`) + ACK. **Không** gọi OpenClaw, **không** gửi tin Zalo | **DONE** staging: `zalo-webhook-acceptance.sh` 54/54 ×2 (55/55 sau P3-4) |
 | P3-4 | Inbox bền (nội dung tin tạm, xoá khi xong, tối đa 7 ngày) → worker tuần tự theo người gửi → OpenClaw (session tin cậy) → hội thoại canonical → outbox `PENDING` (migration `1792100000000`). **Không** gửi tin Zalo | **DONE** staging: `channel-worker-acceptance.sh` 53/53 ×2 |
 | P3-5 | Outbox → Zalo Send API của OA tuyển dụng: kill switch, claim/lease/fencing theo người nhận, kiểm trước khi gửi, `dispatched_at`, RETRY/UNKNOWN/DEAD_LETTER, kho token riêng mã hoá + refresh có khoá, redact sau SENT (migration `1792200000000`). Chỉ Zalo GIẢ trên staging | **DONE** staging: `zalo-outbound-acceptance.sh` 41/41 ×5 |
-| P3-6 | Điều khiển hội thoại (AI_ACTIVE/AI_PAUSED/HUMAN_TAKEOVER/CLOSED) do backend/worker cưỡng chế, HR tiếp quản + gửi tin qua outbox, trả lại AI, đóng, fencing `control_version` khi tiếp quản giữa lượt AI, cảnh báo HR bền, đối soát UNKNOWN, API vận hành (migration `1792300000000`) | `channel-control-acceptance.sh` 44/44 ×2 |
+| P3-6 | Điều khiển hội thoại (AI_ACTIVE/AI_PAUSED/HUMAN_TAKEOVER/CLOSED) do backend/worker cưỡng chế, HR tiếp quản + gửi tin qua outbox, trả lại AI, đóng, fencing `control_version` khi tiếp quản giữa lượt AI, cảnh báo HR bền, đối soát UNKNOWN, API vận hành (migration `1792300000000`) | **DONE** staging: `channel-control-acceptance.sh` 44/44 ×2 |
+| P3-6.5 | Gate trước P3-7: HR tiếp quản chặn mọi tin AI chưa dispatch — cửa kiểm ngay trước `dispatched_at`, trạng thái `SUPPRESSED` (migration `1792500000000`) | **DONE** staging: `channel-control-acceptance.sh` mục 11 — 56/56; regression P3-3 55/55, P3-4 53/53 (lượt thật), P3-5 41/41, tool-e2e 20/20, sim 4/4 (20261009-084551) |
 | P3-7 | OA thật (tài khoản test) → shadow mode → rollout production có kiểm soát | — |
 | P3-6 | E2E staging: webhook giả có chữ ký thật + mock API Zalo; chạy lại A/B/C/isolation qua webhook; thêm test tấn công (ứng viên tự khai id người khác / prompt injection) | report như Phase 2 |
 
@@ -68,8 +69,9 @@ Zalo OA tuyển dụng
 - Refresh token: nếu process chết đúng lúc Zalo đã xoay token mà chưa kịp lưu → refresh token mới bị
   mất, phải cấp lại quyền OA (log `REFRESH_OUTCOME_UNKNOWN`). Không tránh được hoàn toàn phía client.
 - Tin dài hơn `RECRUITMENT_ZALO_MAX_TEXT_LENGTH` (2000) → DEAD_LETTER, chưa tách tin.
-- Backlog (ngoài scope, KHÔNG sửa): `ZaloTokenService` của OA giáo viên `console.log(res.data)` khi
-  refresh → access/refresh token OA giáo viên nằm trong log pm2; refresh không có khoá đồng thời.
+- Gate 1 trước P3-7 (nhánh riêng `security/zalo-teacher-token-hardening`, không trộn vào Phase 3):
+  `ZaloTokenService` của OA giáo viên từng `console.log(res.data)` khi refresh → token OA giáo viên nằm
+  trong log pm2; refresh không có khoá đồng thời. Code sửa xong (82bc161); deploy + xoay token chờ duyệt.
 - Ngữ nghĩa: at-least-once gọi OpenClaw; chết đúng sau khi OpenClaw trả lời thì lượt chạy lại (model
   thấy tin đó hai lần trong session) — tác dụng nghiệp vụ và tin đi vẫn một lần (đã test với lượt thật).
 - Webhook từ chối event Zalo có OA không nằm ở vị trí đã biết (`user_*`→recipient, `oa_*`→sender,
@@ -125,7 +127,7 @@ Trạng thái outbox: `PENDING` → `SENDING` (`dispatched_at` = request có th�
 `SENT` (xoá `message_text`) | `RETRY` (chắc chắn chưa đi: 429, 500–503, lỗi trước khi kết nối, token/credential) |
 `UNKNOWN` (có thể đã tới: mất kết nối/hết giờ sau khi gửi, 504, response không đọc được, lease hết hạn sau
 dispatch — **không bao giờ tự gửi lại**) | `DEAD_LETTER` (từ chối vĩnh viễn, dữ liệu không khớp nguồn tin cậy,
-quá 7 ngày). Cấp token ban đầu: `RecruitmentZaloCredentialStore.saveInitial` (staging:
+quá 7 ngày) | `SUPPRESSED` (tin AI bị chặn trước khi gửi vì HR đổi điều khiển hội thoại — P3-6.5). Cấp token ban đầu: `RecruitmentZaloCredentialStore.saveInitial` (staging:
 `staging/seed-zalo-credentials.js`). Trước khi bật sender ở môi trường có dữ liệu cũ:
 `scripts/outbox-fixture-cleanup.sh` (chỉ staging).
 
@@ -171,3 +173,34 @@ OUTBOUND_UNKNOWN / OUTBOUND_DEAD_LETTER (`outbox:<id>`), CHANNEL_EVENT_DEAD_LETT
 REPEATED_AI_FAILURE (`ai:<OA>:<giờ UTC>`), REFRESH_OUTCOME_UNKNOWN (`credential:<OA>:v<version>`).
 Tạo bằng `raise()` (trong transaction nơi gọi) hoặc `sweep()` định kỳ trong worker/sender. Chưa có kênh
 đẩy thông báo thật (push/email) — đọc qua API.
+
+## HR tiếp quản chặn tin AI chưa gửi (P3-6.5)
+
+Cửa kiểm cuối của sender, NGAY TRƯỚC khi mở kết nối (`RecruitmentChannelOutboxQueue.dispatch`): một
+transaction khoá chia sẻ dòng hội thoại (`FOR SHARE`; thao tác HR giữ `FOR UPDATE`) rồi:
+
+| Dòng outbox | Điều kiện | Kết quả |
+|---|---|---|
+| `AI_REPLY` | `control_mode` = HUMAN_TAKEOVER | `SUPPRESSED` · `CONTROL_HUMAN_TAKEOVER` |
+| `AI_REPLY` | `control_mode` = CLOSED | `SUPPRESSED` · `CONTROL_CLOSED` |
+| `AI_REPLY` | AI_ACTIVE nhưng `control_version` ≠ version lúc xếp hàng (vd. tiếp quản rồi trả lại) | `SUPPRESSED` · `CONTROL_VERSION_CHANGED` |
+| `AI_REPLY` | không có version lúc xếp hàng | `SUPPRESSED` · `CONTROL_VERSION_MISSING` (fail-closed) |
+| `HR_MESSAGE` | mọi chế độ | gửi bình thường |
+| bất kỳ | tin canonical / hội thoại không còn | `DEAD_LETTER` · `CANONICAL_MISSING` |
+
+`SUPPRESSED`: 0 kết nối mạng, xoá bản sao nội dung (CHECK), tin AI canonical giữ nguyên + gắn
+`metadata.delivery = SUPPRESSED_CONTROL_CHANGED`, audit `CHANNEL_OUTBOX_SUPPRESSED` (mã, chế độ, version
+lúc xếp hàng → hiện tại, `network: false`), không cảnh báo HR, trạng thái kết thúc (không chặn hàng của
+người nhận — tin HR phía sau vẫn đi). Chỉ tin AI được `SUPPRESSED` (CHECK). Cửa kiểm chạy lại trước lần
+gửi thứ hai sau khi Zalo từ chối token (lần đầu chắc chắn chưa tới) và cả khi vận hành RETRY một dòng
+UNKNOWN.
+
+`AI_PAUSED` suy ra (handoff mở, hồ sơ chờ HR) KHÔNG chặn tin đã xếp hàng: pause đó thường do chính lượt
+AI tạo ra và câu trả lời của lượt ("mình đã chuyển nhân sự") phải tới ứng viên. Chỉ thao tác tường minh
+của HR (đổi `control_mode` → tăng version) mới chặn.
+
+Đã dispatch trước khi HR tiếp quản → coi như đã tới ứng viên (luồng này không thu hồi tin); dòng giữ kết quả
+thật (SENT/UNKNOWN), không huỷ giả, không gửi lại. `takeover` / `close` / tin HR tự tiếp quản trả về và
+ghi audit `aiOutbound: {alreadyDispatched: [id outbox], willBeSuppressed: [id outbox]}` — danh sách đọc
+trong cùng transaction giữ `FOR UPDATE` nên chính xác với cửa kiểm.
+
