@@ -36,7 +36,7 @@ Zalo OA tuyển dụng
 | P3-5 | Outbox → Zalo Send API của OA tuyển dụng: kill switch, claim/lease/fencing theo người nhận, kiểm trước khi gửi, `dispatched_at`, RETRY/UNKNOWN/DEAD_LETTER, kho token riêng mã hoá + refresh có khoá, redact sau SENT (migration `1792200000000`). Chỉ Zalo GIẢ trên staging | **DONE** staging: `zalo-outbound-acceptance.sh` 41/41 ×5 |
 | P3-6 | Điều khiển hội thoại (AI_ACTIVE/AI_PAUSED/HUMAN_TAKEOVER/CLOSED) do backend/worker cưỡng chế, HR tiếp quản + gửi tin qua outbox, trả lại AI, đóng, fencing `control_version` khi tiếp quản giữa lượt AI, cảnh báo HR bền, đối soát UNKNOWN, API vận hành (migration `1792300000000`) | **DONE** staging: `channel-control-acceptance.sh` 44/44 ×2 |
 | P3-6.5 | Gate trước P3-7: HR tiếp quản chặn mọi tin AI chưa dispatch — cửa kiểm ngay trước `dispatched_at`, trạng thái `SUPPRESSED` (migration `1792500000000`) | **DONE** staging: `channel-control-acceptance.sh` mục 11 — 56/56; regression P3-3 55/55, P3-4 53/53 (lượt thật), P3-5 41/41, tool-e2e 20/20, sim 4/4 (20261009-084551) |
-| P3-7.1 | OA tuyển dụng thật + credential thật: getoa đọc-chỉ, token mã hoá at rest — không webhook/worker/gửi tin | Kỹ thuật đạt 09/10 (report `/opt/kido-recruiter/runs/p371-20261009/report.md`); chờ xác nhận thu hồi quyền cấp nhầm trên OA Kidoedu |
+| P3-7.1 | OA tuyển dụng thật + credential thật: getoa đọc-chỉ, token mã hoá at rest — không webhook/worker/gửi tin | **DONE** 09/10/2026 (report `/opt/kido-recruiter/runs/p371-20261009/report.md`) |
 | P3-7.2…7.7 | Webhook thật (inbound) → worker (outbound tắt) → shadow → HR duyệt gửi → auto-reply giới hạn → production | chưa bắt đầu — cần `RECRUITMENT_ZALO_OA_SECRET_KEY` + reconcile `cf7b51c` |
 | P3-6 | E2E staging: webhook giả có chữ ký thật + mock API Zalo; chạy lại A/B/C/isolation qua webhook; thêm test tấn công (ứng viên tự khai id người khác / prompt injection) | report như Phase 2 |
 
@@ -65,8 +65,10 @@ chưa chạy — thuộc đợt production deploy Phase 3 (sau khi reconcile, re
   `/root/recruitment-oa.credential.json` — đúng cột `recruitment_zalo_credentials`, định dạng
   `zalo-token.crypto` v1 (AES-256-GCM, AAD = oa_id). DB production chưa có schema Phase 2/3 → nạp vào bảng
   ở đợt production deploy Phase 3. Không refresh tới khi sender được bật (P3-7.5).
-- Lần cấp quyền đầu chọn nhầm OA Kidoedu → script từ chối, không lưu gì; quyền app tuyển dụng trên OA
-  Kidoedu phải được thu hồi thủ công ở trang quản trị OA Kidoedu (chỉ app tuyển dụng).
+- Lần cấp quyền đầu chọn nhầm OA Kidoedu → script từ chối, không lưu gì; user đã thu hồi quyền của app
+  tuyển dụng trên OA Kidoedu (09/10, đối chiếu: app tuyển dụng không còn trong "Quản lý liên kết" của
+  Kidoedu). **Lưu ý tên dễ nhầm:** app "ICHI SKILL Chấm Công" trên Kidoedu chính là **app OA giáo viên**
+  (`ZALO_APP_ID` production) — không bao giờ thu hồi; "App kido" là app khác, không thuộc tuyển dụng.
 - Zalo Console đã thử gọi webhook 3 lần (09/10 13:51, 14:11 ×2) → 404: chỉ đăng ký webhook khi receiver
   P3-7.2 đã deploy.
 
