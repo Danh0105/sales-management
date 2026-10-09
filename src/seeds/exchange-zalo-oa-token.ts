@@ -15,6 +15,10 @@ import { Client } from 'pg';
 import axios from 'axios';
 import qs from 'qs';
 import * as dotenv from 'dotenv';
+import {
+    describeHttpError,
+    describeZaloError,
+} from '../zalo-token/zalo-token.service';
 
 dotenv.config();
 
@@ -58,7 +62,11 @@ async function main() {
 
     const { access_token, refresh_token, expires_in } = res.data || {};
     if (!access_token || !refresh_token) {
-        console.error('Zalo không trả về token hợp lệ:', res.data);
+        // Không in body: có thể chứa một phần token.
+        console.error(
+            'Zalo không trả về token hợp lệ:',
+            describeZaloError(res.data),
+        );
         process.exit(1);
     }
 
@@ -79,6 +87,6 @@ async function main() {
 }
 
 main().catch((err) => {
-    console.error('❌ Đổi token thất bại:', err?.response?.data || err.message || err);
+    console.error('❌ Đổi token thất bại:', describeHttpError(err));
     process.exit(1);
 });
