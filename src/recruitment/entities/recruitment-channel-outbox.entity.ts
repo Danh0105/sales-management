@@ -29,8 +29,10 @@ import { RecruitmentMessage } from './recruitment-message.entity';
  * chỉ có một dòng. Nội dung là bản canonical đã nằm trong `recruitment_messages`
  * (`recruitment_message_id`), không phải bản nháp của model.
  *
- * `message_text` chỉ là bản sao để gửi: `SENT` thì bắt buộc NULL (CHECK); trạng thái
- * còn phải gửi (`PENDING`/`SENDING`/`RETRY`) thì bắt buộc có.
+ * `message_text` chỉ là bản sao để gửi: `SENT`/`SUPPRESSED` thì bắt buộc NULL (CHECK);
+ * trạng thái còn phải gửi (`PENDING`/`SENDING`/`RETRY`) thì bắt buộc có.
+ *
+ * `SUPPRESSED` chỉ dành cho tin AI (CHECK): tin HR không bao giờ bị chặn vì HR tiếp quản.
  */
 @Entity('recruitment_channel_outbox')
 @Unique('UQ_recruitment_channel_outbox_source_event', ['sourceEventId'])
@@ -47,7 +49,11 @@ import { RecruitmentMessage } from './recruitment-message.entity';
 )
 @Check(
   'CHK_recruitment_channel_outbox_text_status',
-  `("status" <> 'SENT' OR "message_text" IS NULL) AND ("message_text" IS NOT NULL OR "status" IN ('SENT', 'UNKNOWN', 'DEAD_LETTER'))`,
+  `("status" NOT IN ('SENT', 'SUPPRESSED') OR "message_text" IS NULL) AND ("message_text" IS NOT NULL OR "status" IN ('SENT', 'UNKNOWN', 'DEAD_LETTER', 'SUPPRESSED'))`,
+)
+@Check(
+  'CHK_recruitment_channel_outbox_suppressed_source',
+  `"status" <> 'SUPPRESSED' OR "source_type" = 'AI_REPLY'`,
 )
 export class RecruitmentChannelOutbox {
   @PrimaryGeneratedColumn({

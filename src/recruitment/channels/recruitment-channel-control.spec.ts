@@ -147,13 +147,40 @@ describe('RecruitmentConversationControlService — thao tác HR', () => {
           return [];
         },
       ],
+      [
+        /FROM "recruitment_channel_outbox" o/,
+        () => [
+          { id: 70, dispatched: true },
+          { id: 71, dispatched: false },
+          { id: 72, dispatched: false },
+        ],
+      ],
     ]);
     const { service, audit } = controlService(db);
     await expect(service.takeover(9, HR)).resolves.toMatchObject({
       changed: true,
       state: 'HUMAN_TAKEOVER',
       version: 4,
+      aiOutbound: { alreadyDispatched: [70], willBeSuppressed: [71, 72] },
     });
+    // Tin AI còn trong outbox: đọc trong CÙNG transaction giữ FOR UPDATE, sau khi đổi chế độ.
+    const order = db.calls.map((c) =>
+      /FOR UPDATE OF c/.test(c.sql)
+        ? 'lock'
+        : /control_version = control_version \+ 1/.test(c.sql)
+          ? 'mode'
+          : /FROM "recruitment_channel_outbox" o/.test(c.sql)
+            ? 'outbox'
+            : null,
+    );
+    expect(order.filter(Boolean).slice(0, 3)).toEqual([
+      'lock',
+      'mode',
+      'outbox',
+    ]);
+    expect(db.ran(/FROM "recruitment_channel_outbox" o/)[0].sql).toMatch(
+      /source_type = 'AI_REPLY'/,
+    );
     expect(db.ran(/FOR UPDATE OF c/).length).toBeGreaterThan(0);
     expect(db.ran(/control_version = control_version \+ 1/)[0].params).toEqual([
       9,
@@ -167,6 +194,10 @@ describe('RecruitmentConversationControlService — thao tác HR', () => {
         action: 'CONVERSATION_TAKEOVER',
         entity: 'conversations',
         entityId: 9,
+        context: {
+          version: 4,
+          aiOutbound: { alreadyDispatched: [70], willBeSuppressed: [71, 72] },
+        },
       }),
     );
   });
@@ -282,6 +313,10 @@ describe('RecruitmentConversationControlService.sendHumanMessage', () => {
       [/INSERT INTO "recruitment_messages"/, () => [{ id: 501 }]],
       [/INSERT INTO "recruitment_channel_outbox"/, () => [{ id: 601 }]],
       [/SELECT control_version FROM/, () => [{ control_version: 4 }]],
+      [
+        /FROM "recruitment_channel_outbox" o/,
+        () => [{ id: 600, dispatched: false }],
+      ],
     ]);
     const { service, audit } = controlService(db);
     await expect(service.sendHumanMessage(9, dto, HR)).resolves.toEqual({
@@ -291,7 +326,18 @@ describe('RecruitmentConversationControlService.sendHumanMessage', () => {
       idempotent: false,
       tookOver: true,
       version: 4,
+      aiOutbound: { alreadyDispatched: [], willBeSuppressed: [600] },
     });
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CONVERSATION_TAKEOVER',
+        context: {
+          version: 4,
+          trigger: 'HR_MESSAGE',
+          aiOutbound: { alreadyDispatched: [], willBeSuppressed: [600] },
+        },
+      }),
+    );
     expect(db.ran(/control_version = control_version \+ 1/)[0].params[1]).toBe(
       'HUMAN_TAKEOVER',
     );

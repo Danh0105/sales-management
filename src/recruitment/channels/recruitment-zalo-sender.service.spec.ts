@@ -3,7 +3,10 @@ import { randomBytes } from 'crypto';
 import * as http from 'http';
 import type { AddressInfo } from 'net';
 
-import type { ClaimedOutbox } from './recruitment-channel-outbox.queue';
+import type {
+  ClaimedOutbox,
+  DispatchGate,
+} from './recruitment-channel-outbox.queue';
 import {
   parseTokens,
   RecruitmentZaloCredentialStore,
@@ -92,6 +95,7 @@ function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
     recruitmentMessageId: 301,
     attemptCount: 1,
     sourceType: 'AI_REPLY',
+    controlVersion: 3,
     ...patch,
   };
 }
@@ -100,7 +104,9 @@ function setup(
   opts: { enabled?: boolean; canonical?: Record<string, unknown> | null } = {},
 ) {
   const queue = {
-    markDispatched: jest.fn().mockResolvedValue(true),
+    dispatch: jest
+      .fn<Promise<DispatchGate>, unknown[]>()
+      .mockResolvedValue({ outcome: 'DISPATCHED' }),
     heartbeat: jest.fn().mockResolvedValue(true),
     markSent: jest.fn().mockResolvedValue(true),
     markRetry: jest.fn().mockResolvedValue(true),
@@ -189,7 +195,10 @@ describe('RecruitmentZaloSender.process', () => {
       recipient: { user_id: RECIPIENT },
       message: { text: TEXT },
     });
-    expect(queue.markDispatched).toHaveBeenCalledWith(21, 'o1');
+    expect(queue.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 21, controlVersion: 3 }),
+      'o1',
+    );
     expect(queue.markSent).toHaveBeenCalledWith(21, 'o1', 'z-1');
   });
 
@@ -250,7 +259,7 @@ describe('RecruitmentZaloSender.process', () => {
       const { sender, queue, audit } = setup({ canonical });
       await sender.process(row(patch), 'o1', config(zalo.url));
       expect(zalo.requests).toHaveLength(0);
-      expect(queue.markDispatched).not.toHaveBeenCalled();
+      expect(queue.dispatch).not.toHaveBeenCalled();
       expect(queue.markDeadLetter).toHaveBeenCalledWith(21, 'o1', code);
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -347,7 +356,7 @@ describe('RecruitmentZaloSender.process', () => {
     );
     await sender.process(row(), 'o1', config(zalo.url));
     expect(zalo.requests).toHaveLength(0);
-    expect(queue.markDispatched).not.toHaveBeenCalled();
+    expect(queue.dispatch).not.toHaveBeenCalled();
     expect(queue.markRetry).toHaveBeenCalledWith(
       21,
       'o1',
@@ -359,11 +368,93 @@ describe('RecruitmentZaloSender.process', () => {
   it('mất lease trước khi dispatch → không gửi, không ghi kết quả', async () => {
     zalo = await fakeZalo([]);
     const { sender, queue } = setup();
-    queue.markDispatched.mockResolvedValue(false);
+    queue.dispatch.mockResolvedValue({ outcome: 'LOST' });
     await sender.process(row(), 'o1', config(zalo.url));
     expect(zalo.requests).toHaveLength(0);
     expect(queue.markSent).not.toHaveBeenCalled();
     expect(queue.markRetry).not.toHaveBeenCalled();
+  });
+
+  describe('P3-6.5 — cửa kiểm điều khiển hội thoại ngay trước dispatch', () => {
+    const suppressed: DispatchGate = {
+      outcome: 'SUPPRESSED',
+      code: 'CONTROL_HUMAN_TAKEOVER',
+      conversationId: 9,
+      mode: 'HUMAN_TAKEOVER',
+      version: 4,
+    };
+
+    it('tin AI, HR đã tiếp quản trước dispatch → SUPPRESSED: 0 kết nối, không ghi kết quả gửi, audit chính sách', async () => {
+      zalo = await fakeZalo([]);
+      const { sender, queue, audit } = setup();
+      queue.dispatch.mockResolvedValue(suppressed);
+      await sender.process(row(), 'o1', config(zalo.url));
+      expect(zalo.requests).toHaveLength(0);
+      for (const method of [
+        'markSent',
+        'markRetry',
+        'markUnknown',
+        'markDeadLetter',
+        'heartbeat',
+      ] as const) {
+        expect(queue[method]).not.toHaveBeenCalled();
+      }
+      expect(audit.record).toHaveBeenCalledWith({
+        actor: expect.objectContaining({ type: 'SYSTEM' }),
+        action: 'CHANNEL_OUTBOX_SUPPRESSED',
+        entity: 'channel-outbox',
+        entityId: 21,
+        context: {
+          code: 'CONTROL_HUMAN_TAKEOVER',
+          status: 'SUPPRESSED',
+          sourceType: 'AI_REPLY',
+          conversationId: 9,
+          mode: 'HUMAN_TAKEOVER',
+          enqueuedVersion: 3,
+          currentVersion: 4,
+          network: false,
+        },
+        success: true,
+      });
+      expect(logs.join('\n')).toMatch(
+        /result=SUPPRESSED code=CONTROL_HUMAN_TAKEOVER .*version=3→4/,
+      );
+    });
+
+    it('tin canonical/hội thoại mất ngay trước dispatch → DEAD_LETTER CANONICAL_MISSING, 0 kết nối', async () => {
+      zalo = await fakeZalo([]);
+      const { sender, queue } = setup();
+      queue.dispatch.mockResolvedValue({
+        outcome: 'INVALID',
+        code: 'CANONICAL_MISSING',
+      });
+      await sender.process(row(), 'o1', config(zalo.url));
+      expect(zalo.requests).toHaveLength(0);
+      expect(queue.markDeadLetter).toHaveBeenCalledWith(
+        21,
+        'o1',
+        'CANONICAL_MISSING',
+      );
+    });
+
+    it('token hỏng → refresh (lâu) → HR tiếp quản trong lúc đó → kiểm lại chặn lần gửi thứ hai: Zalo chỉ nhận đúng 1 request (bị từ chối)', async () => {
+      zalo = await fakeZalo([json({ error: -216, message: 'x' })]);
+      const { sender, queue, audit } = setup();
+      queue.dispatch
+        .mockResolvedValueOnce({ outcome: 'DISPATCHED' })
+        .mockResolvedValueOnce(suppressed);
+      await sender.process(row(), 'o1', config(zalo.url));
+      expect(zalo.requests).toHaveLength(1);
+      expect(queue.dispatch.mock.calls.map((c) => c[2])).toEqual([
+        undefined,
+        true,
+      ]);
+      expect(queue.markSent).not.toHaveBeenCalled();
+      expect(queue.markRetry).not.toHaveBeenCalled();
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'CHANNEL_OUTBOX_SUPPRESSED' }),
+      );
+    });
   });
 
   it.each([

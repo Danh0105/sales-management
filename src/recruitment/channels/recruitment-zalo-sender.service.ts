@@ -15,6 +15,7 @@ import { SYSTEM_ACTOR } from '../recruitment.roles';
 import {
   RecruitmentChannelOutboxQueue,
   type ClaimedOutbox,
+  type DispatchGate,
 } from './recruitment-channel-outbox.queue';
 import { retryDelayMs } from './recruitment-channel-worker.config';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
@@ -50,8 +51,9 @@ type Outcome =
  * không vòng lặp nào chạy và `send()` từ chối trước khi mở kết nối.
  *
  * Mỗi dòng: kiểm (kênh, OA tuyển dụng, người nhận, tin canonical còn đúng hội
- * thoại/ứng viên, nội dung) → token (refresh sớm nếu sắp hết hạn) → ghi bền
- * `dispatched_at` → gửi → phân loại:
+ * thoại/ứng viên, nội dung) → token (refresh sớm nếu sắp hết hạn) → cửa kiểm cuối:
+ * tin AI mà HR đã tiếp quản/đóng/đổi version hội thoại → `SUPPRESSED`, không mở kết
+ * nối; còn lại ghi bền `dispatched_at` (cùng transaction) → gửi → phân loại:
  * - SENT → lưu id tin Zalo, xoá bản sao nội dung;
  * - chắc chắn chưa đi (429, 5xx, lỗi trước kết nối) → RETRY + backoff;
  * - token hỏng → refresh (có khoá, một lần cho mọi sender) rồi gửi lại một lần;
@@ -157,9 +159,9 @@ export class RecruitmentZaloSender
       );
     }
 
-    if (!(await this.queue.markDispatched(row.id, owner))) {
-      this.logger.warn(`sender outbox=${row.id} lease lost trước khi gửi — bỏ`);
-      return;
+    const gate = await this.queue.dispatch(row, owner);
+    if (gate.outcome !== 'DISPATCHED') {
+      return this.notDispatched(row, owner, config, gate, started);
     }
     const heartbeat = setInterval(
       () =>
@@ -181,6 +183,12 @@ export class RecruitmentZaloSender
             { status: 'RETRY', code: credentialCode(error) },
             started,
           );
+        }
+        // Lần trước Zalo từ chối token (chắc chắn chưa tới) và refresh có thể lâu —
+        // HR có thể đã tiếp quản trong lúc đó: kiểm lại trước lần gửi thứ hai.
+        const again = await this.queue.dispatch(row, owner, true);
+        if (again.outcome !== 'DISPATCHED') {
+          return this.notDispatched(row, owner, config, again, started);
         }
         result = await this.send(row, token.accessToken, config);
         if (result.result === 'TOKEN_INVALID') {
@@ -352,6 +360,45 @@ export class RecruitmentZaloSender
     }
   }
 
+  /** Cửa kiểm cuối không cho gửi: chặn (tin AI sau khi HR đổi điều khiển), dữ liệu sai, mất lease. */
+  private async notDispatched(
+    row: ClaimedOutbox,
+    owner: string,
+    config: ZaloOutboundConfig,
+    gate: Exclude<DispatchGate, { outcome: 'DISPATCHED' }>,
+    started: number,
+  ): Promise<void> {
+    switch (gate.outcome) {
+      case 'LOST':
+        this.logger.warn(
+          `sender outbox=${row.id} lease lost trước khi gửi — bỏ`,
+        );
+        return;
+      case 'INVALID':
+        return this.finish(
+          row,
+          owner,
+          config,
+          { status: 'DEAD_LETTER', code: gate.code },
+          started,
+        );
+      case 'SUPPRESSED':
+        this.logger.log(
+          `sender outbox=${row.id} attempt=${row.attemptCount} result=SUPPRESSED code=${gate.code} ` +
+            `conversation=${gate.conversationId} mode=${gate.mode} version=${row.controlVersion ?? '-'}→${gate.version} ` +
+            `recipient=${maskRecipient(config.oaId, row.externalRecipientId)} ms=${Date.now() - started}`,
+        );
+        return this.record(row.id, 'SUPPRESSED', gate.code, {
+          sourceType: row.sourceType,
+          conversationId: gate.conversationId,
+          mode: gate.mode,
+          enqueuedVersion: row.controlVersion,
+          currentVersion: gate.version,
+          network: false,
+        });
+    }
+  }
+
   private async maintenance(config: ZaloOutboundConfig) {
     try {
       await this.alerts.sweep();
@@ -375,20 +422,19 @@ export class RecruitmentZaloSender
   /** Dấu vết cho HR/vận hành — chỉ metadata, không nội dung, không người nhận. */
   private async record(
     outboxId: number,
-    status: 'UNKNOWN' | 'DEAD_LETTER',
+    status: 'UNKNOWN' | 'DEAD_LETTER' | 'SUPPRESSED',
     code: string,
+    details: Record<string, unknown> = {},
   ) {
     try {
       await this.audit.record({
         actor: SYSTEM_ACTOR,
-        action:
-          status === 'UNKNOWN'
-            ? 'CHANNEL_OUTBOX_UNKNOWN'
-            : 'CHANNEL_OUTBOX_DEAD_LETTER',
+        action: `CHANNEL_OUTBOX_${status}`,
         entity: 'channel-outbox',
         entityId: outboxId,
-        context: { code, status },
-        success: false,
+        context: { code, status, ...details },
+        // SUPPRESSED là chặn đúng chính sách, không phải lỗi gửi.
+        success: status === 'SUPPRESSED',
       });
     } catch (error) {
       this.logger.error(

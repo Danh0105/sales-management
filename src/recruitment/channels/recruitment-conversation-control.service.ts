@@ -38,6 +38,17 @@ export interface ConversationControl {
   takenOverBy: number | null;
 }
 
+/**
+ * Tin AI còn trong outbox của hội thoại lúc HR tiếp quản / đóng (P3-6.5):
+ * - `alreadyDispatched`: đã mở kết nối tới Zalo (hoặc UNKNOWN) — KHÔNG thu hồi được,
+ *   ứng viên có thể vẫn nhận;
+ * - `willBeSuppressed`: chưa mở kết nối — sender sẽ chặn (`SUPPRESSED`), không gửi.
+ */
+export interface AiOutboundAtControlChange {
+  alreadyDispatched: number[];
+  willBeSuppressed: number[];
+}
+
 interface ControlRow {
   id: number;
   candidate_id: number;
@@ -99,14 +110,23 @@ export class RecruitmentConversationControlService {
         ConversationControlMode.HUMAN_TAKEOVER,
         actor,
       );
-      return { control: await this.control(conversationId, em), changed: true };
+      return {
+        control: await this.control(conversationId, em),
+        changed: true,
+        aiOutbound: await this.aiOutbound(em, conversationId),
+      };
     });
     if (result.changed) {
       await this.record(actor, 'CONVERSATION_TAKEOVER', conversationId, {
         version: result.control.version,
+        aiOutbound: result.aiOutbound,
       });
     }
-    return { ...result.control, changed: result.changed };
+    return {
+      ...result.control,
+      changed: result.changed,
+      aiOutbound: result.aiOutbound,
+    };
   }
 
   /**
@@ -179,14 +199,23 @@ export class RecruitmentConversationControlService {
         return { control: this.toControl(row), changed: false };
       }
       await this.setMode(em, row, ConversationControlMode.CLOSED, actor);
-      return { control: await this.control(conversationId, em), changed: true };
+      return {
+        control: await this.control(conversationId, em),
+        changed: true,
+        aiOutbound: await this.aiOutbound(em, conversationId),
+      };
     });
     if (result.changed) {
       await this.record(actor, 'CONVERSATION_CLOSE', conversationId, {
         version: result.control.version,
+        aiOutbound: result.aiOutbound,
       });
     }
-    return { ...result.control, changed: result.changed };
+    return {
+      ...result.control,
+      changed: result.changed,
+      aiOutbound: result.aiOutbound,
+    };
   }
 
   /**
@@ -269,6 +298,7 @@ export class RecruitmentConversationControlService {
       }
 
       let tookOver = false;
+      let aiOutbound: AiOutboundAtControlChange | undefined;
       if (row.control_mode !== ConversationControlMode.HUMAN_TAKEOVER) {
         await this.setMode(
           em,
@@ -277,6 +307,7 @@ export class RecruitmentConversationControlService {
           actor,
         );
         tookOver = true;
+        aiOutbound = await this.aiOutbound(em, conversationId);
       }
       const [message]: Array<{ id: number }> = await em.query(
         `INSERT INTO "recruitment_messages"
@@ -309,6 +340,7 @@ export class RecruitmentConversationControlService {
         idempotent: false,
         tookOver,
         version: after.control_version,
+        aiOutbound,
       };
     });
 
@@ -317,6 +349,7 @@ export class RecruitmentConversationControlService {
         await this.record(actor, 'CONVERSATION_TAKEOVER', conversationId, {
           version: result.version,
           trigger: 'HR_MESSAGE',
+          aiOutbound: result.aiOutbound,
         });
       }
       // Không ghi nội dung — chỉ id + độ dài.
@@ -348,6 +381,34 @@ export class RecruitmentConversationControlService {
       [Math.min(Math.max(limit, 1), 200)],
     );
     return rows;
+  }
+
+  /**
+   * Gọi trong transaction đang giữ `FOR UPDATE` dòng hội thoại, ngay sau khi đổi chế
+   * độ: cửa kiểm của sender cần `FOR SHARE` cùng dòng nên danh sách này chính xác —
+   * dòng đã dispatch là đã qua cửa trước thao tác HR, dòng còn lại sẽ bị chặn.
+   */
+  private async aiOutbound(
+    em: EntityManager,
+    conversationId: number,
+  ): Promise<AiOutboundAtControlChange> {
+    const rows: Array<{ id: number; dispatched: boolean }> = await em.query(
+      `SELECT o.id, (o.status = 'UNKNOWN' OR o.dispatched_at IS NOT NULL) AS dispatched
+       FROM "recruitment_channel_outbox" o
+       JOIN "recruitment_messages" m ON m.id = o.recruitment_message_id
+       WHERE m.conversation_id = $1 AND o.source_type = 'AI_REPLY'
+         AND o.status IN ('PENDING', 'SENDING', 'RETRY', 'UNKNOWN')
+       ORDER BY o.id`,
+      [conversationId],
+    );
+    return {
+      alreadyDispatched: rows
+        .filter((r) => r.dispatched)
+        .map((r) => Number(r.id)),
+      willBeSuppressed: rows
+        .filter((r) => !r.dispatched)
+        .map((r) => Number(r.id)),
+    };
   }
 
   private async setMode(

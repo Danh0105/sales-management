@@ -169,6 +169,9 @@ export enum ChannelEventStatus {
  * - `UNKNOWN`: request có thể đã tới Zalo nhưng không biết kết quả — KHÔNG tự gửi
  *   lại (tránh trùng tin), chờ đối soát; chặn các tin sau của cùng người nhận.
  * - `DEAD_LETTER`: không bao giờ gửi (bị từ chối hẳn, dữ liệu sai, quá hạn).
+ * - `SUPPRESSED`: tin AI bị chặn ngay trước khi gửi vì HR đã đổi điều khiển hội
+ *   thoại (tiếp quản / đóng / đổi version) sau khi tin được xếp hàng — chưa từng
+ *   mở kết nối; không gửi lại, không chặn hàng (P3-6.5).
  */
 export enum ChannelOutboxStatus {
   PENDING = 'PENDING',
@@ -177,6 +180,7 @@ export enum ChannelOutboxStatus {
   RETRY = 'RETRY',
   UNKNOWN = 'UNKNOWN',
   DEAD_LETTER = 'DEAD_LETTER',
+  SUPPRESSED = 'SUPPRESSED',
 }
 
 /**

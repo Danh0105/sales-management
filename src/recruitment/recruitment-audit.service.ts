@@ -54,6 +54,8 @@ export type RecruitmentAuditAction =
   | 'CHANNEL_OUTBOX_DEAD_LETTER'
   /** Tin trả lời có thể đã tới Zalo nhưng không rõ — cần đối soát, không tự gửi lại. */
   | 'CHANNEL_OUTBOX_UNKNOWN'
+  /** Tin AI bị chặn trước khi gửi vì HR đã đổi điều khiển hội thoại (P3-6.5). */
+  | 'CHANNEL_OUTBOX_SUPPRESSED'
   /** P3-6 — HR điều khiển hội thoại kênh. */
   | 'CONVERSATION_TAKEOVER'
   | 'CONVERSATION_RESUME_AI'

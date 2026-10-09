@@ -14,7 +14,25 @@ export interface ClaimedOutbox {
   attemptCount: number;
   /** AI_REPLY (tin AI) hay HR_MESSAGE (tin HR viết tay). */
   sourceType: string;
+  /** Version điều khiển hội thoại lúc tin AI được xếp hàng (`NULL` với tin HR). */
+  controlVersion: number | null;
 }
+
+/** Kết quả cửa kiểm cuối trước khi mở kết nối. */
+export type DispatchGate =
+  | { outcome: 'DISPATCHED' }
+  /** Tin AI bị chặn vì HR đã đổi điều khiển hội thoại — không mở kết nối. */
+  | {
+      outcome: 'SUPPRESSED';
+      code: string;
+      conversationId: number;
+      mode: string;
+      version: number;
+    }
+  /** Tin canonical / hội thoại không còn — không gửi. */
+  | { outcome: 'INVALID'; code: string }
+  /** Mất lease (sender khác đã lấy dòng) — không ghi gì. */
+  | { outcome: 'LOST' };
 
 interface ClaimRow {
   id: number | string;
@@ -24,9 +42,10 @@ interface ClaimRow {
   recruitment_message_id: number | string | null;
   attempt_count: number | string;
   source_type: string;
+  control_version: number | string | null;
 }
 
-/** Dòng chưa xong (chặn các tin sau của cùng người nhận). */
+/** Dòng chưa xong (chặn các tin sau của cùng người nhận). SENT/DEAD_LETTER/SUPPRESSED là kết thúc. */
 const UNFINISHED = `(o.status IN ('PENDING', 'SENDING', 'RETRY', 'UNKNOWN'))`;
 
 /**
@@ -106,7 +125,7 @@ export class RecruitmentChannelOutboxQueue {
                  AND ((o.status = 'SENDING' AND o.lease_until >= now())
                       OR (${UNFINISHED} AND (o.created_at, o.id) < (t.created_at, t.id))))
            RETURNING t.id, t.channel_account_id, t.external_recipient_id, t.message_text,
-                     t.recruitment_message_id, t.attempt_count, t.source_type`,
+                     t.recruitment_message_id, t.attempt_count, t.source_type, t.control_version`,
           [head.id, oaId, head.recipient, leaseMs, owner],
         ),
       );
@@ -123,17 +142,95 @@ export class RecruitmentChannelOutboxQueue {
             : Number(row.recruitment_message_id),
         attemptCount: Number(row.attempt_count),
         sourceType: row.source_type,
+        controlVersion:
+          row.control_version === null ? null : Number(row.control_version),
       };
     });
   }
 
-  /** Ghi bền "sắp gửi" — phải thành công TRƯỚC khi mở kết nối tới Zalo. */
-  async markDispatched(id: number, owner: string): Promise<boolean> {
-    return this.fenced(
-      `UPDATE "recruitment_channel_outbox" SET dispatched_at = now(), updated_at = now()
-       WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
-      [id, owner],
-    );
+  /**
+   * Cửa kiểm cuối, NGAY TRƯỚC khi mở kết nối tới Zalo (P3-6.5). Một transaction:
+   * khoá chia sẻ dòng hội thoại (`FOR SHARE` — thao tác HR giữ `FOR UPDATE` nên không
+   * xen giữa được), rồi:
+   * - tin AI mà hội thoại không còn `AI_ACTIVE`, hoặc `control_version` khác lúc xếp
+   *   hàng → `SUPPRESSED`: xoá bản sao, tin canonical đánh dấu không gửi, không mở
+   *   kết nối;
+   * - còn lại (tin HR luôn được gửi) → ghi bền `dispatched_at`.
+   *
+   * Chỉ thao tác tường minh của HR (đổi `control_mode`/version) mới chặn. `AI_PAUSED`
+   * suy ra (handoff, hồ sơ chờ HR) KHÔNG chặn: pause đó có thể do chính lượt AI gây ra
+   * và câu trả lời của lượt ("mình đã chuyển nhân sự") vẫn phải tới ứng viên.
+   *
+   * HR tiếp quản SAU khi transaction này commit → tin đã đi, không thu hồi được (thao
+   * tác tiếp quản ghi lại các tin đó). `redispatch`: gửi lại ngay sau khi Zalo từ chối
+   * token (lần trước chắc chắn chưa tới) — vẫn kiểm lại, vẫn chặn được.
+   */
+  async dispatch(
+    row: ClaimedOutbox,
+    owner: string,
+    redispatch = false,
+  ): Promise<DispatchGate> {
+    return this.dataSource.transaction(async (em) => {
+      const [control]: Array<{
+        id: number;
+        control_mode: string;
+        control_version: number;
+      }> = row.recruitmentMessageId
+        ? await em.query(
+            `SELECT c.id, c.control_mode, c.control_version
+             FROM "recruitment_conversations" c
+             JOIN "recruitment_messages" m ON m.conversation_id = c.id
+             WHERE m.id = $1
+             FOR SHARE OF c`,
+            [row.recruitmentMessageId],
+          )
+        : [];
+      if (!control) return { outcome: 'INVALID', code: 'CANONICAL_MISSING' };
+
+      const code =
+        row.sourceType === 'AI_REPLY'
+          ? suppressionCode(control, row.controlVersion)
+          : null;
+      if (!code) {
+        const dispatched = returnedRows(
+          await em.query(
+            `UPDATE "recruitment_channel_outbox" SET dispatched_at = now(), updated_at = now()
+             WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
+            [row.id, owner],
+          ),
+        );
+        return dispatched.length
+          ? { outcome: 'DISPATCHED' }
+          : { outcome: 'LOST' };
+      }
+
+      const suppressed = returnedRows(
+        await em.query(
+          `UPDATE "recruitment_channel_outbox"
+           SET status = 'SUPPRESSED', last_error_code = $3::varchar, message_text = NULL,
+               text_redacted_at = now(), lease_until = NULL, next_attempt_at = NULL,
+               updated_at = now()
+           WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
+             AND source_type = 'AI_REPLY' AND (dispatched_at IS NULL OR $4::boolean)
+           RETURNING id`,
+          [row.id, owner, code, redispatch],
+        ),
+      );
+      if (!suppressed.length) return { outcome: 'LOST' };
+      await em.query(
+        `UPDATE "recruitment_messages"
+         SET metadata = metadata || '{"delivery": "SUPPRESSED_CONTROL_CHANGED"}'::jsonb
+         WHERE id = $1`,
+        [row.recruitmentMessageId],
+      );
+      return {
+        outcome: 'SUPPRESSED',
+        code,
+        conversationId: Number(control.id),
+        mode: control.control_mode,
+        version: Number(control.control_version),
+      };
+    });
   }
 
   async heartbeat(id: number, owner: string, leaseMs: number) {
@@ -240,4 +337,19 @@ export class RecruitmentChannelOutboxQueue {
   private async fenced(sql: string, params: unknown[]): Promise<boolean> {
     return returnedRows(await this.dataSource.query(sql, params)).length > 0;
   }
+}
+
+/** Vì sao tin AI không được gửi nữa; `null` = vẫn gửi được. */
+function suppressionCode(
+  control: { control_mode: string; control_version: number },
+  enqueuedVersion: number | null,
+): string | null {
+  if (control.control_mode === 'HUMAN_TAKEOVER')
+    return 'CONTROL_HUMAN_TAKEOVER';
+  if (control.control_mode !== 'AI_ACTIVE') return 'CONTROL_CLOSED';
+  if (enqueuedVersion === null) return 'CONTROL_VERSION_MISSING';
+  if (Number(control.control_version) !== enqueuedVersion) {
+    return 'CONTROL_VERSION_CHANGED';
+  }
+  return null;
 }
