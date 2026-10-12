@@ -59,6 +59,11 @@ export interface QuarantineVerifyResult {
   expired: number;
   /** Không giải mã được (sai `RECRUITMENT_ZALO_TOKEN_KEY`?) — GIỮ NGUYÊN để sửa key rồi chạy lại. */
   undecryptable: number;
+  /**
+   * Lỗi giữa chừng (DB…) khi xử lý dòng: transaction của dòng đã rollback → dòng vẫn
+   * `QUARANTINED` nguyên bản mã, không mất, không vào inbox dở dang — chạy lại sau.
+   */
+  failed: number;
   /** Còn `QUARANTINED` sau lần chạy. */
   remaining: number;
 }
@@ -306,6 +311,7 @@ export class RecruitmentZaloQuarantineService
       rejected: {},
       expired: await this.expire(),
       undecryptable: 0,
+      failed: 0,
       remaining: 0,
     };
 
@@ -319,7 +325,18 @@ export class RecruitmentZaloQuarantineService
       if (!batch.length) break;
       for (const { id } of batch) {
         afterId = Number(id);
-        const outcome = await this.verifyOne(Number(id), config, key);
+        let outcome: string;
+        try {
+          outcome = await this.verifyOne(Number(id), config, key);
+        } catch (error) {
+          // Một dòng lỗi không chặn các dòng khác; dòng này giữ nguyên để chạy lại.
+          result.failed += 1;
+          this.logger.error(
+            `zalo-recruitment quarantine verify id=${id} failed (rollback, giữ nguyên) ` +
+              `error=${(error as { code?: string }).code ?? (error as Error).name}`,
+          );
+          continue;
+        }
         if (outcome === 'VERIFIED') result.verified += 1;
         else if (outcome === 'DUPLICATE') result.duplicates += 1;
         else if (outcome === 'UNDECRYPTABLE') result.undecryptable += 1;
@@ -336,7 +353,7 @@ export class RecruitmentZaloQuarantineService
     this.logger.log(
       `zalo-recruitment quarantine verify verified=${result.verified} duplicates=${result.duplicates} ` +
         `rejected=${JSON.stringify(result.rejected)} expired=${result.expired} ` +
-        `undecryptable=${result.undecryptable} remaining=${result.remaining}`,
+        `undecryptable=${result.undecryptable} failed=${result.failed} remaining=${result.remaining}`,
     );
     await this.audit.record({
       actor,

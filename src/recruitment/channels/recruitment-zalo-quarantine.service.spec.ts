@@ -428,6 +428,7 @@ describe('RecruitmentZaloQuarantineService.verifyAll — xác minh hồi tố', 
       rejected: { INVALID_SIGNATURE: 2 },
       expired: 0,
       undecryptable: 0,
+      failed: 0,
       remaining: 0,
     });
     const [insert] = db.ran(/INSERT INTO "recruitment_channel_events"/);
@@ -493,6 +494,37 @@ describe('RecruitmentZaloQuarantineService.verifyAll — xác minh hồi tố', 
     });
     expect(updates).toEqual([[1, 'REJECTED', 'INTEGRITY', null]]);
     expect(db.ran(/INSERT INTO "recruitment_channel_events"/)).toHaveLength(0);
+  });
+
+  it('lỗi DB giữa chừng ở một dòng → dòng đó KHÔNG đổi (rollback, chạy lại sau), các dòng khác vẫn xử lý', async () => {
+    const one = event();
+    const two = event({ message: { text: 'Tin thứ hai', msg_id: 'msg-2' } });
+    const rows = [
+      row(1, one.body, one.signature),
+      row(2, two.body, two.signature),
+    ];
+    const { db, updates } = verifyDb(rows, [[{ id: 901 }]]);
+    // Dòng 1: ghi inbox lỗi (vd. mất kết nối) — transaction của dòng ném lỗi, không UPDATE.
+    let first = true;
+    const original = db.dataSource.transaction.getMockImplementation()!;
+    db.dataSource.transaction.mockImplementation((fn: any) => {
+      if (first) {
+        first = false;
+        return Promise.reject(
+          Object.assign(new Error('mất kết nối'), { code: '08006' }),
+        );
+      }
+      return original(fn);
+    });
+    const { svc } = service(NORMAL_ENV, db);
+    await expect(svc.verifyAll(HR)).resolves.toMatchObject({
+      verified: 1,
+      failed: 1,
+    });
+    expect(updates).toEqual([[2, 'VERIFIED', 'NEW', 901]]);
+    expect(logs.join('\n')).toMatch(
+      /verify id=1 failed \(rollback, giữ nguyên\) error=08006/,
+    );
   });
 
   it('sai RECRUITMENT_ZALO_TOKEN_KEY (không giải mã được) → GIỮ NGUYÊN dòng để sửa key rồi chạy lại', async () => {
