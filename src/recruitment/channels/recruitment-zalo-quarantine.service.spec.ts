@@ -196,8 +196,16 @@ describe('RecruitmentZaloQuarantineService.receive', () => {
       decryptToken(KEY, 'quarantine:oa-recruit:khac', enc),
     ).toThrow();
     expect(insert.sql).toMatch(/WHERE \(SELECT count\(\*\)/);
-    // Không ghi inbox, không đụng bảng nào khác.
-    expect(db.calls).toHaveLength(1);
+    // Đếm trần + chèn tuần tự hoá bằng advisory lock, trong cùng transaction.
+    expect(db.dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(db.calls.map((c) => c.sql.trim().split(/\s+/)[0])).toEqual([
+      'SELECT',
+      'INSERT',
+    ]);
+    expect(db.calls[0].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(db.calls[0].params).toEqual([
+      'recruitment_channel_quarantine:insert',
+    ]);
   });
 
   it('request KHÔNG có chữ ký vẫn được cách ly (chưa có key để kiểm) — log ghi sig=absent', async () => {

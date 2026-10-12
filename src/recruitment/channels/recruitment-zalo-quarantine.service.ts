@@ -39,6 +39,8 @@ export const QUARANTINE_RETENTION_HOURS = 72;
  */
 const DEFAULT_MAX_ROWS = 2000;
 export const QUARANTINE_MAX_BODY_BYTES = 64 * 1024;
+/** Advisory lock tuần tự hoá việc ghi cách ly (đếm trần + chèn). */
+const QUARANTINE_LOCK_KEY = 'recruitment_channel_quarantine:insert';
 const SIGNATURE_MAX_LENGTH = 200;
 const VERIFY_BATCH = 100;
 const EXPIRE_EVERY_MS = 10 * 60 * 1000;
@@ -201,9 +203,11 @@ export class RecruitmentZaloQuarantineService
   }
 
   /**
-   * Một câu INSERT: chỉ ghi khi số dòng đang cách ly còn dưới trần; trùng payload →
-   * không ghi. Không có dòng trả về → đọc lại: có dòng cùng hash = trùng (200), không
-   * có = bảng đầy (503, Zalo gửi lại sau).
+   * Ghi trong một transaction giữ advisory lock của bảng cách ly: đếm + chèn được tuần tự
+   * hoá nên trần `maxRows` CHÍNH XÁC cả khi nhiều request tới cùng lúc (đếm-rồi-chèn trong
+   * một câu ở READ COMMITTED để hai request cùng thấy "còn chỗ" và vượt trần). Trùng
+   * payload → không ghi. Không có dòng trả về → đọc lại: có dòng cùng hash = trùng (200),
+   * không có = bảng đầy (503, Zalo gửi lại sau). Không bao giờ xoá dòng cũ để nhường chỗ.
    */
   private async store(
     oaId: string,
@@ -213,27 +217,33 @@ export class RecruitmentZaloQuarantineService
     size: number,
     bodyEnc: string,
   ): Promise<{ id: number; duplicate: boolean }> {
-    const inserted = await this.dataSource.query<Array<{ id: number }>>(
-      `INSERT INTO "recruitment_channel_quarantine"
-         ("channel", "channel_account_id", "payload_hash", "signature", "event_type", "body_size", "body_enc")
-       SELECT 'ZALO', $1, $2, $3, $4, $5, $6
-       WHERE (SELECT count(*) FROM "recruitment_channel_quarantine" WHERE "status" = 'QUARANTINED') < $7
-       ON CONFLICT ON CONSTRAINT "UQ_recruitment_channel_quarantine_payload" DO NOTHING
-       RETURNING "id"`,
-      [oaId, payloadHash, signature, eventType, size, bodyEnc, this.maxRows],
-    );
-    if (inserted.length)
-      return { id: Number(inserted[0].id), duplicate: false };
-    const [existing] = await this.dataSource.query<Array<{ id: number }>>(
-      `SELECT "id" FROM "recruitment_channel_quarantine"
-       WHERE "channel" = 'ZALO' AND "channel_account_id" = $1 AND "payload_hash" = $2`,
-      [oaId, payloadHash],
-    );
-    if (existing) return { id: Number(existing.id), duplicate: true };
-    this.logger.error(
-      `zalo-recruitment quarantine full (max=${this.maxRows}) — 503, Zalo sẽ gửi lại`,
-    );
-    throw new ServiceUnavailableException({ code: 'QUARANTINE_FULL' });
+    return this.dataSource.transaction(async (em) => {
+      await em.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        QUARANTINE_LOCK_KEY,
+      ]);
+      const inserted = await em.query<Array<{ id: number }>>(
+        `INSERT INTO "recruitment_channel_quarantine"
+           ("channel", "channel_account_id", "payload_hash", "signature", "event_type", "body_size", "body_enc")
+         SELECT 'ZALO', $1, $2, $3, $4, $5, $6
+         WHERE (SELECT count(*) FROM "recruitment_channel_quarantine" WHERE "status" = 'QUARANTINED') < $7
+         ON CONFLICT ON CONSTRAINT "UQ_recruitment_channel_quarantine_payload" DO NOTHING
+         RETURNING "id"`,
+        [oaId, payloadHash, signature, eventType, size, bodyEnc, this.maxRows],
+      );
+      if (inserted.length) {
+        return { id: Number(inserted[0].id), duplicate: false };
+      }
+      const [existing] = await em.query<Array<{ id: number }>>(
+        `SELECT "id" FROM "recruitment_channel_quarantine"
+         WHERE "channel" = 'ZALO' AND "channel_account_id" = $1 AND "payload_hash" = $2`,
+        [oaId, payloadHash],
+      );
+      if (existing) return { id: Number(existing.id), duplicate: true };
+      this.logger.error(
+        `zalo-recruitment quarantine full (max=${this.maxRows}) — 503, Zalo sẽ gửi lại`,
+      );
+      throw new ServiceUnavailableException({ code: 'QUARANTINE_FULL' });
+    });
   }
 
   /** Quá hạn giữ → xoá nội dung, giữ hash + metadata. Trả số dòng vừa hết hạn. */
