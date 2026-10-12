@@ -150,6 +150,20 @@ export enum ChannelEventChannel {
 }
 
 /**
+ * Request webhook nhận ở chế độ cách ly (P3-7.2A — chưa có OA secret key):
+ * - `QUARANTINED`: đã ghi (thân request mã hoá), CHƯA xác minh chữ ký, không xử lý;
+ * - `VERIFIED`: chữ ký khớp khi có key → đã đưa vào inbox như event thường;
+ * - `REJECTED`: chữ ký/nội dung không hợp lệ khi xác minh → đã xoá nội dung;
+ * - `EXPIRED`: quá hạn giữ (72 giờ) chưa xác minh → đã xoá nội dung.
+ */
+export enum ChannelQuarantineStatus {
+  QUARANTINED = 'QUARANTINED',
+  VERIFIED = 'VERIFIED',
+  REJECTED = 'REJECTED',
+  EXPIRED = 'EXPIRED',
+}
+
+/**
  * Vòng đời một event webhook. Lúc nhận chỉ ghi `RECEIVED` (sẽ được xử lý) hoặc
  * `IGNORED` (hợp lệ nhưng không xử lý); worker sau này mới chuyển tiếp.
  */

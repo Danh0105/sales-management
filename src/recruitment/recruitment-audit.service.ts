@@ -23,6 +23,7 @@ export type RecruitmentAuditEntity =
   | 'conversations'
   | 'channel-events'
   | 'channel-outbox'
+  | 'channel-quarantine'
   | 'hr-alerts';
 
 export type RecruitmentAuditAction =
@@ -56,6 +57,8 @@ export type RecruitmentAuditAction =
   | 'CHANNEL_OUTBOX_UNKNOWN'
   /** Tin AI bị chặn trước khi gửi vì HR đã đổi điều khiển hội thoại (P3-6.5). */
   | 'CHANNEL_OUTBOX_SUPPRESSED'
+  /** P3-7.2A — xác minh hồi tố request webhook đã cách ly (chỉ số lượng). */
+  | 'CHANNEL_QUARANTINE_VERIFY'
   /** P3-6 — HR điều khiển hội thoại kênh. */
   | 'CONVERSATION_TAKEOVER'
   | 'CONVERSATION_RESUME_AI'

@@ -43,13 +43,14 @@ function signedRequest(overrides: Record<string, unknown> = {}) {
 function setup(env: Record<string, string | undefined> = ENV) {
   const repo = {
     query: jest.fn().mockResolvedValue([{ id: 41 }]),
-    findOne: jest.fn().mockResolvedValue({ id: 41, payloadHash: 'other' }),
   };
+  const quarantine = { receive: jest.fn() };
   const service = new RecruitmentZaloWebhookService(
     repo as any,
     { get: (key: string) => env[key] } as any,
+    quarantine as any,
   );
-  return { service, repo };
+  return { service, repo, quarantine };
 }
 
 describe('RecruitmentZaloWebhookService', () => {
@@ -123,12 +124,15 @@ describe('RecruitmentZaloWebhookService', () => {
       expect.stringMatching(/^[0-9a-f]{64}$/),
       TEXT,
     ]);
-    expect(repo.findOne).not.toHaveBeenCalled();
+    // Event mới: chỉ một câu INSERT, không đọc lại.
+    expect(repo.query).toHaveBeenCalledTimes(1);
   });
 
   it('event trùng (DB không trả dòng) → ACK duplicate=true, không ghi thêm', async () => {
     const { service, repo } = setup();
-    repo.query.mockResolvedValueOnce([]);
+    repo.query
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 41, payload_hash: 'other' }]);
     const { body, signature } = signedRequest();
 
     await expect(service.receive(body, signature)).resolves.toEqual({
@@ -136,16 +140,15 @@ describe('RecruitmentZaloWebhookService', () => {
       duplicate: true,
       status: ChannelEventStatus.RECEIVED,
     });
-    expect(repo.query).toHaveBeenCalledTimes(1);
-    expect(repo.findOne).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          channel: 'ZALO',
-          channelAccountId: 'oa-recruit',
-          dedupeKey: 'user_send_text:msg:msg-1',
-        },
-      }),
-    );
+    // Một INSERT ... ON CONFLICT DO NOTHING, rồi chỉ đọc lại dòng cũ để ghi log.
+    expect(repo.query).toHaveBeenCalledTimes(2);
+    expect(repo.query.mock.calls[0][0]).toMatch(/ON CONFLICT ON CONSTRAINT/);
+    expect(repo.query.mock.calls[1][0]).toMatch(/^SELECT/);
+    expect(repo.query.mock.calls[1][1]).toEqual([
+      'ZALO',
+      'oa-recruit',
+      'user_send_text:msg:msg-1',
+    ]);
     expect(logs.join('\n')).toMatch(/duplicate=true samePayload=false/);
   });
 

@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 
 import { LEGACY_ZALO_OA_ID } from '../ai/recruitment-ai-subject';
 import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
+import { decodeKey } from './zalo-outbound.config';
 
 /**
  * Webhook Zalo OA **tuyển dụng** (Phase 3). Hoàn toàn tách khỏi webhook OA giáo
@@ -14,10 +15,14 @@ import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
 
 export const ZALO_SIGNATURE_HEADER = 'x-zevent-signature';
 
-export interface RecruitmentZaloConfig {
+/** App + OA tuyển dụng trong cấu hình server — dùng được cả khi chưa có OA secret key. */
+export interface ZaloBinding {
   appId: string;
   /** OA tuyển dụng — mọi event phải thuộc đúng OA này. */
   oaId: string;
+}
+
+export interface RecruitmentZaloConfig extends ZaloBinding {
   secretKey: string;
 }
 
@@ -46,24 +51,67 @@ export function isRecruitmentZaloEnabled(
 }
 
 /**
+ * P3-7.2A — chế độ cách ly (bootstrap khi Zalo chỉ cấp OA secret key sau khi URL
+ * webhook trả 200). Chỉ hợp lệ khi CHƯA có OA secret key; xem
+ * `RecruitmentZaloQuarantineService`.
+ */
+export function isRecruitmentZaloQuarantine(
+  get: (key: string) => string | undefined,
+): boolean {
+  return get('RECRUITMENT_ZALO_WEBHOOK_QUARANTINE') === 'true';
+}
+
+/** App + OA (không cần secret). Lỗi chỉ gồm **tên** biến — không bao giờ kèm giá trị. */
+export function readRecruitmentZaloBinding(
+  get: (key: string) => string | undefined,
+): { binding: ZaloBinding } | { invalid: string[] } {
+  const appId = get('RECRUITMENT_ZALO_APP_ID')?.trim() ?? '';
+  const oaId = get('RECRUITMENT_ZALO_OA_ID')?.trim() ?? '';
+  const invalid: string[] = [];
+  if (!APP_ID.test(appId)) invalid.push('RECRUITMENT_ZALO_APP_ID');
+  if (!OA_ID.test(oaId) || oaId === LEGACY_ZALO_OA_ID) {
+    invalid.push('RECRUITMENT_ZALO_OA_ID');
+  }
+  return invalid.length ? { invalid } : { binding: { appId, oaId } };
+}
+
+/**
  * Đọc cấu hình OA tuyển dụng. Trả lỗi chỉ gồm **tên** biến thiếu/sai — không
  * bao giờ kèm giá trị.
  */
 export function readRecruitmentZaloConfig(
   get: (key: string) => string | undefined,
 ): { config: RecruitmentZaloConfig } | { invalid: string[] } {
-  const appId = get('RECRUITMENT_ZALO_APP_ID')?.trim() ?? '';
-  const oaId = get('RECRUITMENT_ZALO_OA_ID')?.trim() ?? '';
+  const bound = readRecruitmentZaloBinding(get);
   const secretKey = get('RECRUITMENT_ZALO_OA_SECRET_KEY')?.trim() ?? '';
-  const invalid: string[] = [];
-  if (!APP_ID.test(appId)) invalid.push('RECRUITMENT_ZALO_APP_ID');
-  if (!OA_ID.test(oaId) || oaId === LEGACY_ZALO_OA_ID) {
-    invalid.push('RECRUITMENT_ZALO_OA_ID');
-  }
+  const invalid = 'invalid' in bound ? [...bound.invalid] : [];
   if (secretKey.length < MIN_SECRET_LENGTH) {
     invalid.push('RECRUITMENT_ZALO_OA_SECRET_KEY');
   }
-  return invalid.length ? { invalid } : { config: { appId, oaId, secretKey } };
+  return invalid.length || !('binding' in bound)
+    ? { invalid }
+    : { config: { ...bound.binding, secretKey } };
+}
+
+/**
+ * Cấu hình chế độ cách ly: app + OA + khoá mã hoá (`RECRUITMENT_ZALO_TOKEN_KEY`), và
+ * OA secret key PHẢI trống — đã có key thì dùng receiver kiểm chữ ký bình thường.
+ */
+export function readRecruitmentZaloQuarantineConfig(
+  get: (key: string) => string | undefined,
+): { binding: ZaloBinding; key: Buffer } | { invalid: string[] } {
+  const bound = readRecruitmentZaloBinding(get);
+  const invalid = 'invalid' in bound ? [...bound.invalid] : [];
+  if ((get('RECRUITMENT_ZALO_OA_SECRET_KEY')?.trim() ?? '') !== '') {
+    invalid.push(
+      'RECRUITMENT_ZALO_OA_SECRET_KEY (phải trống khi bật quarantine)',
+    );
+  }
+  const key = decodeKey(get('RECRUITMENT_ZALO_TOKEN_KEY')?.trim() ?? '');
+  if (!key) invalid.push('RECRUITMENT_ZALO_TOKEN_KEY');
+  return invalid.length || !key || !('binding' in bound)
+    ? { invalid }
+    : { binding: bound.binding, key };
 }
 
 /** Fail-closed: bật webhook mà thiếu/sai cấu hình thì app không khởi động. */
@@ -71,10 +119,13 @@ export function assertRecruitmentZaloConfig(
   get: (key: string) => string | undefined,
 ): void {
   if (!isRecruitmentZaloEnabled(get)) return;
-  const result = readRecruitmentZaloConfig(get);
+  const quarantine = isRecruitmentZaloQuarantine(get);
+  const result = quarantine
+    ? readRecruitmentZaloQuarantineConfig(get)
+    : readRecruitmentZaloConfig(get);
   if ('invalid' in result) {
     throw new Error(
-      `${RECRUITMENT_ZALO_CONFIG_ERROR}: RECRUITMENT_ZALO_ENABLED=true nhưng thiếu/sai ${result.invalid.join(', ')}`,
+      `${RECRUITMENT_ZALO_CONFIG_ERROR}: RECRUITMENT_ZALO_ENABLED=true${quarantine ? ' + RECRUITMENT_ZALO_WEBHOOK_QUARANTINE=true' : ''} nhưng thiếu/sai ${result.invalid.join(', ')}`,
     );
   }
 }
@@ -152,6 +203,57 @@ export type ZaloWebhookResult =
 
 type Json = Record<string, unknown>;
 
+/** Body thô → JSON object; chưa đọc trường nào. */
+export function parseZaloPayload(
+  rawBody: Buffer | undefined,
+): { ok: true; payload: Json } | { ok: false; code: 'MALFORMED_PAYLOAD' } {
+  if (!Buffer.isBuffer(rawBody) || rawBody.length === 0) {
+    return { ok: false, code: 'MALFORMED_PAYLOAD' };
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return { ok: false, code: 'MALFORMED_PAYLOAD' };
+  }
+  return isObject(payload)
+    ? { ok: true, payload }
+    : { ok: false, code: 'MALFORMED_PAYLOAD' };
+}
+
+/**
+ * `app_id` → `event_name` → OA ở đúng vị trí theo loại event. Dùng sau khi chữ ký
+ * khớp (receiver thường) hoặc — ở chế độ cách ly — để chỉ nhận vào cách ly event
+ * khai đúng app + OA tuyển dụng.
+ */
+export function checkZaloBinding(
+  binding: ZaloBinding,
+  payload: Json,
+):
+  | { ok: true; eventType: string }
+  | {
+      ok: false;
+      code: 'APP_MISMATCH' | 'MALFORMED_EVENT' | 'OA_MISMATCH';
+      eventType?: string;
+    } {
+  if (scalar(payload.app_id) !== binding.appId) {
+    return { ok: false, code: 'APP_MISMATCH' };
+  }
+  const eventType = payload.event_name;
+  if (typeof eventType !== 'string' || !EVENT_NAME.test(eventType)) {
+    return { ok: false, code: 'MALFORMED_EVENT' };
+  }
+  const parties = partiesOf(eventType, payload);
+  const declaredOa = payload.oa_id === undefined ? null : scalar(payload.oa_id);
+  if (
+    parties.oaId !== binding.oaId ||
+    (payload.oa_id !== undefined && declaredOa !== binding.oaId)
+  ) {
+    return { ok: false, code: 'OA_MISMATCH', eventType };
+  }
+  return { ok: true, eventType };
+}
+
 /**
  * Raw body → event đã chuẩn hoá, theo đúng thứ tự: đọc `timestamp` (cần cho công
  * thức ký) → kiểm chữ ký → `app_id` → OA → các trường. Không trường nào của
@@ -163,40 +265,19 @@ export function parseZaloRecruitmentEvent(
   signatureHeader: unknown,
   now: Date = new Date(),
 ): ZaloWebhookResult {
-  if (!Buffer.isBuffer(rawBody) || rawBody.length === 0) {
-    return { ok: false, code: 'MALFORMED_PAYLOAD' };
-  }
-  let payload: unknown;
-  try {
-    payload = JSON.parse(rawBody.toString('utf8'));
-  } catch {
-    return { ok: false, code: 'MALFORMED_PAYLOAD' };
-  }
-  if (!isObject(payload)) return { ok: false, code: 'MALFORMED_PAYLOAD' };
+  const decoded = parseZaloPayload(rawBody);
+  if (!decoded.ok) return decoded;
+  const payload = decoded.payload;
+  const body = rawBody as Buffer;
 
   const rawTimestamp = scalar(payload.timestamp);
-  if (
-    !verifyZaloSignature(config, rawBody, rawTimestamp ?? '', signatureHeader)
-  ) {
+  if (!verifyZaloSignature(config, body, rawTimestamp ?? '', signatureHeader)) {
     return { ok: false, code: 'INVALID_SIGNATURE' };
   }
-  if (scalar(payload.app_id) !== config.appId) {
-    return { ok: false, code: 'APP_MISMATCH' };
-  }
-
-  const eventType = payload.event_name;
-  if (typeof eventType !== 'string' || !EVENT_NAME.test(eventType)) {
-    return { ok: false, code: 'MALFORMED_EVENT' };
-  }
-
+  const bound = checkZaloBinding(config, payload);
+  if (!bound.ok) return bound;
+  const eventType = bound.eventType;
   const parties = partiesOf(eventType, payload);
-  const declaredOa = payload.oa_id === undefined ? null : scalar(payload.oa_id);
-  if (
-    parties.oaId !== config.oaId ||
-    (payload.oa_id !== undefined && declaredOa !== config.oaId)
-  ) {
-    return { ok: false, code: 'OA_MISMATCH', eventType };
-  }
 
   if (!rawTimestamp || !TIMESTAMP.test(rawTimestamp)) {
     return { ok: false, code: 'MALFORMED_EVENT', eventType };
@@ -252,7 +333,7 @@ export function parseZaloRecruitmentEvent(
       providerCreatedAt: providerTime(rawTimestamp, now),
       status,
       messageText: status === ChannelEventStatus.RECEIVED ? messageText : null,
-      payloadHash: createHash('sha256').update(rawBody).digest('hex'),
+      payloadHash: createHash('sha256').update(body).digest('hex'),
     },
   };
 }

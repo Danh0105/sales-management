@@ -147,7 +147,7 @@ export function assertZaloOutboundConfig(
 }
 
 /** Khoá 32 byte, dạng base64 (`openssl rand -base64 32`) hoặc hex 64 ký tự. */
-function decodeKey(raw: string): Buffer | null {
+export function decodeKey(raw: string): Buffer | null {
   if (!raw) return null;
   const key = /^[0-9a-f]{64}$/i.test(raw)
     ? Buffer.from(raw, 'hex')

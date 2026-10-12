@@ -20,6 +20,7 @@ import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-we
 import { RecruitmentZaloCredentialStore } from './channels/recruitment-zalo-credential.store';
 import { RecruitmentZaloSender } from './channels/recruitment-zalo-sender.service';
 import { RecruitmentZaloWebhookService } from './channels/recruitment-zalo-webhook.service';
+import { RecruitmentZaloQuarantineService } from './channels/recruitment-zalo-quarantine.service';
 import { assertZaloOutboundConfig } from './channels/zalo-outbound.config';
 import { assertRecruitmentZaloConfig } from './channels/zalo-recruitment-event';
 import { RecruitmentAiController } from './controllers/recruitment-ai.controller';
@@ -43,6 +44,7 @@ import { RecruitmentApplication } from './entities/recruitment-application.entit
 import { RecruitmentCandidate } from './entities/recruitment-candidate.entity';
 import { RecruitmentChannelEvent } from './entities/recruitment-channel-event.entity';
 import { RecruitmentChannelOutbox } from './entities/recruitment-channel-outbox.entity';
+import { RecruitmentChannelQuarantine } from './entities/recruitment-channel-quarantine.entity';
 import { RecruitmentConversation } from './entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from './entities/recruitment-handoff.entity';
 import { RecruitmentHrAlert } from './entities/recruitment-hr-alert.entity';
@@ -93,6 +95,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentAiIdempotencyKey,
       RecruitmentChannelEvent,
       RecruitmentChannelOutbox,
+      RecruitmentChannelQuarantine,
       RecruitmentZaloCredential,
       RecruitmentHrAlert,
       Department,
@@ -129,6 +132,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentAiIdempotencyInterceptor,
     RecruitmentAiOwnershipService,
     RecruitmentZaloWebhookService,
+    RecruitmentZaloQuarantineService,
     RecruitmentChannelEventQueue,
     RecruitmentChannelWorker,
     RecruitmentChannelOutboxQueue,

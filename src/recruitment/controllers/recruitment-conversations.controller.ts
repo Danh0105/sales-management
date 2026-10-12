@@ -20,6 +20,7 @@ import { Roles } from '../../auth/roles.decorator';
 import { RecruitmentConversationControlService } from '../channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from '../channels/recruitment-hr-alert.service';
 import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outbox-operations.service';
+import { RecruitmentZaloQuarantineService } from '../channels/recruitment-zalo-quarantine.service';
 import {
   HrAlertQueryDto,
   HrMessageDto,
@@ -111,7 +112,25 @@ export class RecruitmentOperationsController {
     private readonly outbox: RecruitmentOutboxOperationsService,
     private readonly control: RecruitmentConversationControlService,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly quarantine: RecruitmentZaloQuarantineService,
   ) {}
+
+  /** P3-7.2A — số request webhook đang/đã cách ly theo trạng thái (không nội dung). */
+  @Get('webhook-quarantine')
+  quarantineStats() {
+    return this.quarantine.stats();
+  }
+
+  /**
+   * Xác minh hồi tố request đã cách ly — chỉ chạy được khi đã có OA secret key và đã
+   * tắt quarantine. Khớp chữ ký → vào inbox; không khớp → xoá nội dung.
+   */
+  @Post('webhook-quarantine/verify')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  verifyQuarantine(@Req() req: Request) {
+    return this.quarantine.verifyAll(hrActor(req.user!));
+  }
 
   @Get('outbox')
   listOutbox(@Query() query: OutboxQueryDto) {

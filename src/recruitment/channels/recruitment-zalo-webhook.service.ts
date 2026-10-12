@@ -1,12 +1,8 @@
 import {
-  BadRequestException,
-  ForbiddenException,
-  HttpException,
   Injectable,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -16,12 +12,18 @@ import { Repository } from 'typeorm';
 import { RecruitmentChannelEvent } from '../entities/recruitment-channel-event.entity';
 import { ChannelEventStatus } from '../recruitment.enums';
 import {
+  RecruitmentZaloQuarantineService,
+  type ZaloQuarantineAck,
+} from './recruitment-zalo-quarantine.service';
+import { insertChannelEvent } from './zalo-channel-event.store';
+import { rejection } from './zalo-webhook-rejection';
+import {
   isRecruitmentZaloEnabled,
+  isRecruitmentZaloQuarantine,
   parseZaloRecruitmentEvent,
   readRecruitmentZaloConfig,
   type NormalizedZaloEvent,
   type RecruitmentZaloConfig,
-  type ZaloWebhookRejectCode,
 } from './zalo-recruitment-event';
 
 export interface ZaloWebhookAck {
@@ -45,15 +47,18 @@ export interface ZaloWebhookAck {
 export class RecruitmentZaloWebhookService {
   private readonly logger = new Logger('RecruitmentZaloWebhook');
   private readonly enabled: boolean;
+  private readonly quarantineMode: boolean;
   private readonly config: RecruitmentZaloConfig | null;
 
   constructor(
     @InjectRepository(RecruitmentChannelEvent)
     private readonly events: Repository<RecruitmentChannelEvent>,
     configService: ConfigService,
+    private readonly quarantine: RecruitmentZaloQuarantineService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isRecruitmentZaloEnabled(get);
+    this.quarantineMode = isRecruitmentZaloQuarantine(get);
     const read = readRecruitmentZaloConfig(get);
     this.config = 'config' in read ? read.config : null;
   }
@@ -61,9 +66,11 @@ export class RecruitmentZaloWebhookService {
   async receive(
     rawBody: Buffer | undefined,
     signature: unknown,
-  ): Promise<ZaloWebhookAck> {
+  ): Promise<ZaloWebhookAck | ZaloQuarantineAck> {
     // Cờ tắt: như thể route không tồn tại.
     if (!this.enabled) throw new NotFoundException();
+    // Chưa có OA secret key (P3-7.2A): chỉ ghi cách ly, không xử lý.
+    if (this.quarantineMode) return this.quarantine.receive(rawBody, signature);
     if (!this.config) {
       // Không tới được khi khởi động qua RecruitmentModule (fail-closed lúc init).
       throw new ServiceUnavailableException({
@@ -103,64 +110,9 @@ export class RecruitmentZaloWebhookService {
     return { ok: true, duplicate: stored.duplicate, status: event.status };
   }
 
-  /**
-   * Một câu `INSERT ... ON CONFLICT DO NOTHING` — DB quyết định ai là bản ghi duy
-   * nhất, không có khoảng hở SELECT-rồi-INSERT. Không có dòng trả về = trùng; khi
-   * đó mới đọc dòng cũ, chỉ để ghi log.
-   */
-  private async store(event: NormalizedZaloEvent) {
-    const inserted: Array<{ id: number }> = await this.events.query(
-      `INSERT INTO "recruitment_channel_events"
-        ("channel", "channel_account_id", "provider_event_id", "dedupe_key", "external_sender_id",
-         "event_type", "provider_message_id", "provider_created_at", "status", "payload_hash",
-         "normalized_message_text")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT ON CONSTRAINT "UQ_recruitment_channel_events_dedupe" DO NOTHING
-       RETURNING "id"`,
-      [
-        event.channel,
-        event.channelAccountId,
-        event.providerEventId,
-        event.dedupeKey,
-        event.externalSenderId,
-        event.eventType,
-        event.providerMessageId,
-        event.providerCreatedAt,
-        event.status,
-        event.payloadHash,
-        event.messageText,
-      ],
-    );
-    if (inserted.length) {
-      return { id: inserted[0].id, duplicate: false, samePayload: true };
-    }
-    const existing = await this.events.findOne({
-      where: {
-        channel: event.channel,
-        channelAccountId: event.channelAccountId,
-        dedupeKey: event.dedupeKey,
-      },
-      select: { id: true, payloadHash: true },
-    });
-    return {
-      id: existing?.id ?? null,
-      duplicate: true,
-      samePayload: existing?.payloadHash === event.payloadHash,
-    };
-  }
-}
-
-function rejection(code: ZaloWebhookRejectCode): HttpException {
-  const body = { code };
-  switch (code) {
-    case 'INVALID_SIGNATURE':
-      return new UnauthorizedException(body);
-    case 'APP_MISMATCH':
-    case 'OA_MISMATCH':
-      return new ForbiddenException(body);
-    case 'MALFORMED_PAYLOAD':
-    case 'MALFORMED_EVENT':
-      return new BadRequestException(body);
+  /** Đường ghi inbox dùng chung (chống trùng nguyên tử) — xem `insertChannelEvent`. */
+  private store(event: NormalizedZaloEvent) {
+    return insertChannelEvent(this.events, event);
   }
 }
 
