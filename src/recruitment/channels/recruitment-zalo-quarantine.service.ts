@@ -4,6 +4,7 @@ import {
   Logger,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
+  PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -31,7 +32,13 @@ import { rejection } from './zalo-webhook-rejection';
 
 /** Giữ request cách ly tối đa chừng này rồi xoá nội dung (chưa xác minh = không dùng). */
 export const QUARANTINE_RETENTION_HOURS = 72;
-const DEFAULT_MAX_ROWS = 5000;
+/**
+ * Endpoint công khai, app id + OA id không bí mật → ai cũng gửi được request không chữ ký
+ * vào cách ly. Giới hạn kích thước mỗi request và số dòng để chặn nhồi dung lượng
+ * (tối đa ~2000 × 64 KB, tự xoá sau 72 giờ). Event Zalo thật nhỏ hơn nhiều.
+ */
+const DEFAULT_MAX_ROWS = 2000;
+export const QUARANTINE_MAX_BODY_BYTES = 64 * 1024;
 const SIGNATURE_MAX_LENGTH = 200;
 const VERIFY_BATCH = 100;
 const EXPIRE_EVERY_MS = 10 * 60 * 1000;
@@ -71,7 +78,8 @@ interface QuarantineRow {
  * Nhận (`RECRUITMENT_ZALO_WEBHOOK_QUARANTINE=true`, chưa có secret key):
  * - body phải là JSON object, khai đúng `app_id` + OA tuyển dụng (như receiver thường);
  * - ghi bền body thô **mã hoá** + header chữ ký, COMMIT xong mới trả 200; lỗi DB → 503
- *   (Zalo gửi lại); bảng đầy (`RECRUITMENT_ZALO_QUARANTINE_MAX_ROWS`) → 503;
+ *   (Zalo gửi lại); bảng đầy (`RECRUITMENT_ZALO_QUARANTINE_MAX_ROWS`, mặc định 2000) → 503;
+ *   request > 64 KB → 413;
  * - KHÔNG xử lý: không inbox, không worker, không ứng viên/hội thoại.
  *
  * Xác minh hồi tố (có secret key, tắt quarantine): thao tác vận hành tường minh tính
@@ -130,6 +138,12 @@ export class RecruitmentZaloQuarantineService
     }
     const signed = typeof signature === 'string' && signature.trim() !== '';
     const size = Buffer.isBuffer(rawBody) ? rawBody.length : 0;
+    if (size > QUARANTINE_MAX_BODY_BYTES) {
+      this.logger.warn(
+        `zalo-recruitment quarantine rejected code=PAYLOAD_TOO_LARGE sig=${signed ? 'present' : 'absent'} bytes=${size}`,
+      );
+      throw new PayloadTooLargeException({ code: 'PAYLOAD_TOO_LARGE' });
+    }
     const decoded = parseZaloPayload(rawBody);
     const bound = decoded.ok
       ? checkZaloBinding(this.receiving.binding, decoded.payload)

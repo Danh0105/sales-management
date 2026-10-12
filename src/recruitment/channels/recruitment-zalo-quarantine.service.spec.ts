@@ -184,7 +184,7 @@ describe('RecruitmentZaloQuarantineService.receive', () => {
       signature,
       'user_send_text',
       body.length,
-      5000,
+      2000,
     ]);
     // Không chứa nội dung / người gửi ở dạng rõ; giải mã đúng AAD ra đúng byte gốc.
     expect(JSON.stringify(insert.params)).not.toContain(TEXT);
@@ -246,6 +246,18 @@ describe('RecruitmentZaloQuarantineService.receive', () => {
       expect(db.calls).toHaveLength(0);
     },
   );
+
+  it('request > 64 KB → 413, không ghi (chặn nhồi dung lượng bằng request không chữ ký)', async () => {
+    const db = fakeDb([]);
+    const { svc } = service(QUARANTINE_ENV, db);
+    const { body } = event({
+      message: { text: 'a'.repeat(70 * 1024), msg_id: 'big' },
+    });
+    const error = await svc.receive(body, undefined).catch((e) => e);
+    expect(error.getStatus()).toBe(413);
+    expect(error.getResponse()).toEqual({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(db.calls).toHaveLength(0);
+  });
 
   it('Zalo gửi lại đúng request đó → ACK 200 duplicate=true, không thêm dòng', async () => {
     const db = fakeDb([
