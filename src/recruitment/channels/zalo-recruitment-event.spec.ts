@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { ChannelEventChannel, ChannelEventStatus } from '../recruitment.enums';
 import {
   assertRecruitmentZaloConfig,
+  describeZaloOaMismatch,
   MAX_MESSAGE_TEXT_LENGTH,
   normalizeMessageText,
   parseZaloRecruitmentEvent,
@@ -401,5 +402,42 @@ describe('nội dung tin cho worker', () => {
         }),
       ),
     ).toMatchObject({ ok: false, code: 'MALFORMED_EVENT' });
+  });
+});
+
+describe('describeZaloOaMismatch — chẩn đoán OA lệch để ghi log', () => {
+  const fp = (v: string) =>
+    createHash('sha256').update(v).digest('hex').slice(0, 10);
+
+  it.each([
+    [
+      'recipient là OA khác, không khai oa_id',
+      textEvent({ recipient: { id: 'oa-giao-vien' } }),
+      `party_oa=${fp('oa-giao-vien')} declared_oa=absent`,
+    ],
+    [
+      'recipient đúng nhưng oa_id khai khác',
+      textEvent({ oa_id: 'oa-khac' }),
+      `party_oa=match declared_oa=${fp('oa-khac')}`,
+    ],
+    [
+      'không có recipient',
+      textEvent({ recipient: undefined }),
+      'party_oa=none declared_oa=absent',
+    ],
+    [
+      'follow: OA lấy từ oa_id',
+      { ...textEvent(), event_name: 'follow', oa_id: 'oa-khac' },
+      `party_oa=${fp('oa-khac')} declared_oa=${fp('oa-khac')}`,
+    ],
+  ])('%s', (_n, payload, expected) => {
+    const out = describeZaloOaMismatch(
+      CONFIG,
+      String(payload.event_name),
+      JSON.parse(JSON.stringify(payload)),
+    );
+    expect(out).toBe(expected);
+    // Không bao giờ chứa id thô.
+    expect(out).not.toMatch(/oa-giao-vien|oa-khac|oa-recruit/);
   });
 });

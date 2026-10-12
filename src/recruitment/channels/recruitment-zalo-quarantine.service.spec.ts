@@ -232,12 +232,6 @@ describe('RecruitmentZaloQuarantineService.receive', () => {
       'APP_MISMATCH',
     ],
     [
-      'sai OA',
-      event({ recipient: { id: 'oa-giao-vien' } }).body,
-      ForbiddenException,
-      'OA_MISMATCH',
-    ],
-    [
       'thiếu event_name',
       event({ event_name: undefined }).body,
       BadRequestException,
@@ -252,6 +246,76 @@ describe('RecruitmentZaloQuarantineService.receive', () => {
       expect(error).toBeInstanceOf(type);
       expect(error.getResponse()).toEqual({ code });
       expect(db.calls).toHaveLength(0);
+    },
+  );
+
+  it('sai OA + CÓ header chữ ký (vd. gói thử Zalo gửi khi lưu URL webhook) → vẫn cách ly, ACK 200 sau khi ghi; log có fingerprint, không có id OA', async () => {
+    const db = fakeDb([
+      [/INSERT INTO "recruitment_channel_quarantine"/, () => [{ id: 9 }]],
+    ]);
+    const { svc } = service(QUARANTINE_ENV, db);
+    const { body, signature } = event({ recipient: { id: 'oa-giao-vien' } });
+
+    await expect(svc.receive(body, signature)).resolves.toEqual({
+      ok: true,
+      quarantined: true,
+      duplicate: false,
+    });
+    // Ghi dưới OA đã cấu hình (cùng AAD như mọi dòng) — bước xác minh kiểm lại chữ ký + OA.
+    const [insert] = db.ran(/INSERT INTO "recruitment_channel_quarantine"/);
+    expect(insert.params.slice(0, 4)).toEqual([
+      'oa-recruit',
+      hashOf(body),
+      signature,
+      'user_send_text',
+    ]);
+    const fp = createHash('sha256')
+      .update('oa-giao-vien')
+      .digest('hex')
+      .slice(0, 10);
+    expect(logs.join('\n')).toContain(
+      `quarantined id=9 type=user_send_text duplicate=false sig=present bytes=${body.length} ` +
+        `binding=OA_MISMATCH party_oa=${fp} declared_oa=absent`,
+    );
+    expect(logs.join('\n')).not.toContain('oa-giao-vien');
+  });
+
+  it('sai OA KHÔNG có chữ ký → 403 OA_MISMATCH, không ghi; log có chẩn đoán, không có id OA', async () => {
+    const db = fakeDb([]);
+    const { svc } = service(QUARANTINE_ENV, db);
+    const error = await svc
+      .receive(event({ recipient: { id: 'oa-giao-vien' } }).body, undefined)
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(ForbiddenException);
+    expect(error.getResponse()).toEqual({ code: 'OA_MISMATCH' });
+    expect(db.calls).toHaveLength(0);
+    expect(logs.join('\n')).toMatch(
+      /rejected code=OA_MISMATCH type=user_send_text sig=absent bytes=\d+ party_oa=[0-9a-f]{10} declared_oa=absent/,
+    );
+    expect(logs.join('\n')).not.toContain('oa-giao-vien');
+  });
+
+  it.each([
+    [
+      'oa_id khai lệch (recipient đúng)',
+      { oa_id: 'oa-khac' },
+      /binding=OA_MISMATCH party_oa=match declared_oa=[0-9a-f]{10}$/,
+    ],
+    [
+      'không xác định được OA (thiếu recipient)',
+      { recipient: undefined },
+      /binding=OA_MISMATCH party_oa=none declared_oa=absent$/,
+    ],
+  ])(
+    '%s + có chữ ký → vẫn cách ly, log chẩn đoán đúng vị trí lệch',
+    async (_n, overrides, diag) => {
+      const db = fakeDb([[/INSERT INTO/, () => [{ id: 10 }]]]);
+      const { svc } = service(QUARANTINE_ENV, db);
+      const { body, signature } = event(overrides);
+      await svc.receive(body, signature);
+      expect(db.ran(/INSERT INTO/)).toHaveLength(1);
+      expect(logs.join('\n')).toMatch(diag);
+      expect(logs.join('\n')).not.toContain('oa-khac');
     },
   );
 
@@ -471,6 +535,32 @@ describe('RecruitmentZaloQuarantineService.verifyAll — xác minh hồi tố', 
       }),
     );
     expect(JSON.stringify(audit.record.mock.calls)).not.toContain(TEXT);
+  });
+
+  it('dòng lệch OA đã cách ly (gói thử Zalo) → REJECTED (chữ ký đúng: OA_MISMATCH; chữ ký giả: INVALID_SIGNATURE), KHÔNG vào inbox', async () => {
+    const probe = event({
+      recipient: { id: 'oa-giao-vien' },
+      message: { text: 'gói thử', msg_id: 'probe-1' },
+    });
+    const forged = event({
+      recipient: { id: 'oa-giao-vien' },
+      message: { text: 'gói thử 2', msg_id: 'probe-2' },
+    });
+    const { db, updates } = verifyDb([
+      row(1, probe.body, probe.signature),
+      row(2, forged.body, 'mac=' + '0'.repeat(64)),
+    ]);
+    const { svc } = service(NORMAL_ENV, db);
+    await expect(svc.verifyAll(HR)).resolves.toMatchObject({
+      verified: 0,
+      duplicates: 0,
+      rejected: { OA_MISMATCH: 1, INVALID_SIGNATURE: 1 },
+    });
+    expect(updates).toEqual([
+      [1, 'REJECTED', 'OA_MISMATCH', null],
+      [2, 'REJECTED', 'INVALID_SIGNATURE', null],
+    ]);
+    expect(db.ran(/INSERT INTO "recruitment_channel_events"/)).toHaveLength(0);
   });
 
   it('inbox đã có event (Zalo gửi lại sau khi có key) → VERIFIED/DUPLICATE, liên kết event cũ, không ghi thêm', async () => {

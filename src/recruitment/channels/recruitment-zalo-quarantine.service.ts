@@ -18,6 +18,7 @@ import { returnedRows } from './recruitment-channel-event.queue';
 import { insertChannelEvent } from './zalo-channel-event.store';
 import {
   checkZaloBinding,
+  describeZaloOaMismatch,
   isRecruitmentZaloEnabled,
   isRecruitmentZaloQuarantine,
   parseZaloPayload,
@@ -84,6 +85,10 @@ interface QuarantineRow {
  *
  * Nhận (`RECRUITMENT_ZALO_WEBHOOK_QUARANTINE=true`, chưa có secret key):
  * - body phải là JSON object, khai đúng `app_id` + OA tuyển dụng (như receiver thường);
+ *   riêng request đúng `app_id` + CÓ header chữ ký mà lệch OA (vd. gói thử Zalo gửi khi lưu
+ *   URL webhook — P3-7.2B G5) vẫn được cách ly để trả 200: chưa có key thì chưa phân định
+ *   được, và bước xác minh kiểm chữ ký rồi app/OA nên dòng đó thành REJECTED, không bao
+ *   giờ vào inbox. Lệch OA không chữ ký vẫn 403;
  * - ghi bền body thô **mã hoá** + header chữ ký, COMMIT xong mới trả 200; lỗi DB → 503
  *   (Zalo gửi lại); bảng đầy (`RECRUITMENT_ZALO_QUARANTINE_MAX_ROWS`, mặc định 2000) → 503;
  *   request > 64 KB → 413;
@@ -155,10 +160,23 @@ export class RecruitmentZaloQuarantineService
     const bound = decoded.ok
       ? checkZaloBinding(this.receiving.binding, decoded.payload)
       : decoded;
-    if (!bound.ok) {
+    const oaDiag =
+      decoded.ok && !bound.ok && bound.code === 'OA_MISMATCH' && bound.eventType
+        ? describeZaloOaMismatch(
+            this.receiving.binding,
+            bound.eventType,
+            decoded.payload,
+          )
+        : null;
+    let eventType: string;
+    if (bound.ok) {
+      eventType = bound.eventType;
+    } else if (signed && oaDiag && 'eventType' in bound && bound.eventType) {
+      eventType = bound.eventType;
+    } else {
       this.logger.warn(
         `zalo-recruitment quarantine rejected code=${bound.code} type=${('eventType' in bound && bound.eventType) || '-'} ` +
-          `sig=${signed ? 'present' : 'absent'} bytes=${size}`,
+          `sig=${signed ? 'present' : 'absent'} bytes=${size}${oaDiag ? ` ${oaDiag}` : ''}`,
       );
       throw rejection(bound.code);
     }
@@ -181,14 +199,14 @@ export class RecruitmentZaloQuarantineService
         binding.oaId,
         payloadHash,
         header,
-        bound.eventType,
+        eventType,
         size,
         bodyEnc,
       );
     } catch (error) {
       if (error instanceof ServiceUnavailableException) throw error;
       this.logger.error(
-        `zalo-recruitment quarantine store failed type=${bound.eventType} ` +
+        `zalo-recruitment quarantine store failed type=${eventType} ` +
           `error=${(error as { code?: string }).code ?? (error as Error).name}`,
       );
       throw new ServiceUnavailableException({
@@ -196,8 +214,8 @@ export class RecruitmentZaloQuarantineService
       });
     }
     this.logger.log(
-      `zalo-recruitment quarantined id=${outcome.id} type=${bound.eventType} duplicate=${outcome.duplicate} ` +
-        `sig=${signed ? 'present' : 'absent'} bytes=${size}`,
+      `zalo-recruitment quarantined id=${outcome.id} type=${eventType} duplicate=${outcome.duplicate} ` +
+        `sig=${signed ? 'present' : 'absent'} bytes=${size}${oaDiag ? ` binding=OA_MISMATCH ${oaDiag}` : ''}`,
     );
     return { ok: true, quarantined: true, duplicate: outcome.duplicate };
   }

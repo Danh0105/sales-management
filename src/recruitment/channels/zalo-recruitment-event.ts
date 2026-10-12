@@ -255,6 +255,27 @@ export function checkZaloBinding(
 }
 
 /**
+ * Chẩn đoán `OA_MISMATCH` để ghi log: OA đọc ở vị trí theo loại event (`party_oa`) và
+ * `oa_id` khai báo (`declared_oa`), mỗi cái là `match` / `none` / `absent` hoặc
+ * fingerprint sha256[:10] — KHÔNG bao giờ trả id thô.
+ */
+export function describeZaloOaMismatch(
+  binding: ZaloBinding,
+  eventType: string,
+  payload: Json,
+): string {
+  const label = (value: string | null) =>
+    value === null
+      ? 'none'
+      : value === binding.oaId
+        ? 'match'
+        : createHash('sha256').update(value).digest('hex').slice(0, 10);
+  const declared =
+    payload.oa_id === undefined ? 'absent' : label(scalar(payload.oa_id));
+  return `party_oa=${label(partiesOf(eventType, payload).oaId)} declared_oa=${declared}`;
+}
+
+/**
  * Raw body → event đã chuẩn hoá, theo đúng thứ tự: đọc `timestamp` (cần cho công
  * thức ký) → kiểm chữ ký → `app_id` → OA → các trường. Không trường nào của
  * payload được dùng trước khi chữ ký khớp, ngoài `timestamp` để tính chữ ký.
