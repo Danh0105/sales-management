@@ -6,8 +6,10 @@
 //     valid: ký đúng sha256(appId + body + timestamp + OA secret) · bad: chữ ký ngẫu nhiên · none: không header
 //   env tuỳ chọn: EVENT_TEXT (nội dung), EVENT_APP (ghi đè app_id), EVENT_OA (ghi đè OA nhận),
 //                 RAW_BODY (gửi thân thô không phải JSON)
+//   TARGET_PORT=3026 node - par <runId> <msgPrefix> <số request> <same|distinct>
+//     gửi CÙNG LÚC n request ký đúng: same = cùng một request (byte y hệt), distinct = n tin khác nhau
 //
-// In một dòng JSON: {status, body}.
+// In một dòng JSON: {status, body} (send) hoặc {codes: {200: n, …}, created: số lần duplicate=false} (par).
 const { createHash, randomBytes } = require('crypto');
 
 const [mode, run, msgId, sender, sig] = process.argv.slice(2);
@@ -23,7 +25,43 @@ function timestampOf(seed) {
   return String(Number(run) * 1000 + n);
 }
 
+function signedTextEvent(id, user) {
+  const timestamp = timestampOf(id);
+  const body = Buffer.from(
+    JSON.stringify({
+      app_id: APP,
+      user_id_by_app: `byapp-${user}`,
+      event_name: 'user_send_text',
+      timestamp,
+      sender: { id: user },
+      recipient: { id: OA },
+      message: { text: `Tin song song ${id}`, msg_id: id },
+    }),
+  );
+  const mac = createHash('sha256').update(APP).update(body).update(timestamp).update(SECRET).digest('hex');
+  return fetch(`http://localhost:${PORT}/recruitment/channels/zalo/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-zevent-signature': `mac=${mac}` },
+    body,
+  }).then(async (r) => ({ status: r.status, body: await r.text() }));
+}
+
+async function parallel() {
+  const [, , prefix, count, kind] = process.argv.slice(2);
+  const n = Number(count);
+  const results = await Promise.all(
+    Array.from({ length: n }, (_, i) =>
+      kind === 'same' ? signedTextEvent(prefix, `${prefix}-u`) : signedTextEvent(`${prefix}-${i}`, `${prefix}-u${i}`),
+    ),
+  );
+  const codes = {};
+  for (const r of results) codes[r.status] = (codes[r.status] || 0) + 1;
+  const created = results.filter((r) => r.status === 200 && JSON.parse(r.body).duplicate === false).length;
+  console.log(JSON.stringify({ codes, created }));
+}
+
 async function main() {
+  if (mode === 'par') return parallel();
   if (mode !== 'send') throw new Error('mode');
   let body;
   let timestamp = '';

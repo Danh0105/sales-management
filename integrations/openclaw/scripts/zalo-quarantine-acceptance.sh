@@ -36,6 +36,17 @@ qsend() {
   local out; out=$("${DC[@]}" exec -T -e TARGET_PORT="$port" "$@" staging-api node - send "$RUN_ID" "$msg" "$sender" "$sig" < staging/zalo-quarantine-acceptance.js)
   python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(str(d['status'])+' '+(d['body'] or '{}'))" "$out"
 }
+# qpar <cổng> <tiền tố> <n> <same|distinct> → JSON {codes, created} (n request gửi CÙNG LÚC)
+qpar() { "${DC[@]}" exec -T -e TARGET_PORT="$1" staging-api node - par "$RUN_ID" "$2" "$3" "$4" < staging/zalo-quarantine-acceptance.js; }
+pj() { python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d[sys.argv[2]], sort_keys=True) if isinstance(d[sys.argv[2]], dict) else d[sys.argv[2]])" "$1" "$2"; }
+# vsum <trường> <file…> → tổng trường (dict → tổng các giá trị) qua các phản hồi verify
+vsum() { python3 -c "
+import json, sys
+t = 0
+for f in sys.argv[2:]:
+    v = json.loads(open(f).read().split(' ', 1)[1]).get(sys.argv[1], 0)
+    t += sum(v.values()) if isinstance(v, dict) else v
+print(t)" "$@"; }
 qrow() { sql "select $2 from recruitment_channel_quarantine where payload_hash = (select payload_hash from recruitment_channel_quarantine where id = $1)"; }
 qid_of() { sql "select max(id) from recruitment_channel_quarantine where received_at >= '$T0' and event_type = 'user_send_text' and id > ${2:-0}"; }
 ev_of() { sql "select $2 from recruitment_channel_events where channel_account_id = '$OA' and provider_message_id = '$1'"; }
@@ -59,7 +70,8 @@ let pw='';process.stdin.on('data',d=>pw+=d).on('end',async()=>{
 });" "${PHONE[$1]}" "$2" "$3" "$4"
 }
 cleanup() {
-  docker rm -f "$Q" "$N" "$C" "$W" "$MOCK" >/dev/null 2>&1 || true
+  docker rm -f "$Q" "$N" "$C" "$C2" "$W" "$MOCK" >/dev/null 2>&1 || true
+  rm -rf "${TMPD:-/nonexistent}"
   sql "alter table if exists recruitment_channel_quarantine_x rename to recruitment_channel_quarantine" >/dev/null 2>&1 || true
   sql "drop trigger if exists p372a_fail_g on recruitment_channel_events; drop function if exists p372a_fail()" >/dev/null 2>&1 || true
   sql "delete from recruitment_channel_quarantine where body_enc in ('p372a-fill', 'p372a-hold')" >/dev/null 2>&1 || true
@@ -71,6 +83,8 @@ OA=$(node_in_api "console.log(process.env.RECRUITMENT_ZALO_OA_ID)")
 T0=$(sql "select now()::text")
 TEACHER_BEFORE="$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || access_token || refresh_token, ',' order by id)), '-') from zalo_tokens")"
 A="q${RUN_ID}a"; G="q${RUN_ID}g"; B="q${RUN_ID}b"; X="q${RUN_ID}x"; E="q${RUN_ID}e"; F="q${RUN_ID}f"
+S1="q${RUN_ID}s"; H="q${RUN_ID}h"; K="q${RUN_ID}k"; C2="kido-p372a-cap2-$RUN_ID"
+TMPD=$(mktemp -d)
 TXT_A="Em tên Ngọc, muốn ứng tuyển tư vấn run $RUN_ID"
 
 echo "== 0. Chuẩn bị (run $RUN_ID)"
@@ -169,11 +183,30 @@ same "4b. không đẩy dòng cũ ra: đúng tập dòng đang cách ly như tr�
   "$SET_BEFORE|5"
 sql "delete from recruitment_channel_quarantine where body_enc = 'p372a-fill'" >/dev/null
 
+echo "== 4c. Đồng thời: Zalo gửi lại dồn dập, nhiều tin cùng lúc, trần chính xác"
+MAXID=$(sql "select coalesce(max(id), 0) from recruitment_channel_quarantine")
+R=$(qpar 3026 "$S1" 20 same)
+same "4c. 20 request GIỐNG HỆT gửi cùng lúc → 200×20, đúng 1 lần ghi mới, đúng 1 dòng" \
+  "$(pj "$R" codes)|$(pj "$R" created)|$(sql "select count(*) from recruitment_channel_quarantine where id > $MAXID")" '{"200": 20}|1|1'
+R=$(qpar 3026 "$H" 10 distinct)
+same "4c. 10 tin KHÁC NHAU gửi cùng lúc → 200×10, 10 dòng mới" \
+  "$(pj "$R" codes)|$(pj "$R" created)|$(sql "select count(*) from recruitment_channel_quarantine where id > $MAXID")" '{"200": 10}|10|11'
+CAP2=$(( $(sql "select count(*) from recruitment_channel_quarantine where status = 'QUARANTINED'") + 5 ))
+MAXID2=$(sql "select coalesce(max(id), 0) from recruitment_channel_quarantine")
+"${DC[@]}" run -d --no-deps --name "$C2" -e PORT=3028 -e RECRUITMENT_ZALO_ENABLED=true -e RECRUITMENT_ZALO_WEBHOOK_QUARANTINE=true \
+  -e RECRUITMENT_ZALO_OA_SECRET_KEY= -e RECRUITMENT_ZALO_QUARANTINE_MAX_ROWS="$CAP2" staging-api >/dev/null
+wait_http 3028 /recruitment/ai/jobs/active
+R=$(qpar 3028 "$K" 30 distinct)
+same "4c. còn đúng 5 chỗ, 30 tin khác nhau CÙNG LÚC → đúng 5 nhận (200), 25 bị 503; số dòng đang cách ly = trần, không vượt" \
+  "$(pj "$R" codes)|$(pj "$R" created)|$(sql "select count(*) from recruitment_channel_quarantine where status = 'QUARANTINED'")" "{\"200\": 5, \"503\": 25}|5|$CAP2"
+docker rm -f "$C2" >/dev/null
+sql "delete from recruitment_channel_quarantine where id > $MAXID2" >/dev/null  # 5 dòng thử trần — không thuộc phần xác minh
+
 echo "== 5. Có key: xác minh hồi tố"
 R=$(hr hr 3026 GET /recruitment/operations/webhook-quarantine)
 same "5. thống kê (chế độ cách ly): chỉ số lượng, không nội dung" "$(status_of "$R")|$(jq_get "$R" mode)|$(echo "$R" | grep -c "$A" || true)" "200|QUARANTINE|0"
 R=$(hr hr 3026 POST /recruitment/operations/webhook-quarantine/verify)
-same "5. xác minh khi quarantine còn bật → 409 QUARANTINE_STILL_ACTIVE, không đổi gì" "$(status_of "$R")/$(jq_get "$R" code)|$(sql "select count(*) from recruitment_channel_quarantine where status = 'QUARANTINED' and id >= $QA")" "409/QUARANTINE_STILL_ACTIVE|5"
+same "5. xác minh khi quarantine còn bật → 409 QUARANTINE_STILL_ACTIVE, không đổi gì" "$(status_of "$R")/$(jq_get "$R" code)|$(sql "select count(*) from recruitment_channel_quarantine where status = 'QUARANTINED' and id >= $QA")" "409/QUARANTINE_STILL_ACTIVE|16"
 # Khoá đã có → tắt quarantine, receiver thường (kiểm chữ ký) trên cùng cổng.
 docker rm -f "$Q" >/dev/null
 "${DC[@]}" run -d --no-deps --name "$N" -e PORT=3026 -e RECRUITMENT_ZALO_ENABLED=true staging-api >/dev/null
@@ -186,10 +219,15 @@ same "5. ban giám đốc (chỉ xem) chạy xác minh → 403" "$(status_of "$(
 sql "create or replace function p372a_fail() returns trigger language plpgsql as \$\$ begin raise exception 'p372a: lỗi giả lập'; end \$\$;
      create trigger p372a_fail_g before insert on recruitment_channel_events for each row
        when (NEW.provider_message_id = '$G-1') execute function p372a_fail()" >/dev/null
-R=$(hr hr 3026 POST /recruitment/operations/webhook-quarantine/verify)
-same "5. xác minh lần 1: ký đúng → inbox (A); không chữ ký + sai chữ ký → REJECTED (2); quá 72 giờ → EXPIRED (1); G lỗi DB → failed (1), còn lại 1" \
-  "$(status_of "$R")|$(jq_get "$R" verified)|$(jq_get "$R" duplicates)|$(jq_get "$R" rejected)|$(jq_get "$R" expired)|$(jq_get "$R" undecryptable)|$(jq_get "$R" failed)|$(jq_get "$R" remaining)" \
-  '200|1|0|{"INVALID_SIGNATURE": 2}|1|0|1|1'
+# Lần 1: HAI lần xác minh chạy CÙNG LÚC (vd. hai người bấm) — mỗi dòng chỉ được một bên xử lý.
+hr hr 3026 POST /recruitment/operations/webhook-quarantine/verify > "$TMPD/v1" &
+hr hr 3026 POST /recruitment/operations/webhook-quarantine/verify > "$TMPD/v2" &
+wait
+same "5. hai lần xác minh cùng lúc: cộng lại = A + S1 + 10 H vào inbox (12), không trùng; REJECTED 2; EXPIRED 1; G lỗi DB → failed ≥ 1" \
+  "$(status_of "$(cat "$TMPD/v1")")|$(status_of "$(cat "$TMPD/v2")")|$(vsum verified "$TMPD/v1" "$TMPD/v2")|$(vsum duplicates "$TMPD/v1" "$TMPD/v2")|$(vsum rejected "$TMPD/v1" "$TMPD/v2")|$(vsum expired "$TMPD/v1" "$TMPD/v2")|$(( $(vsum failed "$TMPD/v1" "$TMPD/v2") >= 1 ))" \
+  "200|200|12|0|2|1|1"
+same "5. mỗi event vào inbox ĐÚNG 1 lần dù hai lần xác minh chạy song song (S1 + 10 H)" \
+  "$(sql "select count(*) || '/' || count(distinct provider_message_id) from recruitment_channel_events where provider_message_id = '$S1' or provider_message_id like '$H-%'")" "11/11"
 same "5. dòng lỗi giữa chừng KHÔNG mất, KHÔNG vào inbox dở dang: G vẫn QUARANTINED + còn bản mã" \
   "$(sql "select status || '/' || (body_enc is not null) || '/' || coalesce(resolution_code, '-') from recruitment_channel_quarantine where id = $QG")|$(sql "select count(*) from recruitment_channel_events where provider_message_id = '$G-1'")" "QUARANTINED/true/-|0"
 same "5. event ký đúng đi qua ĐÚNG đường receiver thường: inbox RECEIVED, nội dung chuẩn hoá, cùng payload hash, liên kết dòng cách ly" \
@@ -205,21 +243,21 @@ same "5. hết lỗi → chạy lại: G vào inbox đúng 1 lần (VERIFIED/NEW
   "1|0|0|VERIFIED/NEW|1"
 same "5. mọi dòng đã kết thúc → bản mã đã xoá (CHECK bảo đảm)" "$(sql "select count(*) from recruitment_channel_quarantine where id >= $QA and body_enc is not null")" 0
 docker start "$W" >/dev/null; wait_http 3027 /recruitment/ai/jobs/active
-wait_sql 40 "select count(*) = 2 and bool_and(status = 'PROCESSED') from recruitment_channel_events where provider_message_id in ('$A-1', '$G-1')" || true
-same "5. sau xác minh, event đi tiếp bình thường: worker xử lý A và G (OpenClaw đúng 1 lần mỗi tin) → PROCESSED" \
-  "$(ev_of "$A-1" status)/$(ev_of "$G-1" status)|$(mock_calls "$A-1")$(mock_calls "$G-1")" "PROCESSED/PROCESSED|11"
+wait_sql 90 "select count(*) = 13 and bool_and(status = 'PROCESSED') from recruitment_channel_events where provider_message_id in ('$A-1', '$G-1', '$S1') or provider_message_id like '$H-%'" || true
+same "5. sau xác minh, event đi tiếp bình thường: worker xử lý A, G, S1 + 10 H (OpenClaw đúng 1 lần mỗi tin) → PROCESSED" \
+  "$(sql "select count(*) filter (where status = 'PROCESSED') from recruitment_channel_events where provider_message_id in ('$A-1', '$G-1', '$S1') or provider_message_id like '$H-%'")|$(mock_calls "$A-1")$(mock_calls "$G-1")$(mock_calls "$S1")|$(mock_calls "$H-")" "13|111|10"
 same "5. event bị từ chối không bao giờ tới OpenClaw" "$(mock_calls "$B-1")$(mock_calls "$X-1")$(mock_calls "$E-1")" "000"
 R=$(hr hr 3026 POST /recruitment/operations/webhook-quarantine/verify)
 same "5. chạy xác minh lần 3 → không còn gì, không ghi thêm" "$(jq_get "$R" verified)|$(jq_get "$R" duplicates)|$(jq_get "$R" rejected)|$(jq_get "$R" failed)|$(sql "select count(*) from recruitment_channel_events where provider_message_id in ('$A-1', '$G-1')")" "0|0|{}|0|2"
 R=$(qsend 3026 "$A-1" "$A" valid -e EVENT_TEXT="$TXT_A")
 same "5. Zalo gửi lại event đó tới receiver thường (đã có key) → 200 duplicate=true (chống trùng chung)" "$(status_of "$R")|$(jq_get "$R" duplicate)|$(sql "select count(*) from recruitment_channel_events where provider_message_id = '$A-1'")" "200|True|1"
 same "5. receiver thường (có key) từ chối request không chữ ký → 401, không cách ly" \
-  "$(status_of "$(qsend 3026 "$F-5" "$F" none)")|$(sql "select count(*) from recruitment_channel_quarantine where id >= $QA")" "401|5"
+  "$(status_of "$(qsend 3026 "$F-5" "$F" none)")|$(sql "select count(*) from recruitment_channel_quarantine where id >= $QA")" "401|16"
 same "5. audit CHANNEL_QUARANTINE_VERIFY: 3 lần chạy, đúng nhân viên HR, chỉ số lượng" \
   "$(sql "select count(*) >= 3 and bool_and(\"actorId\" = $HR_ID) and bool_and(context::text not like '%$A%' and context::text not like '%run $RUN_ID%') from activity_log where method = 'CHANNEL_QUARANTINE_VERIFY' and \"createdAt\" >= '$T0'")" t
 
 echo "== 6. Log / OA giáo viên"
-LEAK=$( { docker logs "$Q" 2>&1 || true; docker logs "$N" 2>&1; docker logs "$W" 2>&1; } | grep -cF -f <(printf '%s\n' "$A" "$G" "$B" "$X" "$E" "run $RUN_ID" "Ngọc"; sed -n 's/^STAGING_ZALO_OA_SECRET_KEY=//p;s/^STAGING_ZALO_TOKEN_KEY=//p' "$ENV_FILE") || true)
+LEAK=$( { docker logs "$Q" 2>&1 || true; docker logs "$N" 2>&1; docker logs "$W" 2>&1; } | grep -cF -f <(printf '%s\n' "$A" "$G" "$B" "$X" "$E" "$S1" "$H" "$K" "run $RUN_ID" "Ngọc" "Tin song song"; sed -n 's/^STAGING_ZALO_OA_SECRET_KEY=//p;s/^STAGING_ZALO_TOKEN_KEY=//p' "$ENV_FILE") || true)
 same "6. log receiver/worker: 0 nội dung, 0 id người gửi, 0 secret" "$LEAK" 0
 same "6. token OA giáo viên không đổi" "$(sql "select count(*) || '/' || coalesce(md5(string_agg(id::text || access_token || refresh_token, ',' order by id)), '-') from zalo_tokens")" "$TEACHER_BEFORE"
 if git -C "$REPO" diff --quiet "$TEACHER_BASELINE" HEAD -- src/zalo-oa src/zalo-token src/notify-zalo src/main.ts; then ok "6. code OA giáo viên không đổi so với production baseline"; else ko "6. code OA giáo viên không đổi so với production baseline"; fi
