@@ -43,6 +43,7 @@ const completed = (text, status = 'completed', usage) => ({
   output: [{ type: 'message', role: 'assistant', phase: 'final_answer', status, content: [{ type: 'output_text', text }] }],
   ...(usage ? { usage } : {}),
 });
+const DEFAULT_USAGE = { input_tokens: 80, output_tokens: 20, total_tokens: 100 };
 const failed = (code) => ({ status: 'failed', output: [], error: { code, message: 'mock' } });
 
 async function api(method, path, subject, body) {
@@ -159,7 +160,8 @@ const server = http.createServer(async (req, res) => {
           return req.socket.destroy();
         }
         done('200');
-        return json(res, 200, completed(reply, 'completed', current.usage));
+        return json(res, 200, completed(reply, 'completed',
+          current.usage === null ? null : (current.usage || DEFAULT_USAGE)));
       }
       case 'proxy':
       case 'proxy-drop': {

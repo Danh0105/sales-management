@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
-const { DataSource } = require('typeorm');
+const { DataSource } = require('/app/node_modules/typeorm');
 
 const root = '/app/dist';
 const { ActivityLog } = require(path.join(root, 'activity-log/activity-log.entity.js'));
@@ -129,6 +129,13 @@ async function main() {
     });
     await check('audit INSERT fail: resume rollback, no false success', async () => {
       await runtime.set(['AI'], true, 'P1FIX setup stop', good);
+      const stopAudit = await one(`SELECT "beforeData" AS before, "afterData" AS after,
+        context, "createdAt" AS at FROM activity_log WHERE method='RUNTIME_STOP'
+        AND context->>'reason'='P1FIX setup stop' ORDER BY id DESC LIMIT 1`);
+      assert.equal(stopAudit.before.ai, false);
+      assert.equal(stopAudit.after.ai, true);
+      assert.equal(stopAudit.context.result, 'SUCCESS');
+      assert.ok(stopAudit.at);
       const before = await auditCount('RUNTIME_RESUME', { entity: 'runtime-controls', id: 1 });
       await assert.rejects(() => runtime.set(['AI'], false, 'P1FIX fault resume', fault), /P1FIX_AUDIT_INSERT_FAIL/);
       assert.equal((await runtime.state()).aiHalted, true);
@@ -162,6 +169,11 @@ async function main() {
         runtime.haltAiIfRunning('P1FIX concurrent auto', good)));
       assert.equal(outcomes.filter(Boolean).length, 1);
       assert.equal(await auditCount('RUNTIME_STOP', { entity: 'runtime-controls', id: 1 }), before + 1);
+      const auditRow = await one(`SELECT "beforeData" AS before,"afterData" AS after
+        FROM activity_log WHERE method='RUNTIME_STOP' AND
+        context->>'reason'='P1FIX concurrent auto' ORDER BY id DESC LIMIT 1`);
+      assert.equal(auditRow.before.ai, false);
+      assert.equal(auditRow.after.ai, true);
       await resetRuntime(runtime);
     });
     await check('runtime controls unreadable: local fail-closed', async () => {

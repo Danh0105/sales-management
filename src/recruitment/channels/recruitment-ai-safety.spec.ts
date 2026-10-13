@@ -181,7 +181,7 @@ describe('RecruitmentRuntimeControlService', () => {
 
   it('dừng: chỉ đổi đúng cột của phạm vi, ghi lý do + người làm, audit before/after', async () => {
     const after = { ...row, ai_halted: true, outbound_halted: true };
-    const query = jest.fn().mockResolvedValueOnce([row]).mockResolvedValueOnce([after]);
+    const query = jest.fn().mockResolvedValueOnce([row]).mockResolvedValueOnce([[after], 1]);
     const { svc, audit } = service(query);
     await expect(
       svc.set(
@@ -247,7 +247,7 @@ describe('RecruitmentRuntimeControlService.haltAiIfRunning', () => {
   it('đổi được trạng thái (đang chạy → dừng) → audit RUNTIME_STOP hệ thống, trả state mới', async () => {
     const query = jest.fn()
       .mockResolvedValueOnce([{ ...running, ai_halted: false }])
-      .mockResolvedValueOnce([running]);
+      .mockResolvedValueOnce([[running], 1]);
     const { svc, audit } = make(query);
     await expect(
       svc.haltAiIfRunning('AI_LIMIT DAILY_TOKENS 5100/5000', SYSTEM as any),

@@ -9,6 +9,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { RecruitmentAuditService } from '../recruitment-audit.service';
 import { RuntimeControlScope } from '../recruitment.enums';
 import type { RecruitmentActor } from '../recruitment.roles';
+import { returnedRows } from './recruitment-channel-event.queue';
 
 export interface RuntimeControlState {
   aiHalted: boolean;
@@ -190,7 +191,7 @@ export class RecruitmentRuntimeControlService {
           return { state: this.fromRow(row), changed: false };
         }
 
-        const [afterRow]: RuntimeRow[] = await em.query(
+        const [afterRow] = returnedRows<RuntimeRow>(await em.query(
           `UPDATE "recruitment_runtime_controls"
            SET ${unique.map((scope) => `"${COLUMN[scope]}" = $1`).join(', ')},
                reason = $2, updated_by = $3, updated_at = now(),
@@ -201,7 +202,7 @@ export class RecruitmentRuntimeControlService {
            RETURNING ai_halted, worker_halted, outbound_halted, reason, updated_by, updated_at,
                      failsafe_halted, failsafe_reason, failsafe_at`,
           [halted, reason, actor.employeeId ?? null, clearsFailsafe],
-        );
+        ));
         if (!afterRow) this.missing();
         const after = this.fromRow(afterRow, false);
         await this.audit.recordMandatory(em, {
@@ -251,14 +252,14 @@ export class RecruitmentRuntimeControlService {
         if (!row) this.missing();
         if (row.ai_halted || row.failsafe_halted) return null;
         const before = this.fromRow(row, false);
-        const [afterRow]: RuntimeRow[] = await em.query(
+        const [afterRow] = returnedRows<RuntimeRow>(await em.query(
           `UPDATE "recruitment_runtime_controls"
            SET ai_halted = true, reason = $1, updated_by = $2, updated_at = now()
            WHERE id = 1
            RETURNING ai_halted, worker_halted, outbound_halted, reason, updated_by, updated_at,
                      failsafe_halted, failsafe_reason, failsafe_at`,
           [reason, actor.employeeId ?? null],
-        );
+        ));
         if (!afterRow) this.missing();
         const after = this.fromRow(afterRow, false);
         await this.audit.recordMandatory(em, {
