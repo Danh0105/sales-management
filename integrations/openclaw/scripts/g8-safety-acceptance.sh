@@ -244,6 +244,61 @@ wait_sql 30 "select status = 'PROCESSED' from recruitment_channel_events where p
 same "7. tin bị trả về hàng chờ lúc AI tự dừng được xử lý sau khi mở lại" "$(ev "$D-2" status)" PROCESSED
 stop "$P-w6"
 
+echo "== 7b. In-flight STOP và OUTBOUND stop → HR takeover → resume"
+echo "  $(scripts/outbox-fixture-cleanup.sh "G8 in-flight run $RUN_ID: dọn outbox fixture trước khi bật sender")"
+F="g8${RUN_ID}f"; G="g8${RUN_ID}g"
+mock_mode '{"mode":"ok","delayMs":5000}'
+start_worker "$P-w7" 3051
+send "$F-1" "$F" "Tin G8 in-flight stop $RUN_ID" >/dev/null
+wait_sql 15 "select ai_provider_dispatched_at is not null from recruitment_channel_events where provider_message_id = '$F-1'" || true
+pause 1
+same "7b. provider request đã in-flight trước STOP" "$(mock_calls "$F-1")" 1
+hr hr POST /recruitment/operations/runtime-controls/stop '{"scopes":["AI","OUTBOUND"],"reason":"G8 in-flight emergency stop"}' >/dev/null
+pause 7
+same "7b. STOP in-flight → không tạo AI outbox, không gửi Zalo, event fail-closed" \
+  "$(ob "$F-1" "count(*)")|$(zalo_sends "$F")|$(ev "$F-1" "status || '/' || (ai_provider_dispatched_at is not null)")" \
+  "0|0|FAILED/true"
+CONV_F=$(sql "select conversation_id from recruitment_messages where external_message_id = '$F-1' limit 1")
+hr hr POST "/recruitment/conversations/$CONV_F/takeover" >/dev/null
+hr hr POST /recruitment/operations/runtime-controls/resume '{"scopes":["AI"],"reason":"G8 in-flight AI resume after HR takeover"}' >/dev/null
+same "7b. takeover rồi resume AI không phát lại request cũ" "$(mock_calls "$F-1")|$(ob "$F-1" "count(*)")|$(zalo_sends "$F")" "1|0|0"
+
+mock_mode '{"mode":"ok"}'
+send "$G-1" "$G" "Tin G8 outbound held $RUN_ID" >/dev/null
+wait_sql 30 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$G-1'" || true
+same "7b. OUTBOUND dừng: AI reply chỉ nằm PENDING" "$(ob "$G-1" status)|$(zalo_sends "$G")" "PENDING|0"
+CONV_G=$(sql "select conversation_id from recruitment_messages where external_message_id = '$G-1' limit 1")
+hr hr POST "/recruitment/conversations/$CONV_G/takeover" >/dev/null
+start_sender "$P-s3" 3052
+hr hr POST /recruitment/operations/runtime-controls/resume '{"scopes":["OUTBOUND"],"reason":"G8 outbound resume after HR takeover"}' >/dev/null
+wait_sql 30 "select status = 'SUPPRESSED' from recruitment_channel_outbox where source_event_id = (select id from recruitment_channel_events where provider_message_id = '$G-1')" || true
+same "7b. OUTBOUND resume sau takeover → tin AI cũ SUPPRESSED, Zalo 0" \
+  "$(ob "$G-1" "status || '/' || last_error_code")|$(zalo_sends "$G")" \
+  "SUPPRESSED/CONTROL_HUMAN_TAKEOVER|0"
+hr hr POST "/recruitment/conversations/$CONV_G/resume-ai" '{}' >/dev/null
+send "$G-2" "$G" "Tin G8 after HR resume $RUN_ID" >/dev/null
+wait_sql 30 "select status = 'SENT' from recruitment_channel_outbox where source_event_id = (select id from recruitment_channel_events where provider_message_id = '$G-2')" || true
+same "7b. tin MỚI sau HR resume gửi đúng một lần; tin cũ vẫn bị chặn" \
+  "$(ob "$G-2" status)|$(zalo_sends "$G")|$(ob "$G-1" status)" "SENT|1|SUPPRESSED"
+stop "$P-w7" "$P-s3"
+
+echo "== 7c. Provider timeout có thể đã nhận request → không retry mù"
+H="g8${RUN_ID}h"
+mock_mode '{"mode":"hang"}'
+start_worker "$P-w8" 3053 -e RECRUITMENT_OPENCLAW_TIMEOUT_MS=1000
+send "$H-1" "$H" "Tin G8 timeout unknown $RUN_ID" >/dev/null
+wait_sql 20 "select status = 'FAILED' and failure_code = 'AGENT_TIMEOUT' from recruitment_channel_events where provider_message_id = '$H-1'" || true
+same "7c. timeout sau dispatch → FAILED terminal, chỉ 1 provider request, 0 outbox" \
+  "$(ev "$H-1" "status || '/' || failure_code || '/' || (next_attempt_at is null) || '/' || (ai_provider_dispatched_at is not null)")|$(mock_calls "$H-1")|$(ob "$H-1" "count(*)")" \
+  "FAILED/AGENT_TIMEOUT/true/true|1|0"
+sql "update recruitment_channel_events set next_attempt_at = now() where provider_message_id = '$H-1' and status = 'FAILED'" >/dev/null
+wait_sql 20 "select attempt_count >= 2 and status = 'FAILED' from recruitment_channel_events where provider_message_id = '$H-1'" || true
+same "7c. kể cả claim lại event sau timeout → không gọi provider lần hai" \
+  "$(mock_calls "$H-1")|$(ev "$H-1" "failure_code || '/' || (next_attempt_at is null)")" \
+  "1|PROVIDER_OUTCOME_UNKNOWN/true"
+stop "$P-w8"
+mock_mode '{"mode":"ok"}'
+
 echo "== 8. Gỡ migration không được làm mất dữ liệu đã dùng giá trị mới"
 DOWN=$("${DC[@]}" run --rm --no-deps -T staging-api node - dist/migrations/1792700000000-add-recruitment-ai-safety-controls.js down < staging/run-migration.js 2>&1 | grep -E "OK|LỖI" || true)
 if echo "$DOWN" | grep -q "OK"; then
@@ -254,7 +309,7 @@ same "8. còn SKIPPED_RATE_LIMITED / BLOCKED_BY_POLICY / AI_LIMIT_REACHED → do
 
 echo "== 9. Log"
 stop "$R" "${WORKERS[@]}" "${SENDERS[@]}"
-LEAK=$(grep -cF -f <(printf '%s\n' "Tin G8" "$A" "$B" "$C" "$D" "$E" "0987654321" "sk-g8test" "recruitment_get_candidate"; sed -n 's/^OPENCLAW_GATEWAY_TOKEN=//p; s/^RECRUITMENT_AI_API_KEY=//p' "$ENV_FILE") "$LOGS" || true)
+LEAK=$(grep -cF -f <(printf '%s\n' "Tin G8" "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "0987654321" "sk-g8test" "recruitment_get_candidate"; sed -n 's/^OPENCLAW_GATEWAY_TOKEN=//p; s/^RECRUITMENT_AI_API_KEY=//p' "$ENV_FILE") "$LOGS" || true)
 same "9. log receiver / worker / sender (mọi container, $(wc -l <"$LOGS") dòng): 0 nội dung tin, 0 id người gửi, 0 câu trả lời bị chặn" "$LEAK" 0
 
 echo "  $(scripts/outbox-fixture-cleanup.sh "G8 acceptance run $RUN_ID: dọn outbox do worker tạo")"

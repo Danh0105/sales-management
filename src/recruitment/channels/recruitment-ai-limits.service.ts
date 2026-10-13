@@ -37,9 +37,10 @@ const VN_DAY = `date_trunc('day', now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME
 const VN_MONTH = `date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh'`;
 
 /**
- * Trần lượt / token của AI (P3-7.3 / G8) — kiểm TRƯỚC khi bắt đầu lượt mới. Lượt = event đã
- * ghi `ai_control_version` (lượt đã bắt đầu, kể cả lượt lỗi); token = `ai_total_tokens` theo
- * `usage` OpenClaw. Toàn hệ thống kiểm trước người gửi (vượt toàn hệ thống thì dừng hẳn).
+ * Trần lượt / token của AI (P3-7.3 / G8). Admission sử dụng reservation trên
+ * event trong transaction khóa runtime row; token đã dùng là giá trị lớn hơn
+ * reservation và `usage` OpenClaw, giữ chỗ tới hết kỳ kể cả worker chết.
+ * Toàn hệ thống kiểm trước người gửi (vượt toàn hệ thống thì dừng hẳn).
  */
 @Injectable()
 export class RecruitmentAiLimitsService {

@@ -134,9 +134,10 @@ function asCanonicalError(error: unknown): CanonicalError {
  * 4. Một transaction: outbox (`ON CONFLICT (source_event_id) DO NOTHING`) +
  *    `PROCESSED` + xoá nội dung tin khỏi inbox.
  *
- * Ngữ nghĩa: **at-least-once** gọi OpenClaw (chết đúng sau khi OpenClaw trả lời
- * thì lượt sẽ chạy lại), nhưng tác dụng nghiệp vụ và tin đi chỉ một lần — nhờ
- * idempotency của backend, `externalMessageId` và unique outbox.
+ * Ngữ nghĩa P1-FIX: một lần dispatch provider tối đa cho mỗi event. Sau dấu mốc
+ * dispatch, crash/timeout không retry mù vì provider có thể đã nhận và tính phí;
+ * nếu đã có tin canonical thì tái sử dụng, nếu chưa có thì dead-letter để HR đối soát.
+ * Tác dụng nghiệp vụ và tin đi vẫn idempotent nhờ `externalMessageId` và unique outbox.
  *
  * Không gửi tin Zalo (bước sau đọc outbox `PENDING`).
  */
@@ -211,7 +212,7 @@ export class RecruitmentChannelWorker
   async onModuleDestroy(): Promise<void> {
     this.running = false;
     this.stopListening?.();
-    // Lượt đang chạy bị huỷ → ghi lỗi tạm (thử lại ngay ở lần claim sau).
+    // Lượt đang chạy bị huỷ; event đã dispatch không được tự gọi provider lần hai.
     for (const controller of this.inFlight) controller.abort();
     await Promise.allSettled(this.loops);
   }

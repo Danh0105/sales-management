@@ -874,4 +874,22 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
       total: 1050,
     });
   });
+
+  it('provider trả lời nhưng thiếu usage → auto-halt và không xếp outbox', async () => {
+    const body = {
+      id: 'resp_no_usage', status: 'completed',
+      output: [{ type: 'message', role: 'assistant',
+        content: [{ type: 'output_text', text: REPLY }] }],
+    };
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const { worker, queue, runtime } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(runtime.haltAiIfRunning).toHaveBeenCalledWith(
+      'AI_LIMIT TOKEN_USAGE_MISSING', expect.anything(), expect.any(Function),
+    );
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(queue.fail).toHaveBeenCalledWith(
+      expect.anything(), 'w1:abc', 'TOKEN_USAGE_MISSING', null,
+    );
+  });
 });

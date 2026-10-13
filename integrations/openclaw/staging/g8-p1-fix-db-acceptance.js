@@ -176,10 +176,20 @@ async function main() {
       assert.equal(auditRow.after.ai, true);
       await resetRuntime(runtime);
     });
-    await check('runtime controls unreadable: local fail-closed', async () => {
-      const broken = new RecruitmentRuntimeControlService({ query: async () => { throw Error('DB_DOWN'); } }, audit);
-      const state = await broken.state();
-      assert.equal(state.aiHalted && state.workerHalted && state.outboundHalted && state.failClosed, true);
+    await check('PostgreSQL cannot read runtime controls: local fail-closed', async () => {
+      const qr = ds.createQueryRunner();
+      await qr.connect(); await qr.startTransaction();
+      try {
+        // Genuine PostgreSQL fault on this transaction, without changing shared schema.
+        await qr.query(`SET LOCAL search_path TO pg_temp`);
+        const broken = new RecruitmentRuntimeControlService({
+          query: (sql, params) => qr.query(sql, params),
+        }, audit);
+        const state = await broken.state();
+        assert.equal(state.aiHalted && state.workerHalted && state.outboundHalted && state.failClosed, true);
+      } finally {
+        await qr.rollbackTransaction(); await qr.release();
+      }
     });
     for (const n of [16, 32, 64]) {
       await check(`${n} workers, one remaining global quota`, async () => { await race(n, false); });

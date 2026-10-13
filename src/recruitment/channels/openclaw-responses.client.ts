@@ -20,10 +20,12 @@ export interface OpenClawClientConfig {
 }
 
 /**
- * - `infra`: gateway/mạng/xác thực — thử lại tới hết hạn giữ nội dung.
- * - `provider`: OpenAI giới hạn tốc độ / hết quota — thử lại, giãn cách dài hơn.
- * - `agent`: lượt chạy xong nhưng kết quả không dùng được — thử lại có giới hạn.
- * - `rejected`: gateway từ chối request (4xx) — thử lại vô ích.
+ * Phân loại nguyên nhân để log/HR xử lý. Worker chỉ tự retry trước mốc provider
+ * dispatch; sau mốc đó, mọi lỗi/timeout đều là outcome có thể đã xảy ra.
+ * - `infra`: gateway/mạng/xác thực.
+ * - `provider`: OpenAI giới hạn tốc độ / hết quota.
+ * - `agent`: lượt chạy xong nhưng kết quả không dùng được.
+ * - `rejected`: gateway từ chối request (4xx).
  */
 export type AgentFailureKind = 'infra' | 'provider' | 'agent' | 'rejected';
 
@@ -186,7 +188,7 @@ export function classifyOpenClawResponse(
   };
 }
 
-/** `usage` của gateway (`toOpenAiResponsesUsage`); thiếu / sai kiểu → `null`, không chặn lượt. */
+/** `usage` của gateway (`toOpenAiResponsesUsage`); thiếu / sai kiểu → `null` để worker fail-closed. */
 export function usageOf(value: unknown): AgentUsage | null {
   if (!isRecord(value)) return null;
   const count = (v: unknown) =>
