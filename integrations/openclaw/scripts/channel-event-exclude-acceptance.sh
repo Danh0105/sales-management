@@ -85,29 +85,29 @@ E1=$(ev "$S-1" id); E2=$(ev "$S-2" id)
 META_BEFORE=$(ev "$S-1" "external_sender_id || '|' || dedupe_key || '|' || payload_hash || '|' || received_at::text || '|' || coalesce(provider_created_at::text,'-')")
 
 echo "== 2. Loại tin thử #1 (HR vận hành)"
-R=$(hr hr POST "/recruitment/operations/events/$E1/exclude" '{"reason":"TEST_MESSAGE"}')
+RES=$(hr hr POST "/recruitment/operations/events/$E1/exclude" '{"reason":"TEST_MESSAGE"}')
 same "2. HR → 200: IGNORED, failureCode TEST_MESSAGE, hết nội dung, idempotent=false" \
-  "$(status_of "$R")|$(jq_get "$R" status)|$(jq_get "$R" failureCode)|$(jq_get "$R" hasText)|$(jq_get "$R" idempotent)" "200|IGNORED|TEST_MESSAGE|False|False"
+  "$(status_of "$RES")|$(jq_get "$RES" status)|$(jq_get "$RES" failureCode)|$(jq_get "$RES" hasText)|$(jq_get "$RES" idempotent)" "200|IGNORED|TEST_MESSAGE|False|False"
 same "2. DB: IGNORED + TEST_MESSAGE, nội dung NULL, text_redacted_at + processed_at có, không lease/lịch thử" \
   "$(ev "$S-1" "status || '/' || failure_code || '/' || (normalized_message_text is null) || '/' || (text_redacted_at is not null) || '/' || (processed_at is not null) || '/' || (lease_until is null and next_attempt_at is null)")" \
   "IGNORED/TEST_MESSAGE/true/true/true/true"
 same "2. metadata giữ nguyên để audit (người gửi, dedupe key, payload hash, thời điểm)" \
   "$(ev "$S-1" "external_sender_id || '|' || dedupe_key || '|' || payload_hash || '|' || received_at::text || '|' || coalesce(provider_created_at::text,'-')")" "$META_BEFORE"
 same "2. tin #2 không bị đụng (vẫn RECEIVED, còn nội dung)" "$(ev "$S-2" "status || '/' || (normalized_message_text is not null)")" "RECEIVED/true"
-R=$(hr hr POST "/recruitment/operations/events/$E1/exclude" '{"reason":"TEST_MESSAGE"}')
-same "2. gọi lại cùng lý do → 200 idempotent=true" "$(status_of "$R")|$(jq_get "$R" idempotent)" "200|True"
+RES=$(hr hr POST "/recruitment/operations/events/$E1/exclude" '{"reason":"TEST_MESSAGE"}')
+same "2. gọi lại cùng lý do → 200 idempotent=true" "$(status_of "$RES")|$(jq_get "$RES" idempotent)" "200|True"
 same "2. audit CHANNEL_EVENT_EXCLUDE: đúng 1 dòng, đúng HR, context không chứa nội dung" \
   "$(sql "select count(*) || '/' || bool_and(\"actorId\" = $HR_ID) || '/' || bool_and(context::text not like '%R1 so%' and context->>'reason' = 'TEST_MESSAGE' and (context->>'textRemoved')::boolean) from activity_log where method = 'CHANNEL_EVENT_EXCLUDE' and \"createdAt\" >= '$T0'")" "1/true/true"
 
 echo "== 3. Phân quyền / đầu vào"
 same "3. ban giám đốc (chỉ xem) loại event → 403" "$(status_of "$(hr dir POST "/recruitment/operations/events/$E2/exclude" '{"reason":"TEST_MESSAGE"}')")" 403
 same "3. lý do không định nghĩa → 400, không đổi gì" "$(status_of "$(hr hr POST "/recruitment/operations/events/$E2/exclude" '{"reason":"SPAM"}')")|$(ev "$S-2" status)" "400|RECEIVED"
-same "3. event không tồn tại → 404 CHANNEL_EVENT_NOT_FOUND" "$(R=$(hr hr POST /recruitment/operations/events/999999999/exclude '{"reason":"TEST_MESSAGE"}'); echo "$(status_of "$R")/$(jq_get "$R" code)")" "404/CHANNEL_EVENT_NOT_FOUND"
+same "3. event không tồn tại → 404 CHANNEL_EVENT_NOT_FOUND" "$(RES=$(hr hr POST /recruitment/operations/events/999999999/exclude '{"reason":"TEST_MESSAGE"}'); echo "$(status_of "$RES")/$(jq_get "$RES" code)")" "404/CHANNEL_EVENT_NOT_FOUND"
 
 echo "== 4. Chống trùng: Zalo gửi lại tin đã loại"
-R=$(send "$S-1" "$S" "$TXT1")
+RES=$(send "$S-1" "$S" "$TXT1")
 same "4. gửi lại đúng request → 200 duplicate=true; vẫn 1 event, vẫn IGNORED, không nội dung" \
-  "$(status_of "$R")|$(jq_get "$R" duplicate)|$(sql "select count(*) from recruitment_channel_events where provider_message_id = '$S-1'")|$(ev "$S-1" "status || '/' || (normalized_message_text is null)")" "200|True|1|IGNORED/true"
+  "$(status_of "$RES")|$(jq_get "$RES" duplicate)|$(sql "select count(*) from recruitment_channel_events where provider_message_id = '$S-1'")|$(ev "$S-1" "status || '/' || (normalized_message_text is null)")" "200|True|1|IGNORED/true"
 
 echo "== 5. Worker bỏ qua tin đã loại, vẫn xử lý tin sau của cùng người gửi"
 "${DC[@]}" run -d --no-deps --name "$W" -e PORT=3032 -e RECRUITMENT_ZALO_ENABLED=false -e RECRUITMENT_WORKER_ENABLED=true \
@@ -118,13 +118,13 @@ same "5. tin #2 → PROCESSED (OpenClaw 1 lần); tin #1 vẫn IGNORED/TEST_MESS
   "$(ev "$S-2" status)|$(mock_calls "$S-2")|$(ev "$S-1" "status || '/' || failure_code")|$(mock_calls "$S-1")" "PROCESSED|1|IGNORED/TEST_MESSAGE|0"
 same "5. không cảnh báo HR nào cho tin đã loại" "$(sql "select count(*) from recruitment_hr_alerts where event_id = $E1")" 0
 same "5. tin #1 không tạo hội thoại / tin canonical" "$(ev "$S-1" "coalesce(conversation_id::text, '-')")" "-"
-R=$(hr hr POST "/recruitment/operations/events/$E2/exclude" '{"reason":"TEST_MESSAGE"}')
-same "5. loại event đã PROCESSED → 409 CHANNEL_EVENT_NOT_EXCLUDABLE, không đổi" "$(status_of "$R")/$(jq_get "$R" code)|$(ev "$S-2" status)" "409/CHANNEL_EVENT_NOT_EXCLUDABLE|PROCESSED"
+RES=$(hr hr POST "/recruitment/operations/events/$E2/exclude" '{"reason":"TEST_MESSAGE"}')
+same "5. loại event đã PROCESSED → 409 CHANNEL_EVENT_NOT_EXCLUDABLE, không đổi" "$(status_of "$RES")/$(jq_get "$RES" code)|$(ev "$S-2" status)" "409/CHANNEL_EVENT_NOT_EXCLUDABLE|PROCESSED"
 
 echo "== 6. Thống kê + log"
-R=$(hr dir GET /recruitment/operations/events/stats)
+RES=$(hr dir GET /recruitment/operations/events/stats)
 same "6. thống kê (nhóm xem đọc được): có IGNORED/TEST_MESSAGE ≥ 1, không nội dung tin" \
-  "$(status_of "$R")|$(python3 -c "import json,sys; d=json.loads(sys.argv[1].split(' ',1)[1]); print(sum(r['count'] for r in d['byStatus'] if r['status']=='IGNORED' and r['failureCode']=='TEST_MESSAGE')>=1)" "$R")|$(echo "$R" | grep -c 'R1 so' || true)" "200|True|0"
+  "$(status_of "$RES")|$(python3 -c "import json,sys; d=json.loads(sys.argv[1].split(' ',1)[1]); print(sum(r['count'] for r in d['byStatus'] if r['status']=='IGNORED' and r['failureCode']=='TEST_MESSAGE')>=1)" "$RES")|$(echo "$RES" | grep -c 'R1 so' || true)" "200|True|0"
 LEAK=$( { docker logs "$R" 2>&1; docker logs "$W" 2>&1; } | grep -cF -e "R1 so mot" -e "R1 so hai" -e "$S" || true)
 same "6. log receiver/worker: 0 nội dung tin, 0 id người gửi" "$LEAK" 0
 
