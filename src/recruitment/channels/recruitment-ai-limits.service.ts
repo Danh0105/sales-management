@@ -61,6 +61,7 @@ export class RecruitmentAiLimitsService {
       month_tokens: string | number;
       day_reserved: string | number;
       month_reserved: string | number;
+      day_overruns: number;
     }> = await this.dataSource.query(
       `SELECT
          count(*) FILTER (WHERE ai_control_version IS NOT NULL AND
@@ -71,7 +72,9 @@ export class RecruitmentAiLimitsService {
          coalesce(sum(greatest(ai_reserved_tokens, coalesce(ai_total_tokens, 0)))
            FILTER (WHERE ai_reservation_day = (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date), 0) AS day_reserved,
          coalesce(sum(greatest(ai_reserved_tokens, coalesce(ai_total_tokens, 0)))
-           FILTER (WHERE ai_reservation_month = date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date), 0) AS month_reserved
+           FILTER (WHERE ai_reservation_month = date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date), 0) AS month_reserved,
+         count(*) FILTER (WHERE ai_reservation_day = (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+           AND ai_total_tokens > ai_reserved_tokens)::int AS day_overruns
        FROM "recruitment_channel_events"
        WHERE received_at >= ${VN_MONTH} - interval '1 day' OR processed_at >= ${VN_MONTH}
           OR ai_reservation_month = date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`,
@@ -81,6 +84,8 @@ export class RecruitmentAiLimitsService {
         turns: Number(row?.day_turns ?? 0),
         tokens: Number(row?.day_tokens ?? 0),
         reservedTokens: Number(row?.day_reserved ?? 0),
+        /** Lượt có token thực tế vượt mức đặt trước (đã tính đúng vào ngân sách). */
+        reservationOverruns: Number(row?.day_overruns ?? 0),
       },
       month: {
         tokens: Number(row?.month_tokens ?? 0),
@@ -272,7 +277,13 @@ export class RecruitmentAiLimitsService {
              AND coalesce(ai_reserved_at, received_at) >= $5::timestamptz - interval '24 hours')::int AS sender_day
          FROM "recruitment_channel_events"
          WHERE ai_control_version IS NOT NULL OR ai_total_tokens IS NOT NULL`,
-        [event.channelAccountId, event.externalSenderId, clock.day, clock.month, clock.at],
+        [
+          event.channelAccountId,
+          event.externalSenderId,
+          clock.day,
+          clock.month,
+          clock.at,
+        ],
       );
       const used = {
         dayTurns: Number(usage?.day_turns ?? 0),
@@ -282,11 +293,41 @@ export class RecruitmentAiLimitsService {
         senderDay: Number(usage?.sender_day ?? 0),
       };
       const checks: Array<Exclude<AiLimitVerdict, { ok: true }>> = [
-        { ok: false, scope: 'GLOBAL', limit: 'MONTHLY_TOKENS', used: used.monthTokens, max: limits.monthlyTokenBudget },
-        { ok: false, scope: 'GLOBAL', limit: 'DAILY_TOKENS', used: used.dayTokens, max: limits.dailyTokenBudget },
-        { ok: false, scope: 'GLOBAL', limit: 'DAILY_TURNS', used: used.dayTurns, max: limits.maxTurnsPerDay },
-        { ok: false, scope: 'SENDER', limit: 'SENDER_HOURLY_TURNS', used: used.senderHour, max: limits.maxTurnsPerSenderHour },
-        { ok: false, scope: 'SENDER', limit: 'SENDER_DAILY_TURNS', used: used.senderDay, max: limits.maxTurnsPerSenderDay },
+        {
+          ok: false,
+          scope: 'GLOBAL',
+          limit: 'MONTHLY_TOKENS',
+          used: used.monthTokens,
+          max: limits.monthlyTokenBudget,
+        },
+        {
+          ok: false,
+          scope: 'GLOBAL',
+          limit: 'DAILY_TOKENS',
+          used: used.dayTokens,
+          max: limits.dailyTokenBudget,
+        },
+        {
+          ok: false,
+          scope: 'GLOBAL',
+          limit: 'DAILY_TURNS',
+          used: used.dayTurns,
+          max: limits.maxTurnsPerDay,
+        },
+        {
+          ok: false,
+          scope: 'SENDER',
+          limit: 'SENDER_HOURLY_TURNS',
+          used: used.senderHour,
+          max: limits.maxTurnsPerSenderHour,
+        },
+        {
+          ok: false,
+          scope: 'SENDER',
+          limit: 'SENDER_DAILY_TURNS',
+          used: used.senderDay,
+          max: limits.maxTurnsPerSenderDay,
+        },
       ];
       const verdict = checks.find((v) =>
         v.limit === 'MONTHLY_TOKENS'

@@ -70,19 +70,22 @@ describe('RecruitmentChannelEventOperationsService.exclude', () => {
       );
       // Chỉ áp khi trạng thái chưa đổi kể từ lúc khoá (fencing).
       expect(update.sql).toMatch(/WHERE id = \$1 AND status = \$3/);
-      expect(audit.recordMandatory).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-        actor: HR,
-        action: 'CHANNEL_EVENT_EXCLUDE',
-        entity: 'channel-events',
-        entityId: 2,
-        context: {
-          eventId: 2,
-          reason: 'TEST_MESSAGE',
-          from: status,
-          to: 'IGNORED',
-          textRemoved: true,
-        },
-      }));
+      expect(audit.recordMandatory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          actor: HR,
+          action: 'CHANNEL_EVENT_EXCLUDE',
+          entity: 'channel-events',
+          entityId: 2,
+          context: {
+            eventId: 2,
+            reason: 'TEST_MESSAGE',
+            from: status,
+            to: 'IGNORED',
+            textRemoved: true,
+          },
+        }),
+      );
     },
   );
 

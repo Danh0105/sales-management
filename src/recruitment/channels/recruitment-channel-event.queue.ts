@@ -181,7 +181,9 @@ export class RecruitmentChannelEventQueue {
             : Number(row.ai_control_version),
         aiProviderDispatchedAt: row.ai_provider_dispatched_at,
         aiReservedTokens:
-          row.ai_reserved_tokens === null ? null : Number(row.ai_reserved_tokens),
+          row.ai_reserved_tokens === null
+            ? null
+            : Number(row.ai_reserved_tokens),
       };
     });
   }

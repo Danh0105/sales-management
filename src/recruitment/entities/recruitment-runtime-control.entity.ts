@@ -43,7 +43,12 @@ export class RecruitmentRuntimeControl {
   @Column({ name: 'failsafe_halted', type: 'boolean', default: false })
   failsafeHalted!: boolean;
 
-  @Column({ name: 'failsafe_reason', type: 'varchar', length: 100, nullable: true })
+  @Column({
+    name: 'failsafe_reason',
+    type: 'varchar',
+    length: 100,
+    nullable: true,
+  })
   failsafeReason!: string | null;
 
   @Column({ name: 'failsafe_at', type: 'timestamptz', nullable: true })

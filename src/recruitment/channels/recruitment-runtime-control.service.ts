@@ -104,7 +104,16 @@ export class RecruitmentRuntimeControlService {
   private readonly logger = new Logger('RecruitmentRuntimeControl');
   private cached: { at: number; state: RuntimeControlState } | null = null;
   private lastFailClosed = false;
-  private localFailsafe: { reason: string; at: Date } | null = null;
+  /**
+   * Latch RAM khi một lệnh dừng khẩn / tự dừng không commit được. `persisted`: latch đã
+   * nằm trong DB (ghi được hoặc đã thấy `failsafe_halted`) — khi đó DB mất latch nghĩa là
+   * đã có RESUME đủ 3 phạm vi có audit (đường duy nhất gỡ latch) ⇒ bỏ latch RAM.
+   */
+  private localFailsafe: {
+    reason: string;
+    at: Date;
+    persisted: boolean;
+  } | null = null;
   private readonly stopListeners = new Set<StopListener>();
 
   constructor(
@@ -130,18 +139,14 @@ export class RecruitmentRuntimeControlService {
     try {
       const [row]: RuntimeRow[] = await this.dataSource.query(SELECT_ROW);
       if (!row) {
-        await this.engageFailsafe('RUNTIME_CONTROLS_MISSING');
         state = FAIL_CLOSED;
       } else {
-        if (this.localFailsafe && !row.failsafe_halted) {
-          await this.persistFailsafe(this.localFailsafe.reason);
-        }
+        await this.reconcileLocalFailsafe(row);
         state = this.fromRow(row);
       }
     } catch {
-      if (!this.localFailsafe) {
-        await this.engageFailsafe('RUNTIME_CONTROLS_UNREADABLE');
-      }
+      // Đọc lỗi / thiếu dòng: dừng mọi phạm vi CHỪNG NÀO còn lỗi (claim, giữ chỗ, dispatch
+      // cũng cần DB). Không bật latch bền: lỗi đọc thoáng qua không phải là lệnh dừng.
       state = FAIL_CLOSED;
     }
     if (state.failClosed !== this.lastFailClosed) {
@@ -174,7 +179,11 @@ export class RecruitmentRuntimeControlService {
           !halted &&
           unique.length === ALL_SCOPES.size &&
           unique.every((scope) => ALL_SCOPES.has(scope));
-        if (!halted && (row.failsafe_halted || this.localFailsafe) && !resumeAll) {
+        if (
+          !halted &&
+          (row.failsafe_halted || this.localFailsafe) &&
+          !resumeAll
+        ) {
           throw new ServiceUnavailableException({
             code: 'RUNTIME_FAILSAFE_RESUME_ALL_REQUIRED',
             message:
@@ -186,13 +195,15 @@ export class RecruitmentRuntimeControlService {
         const flagsChanged = unique.some(
           (scope) => row[COLUMN[scope] as keyof RuntimeRow] !== halted,
         );
-        const clearsFailsafe = resumeAll && Boolean(row.failsafe_halted || this.localFailsafe);
+        const clearsFailsafe =
+          resumeAll && Boolean(row.failsafe_halted || this.localFailsafe);
         if (!flagsChanged && !clearsFailsafe) {
           return { state: this.fromRow(row), changed: false };
         }
 
-        const [afterRow] = returnedRows<RuntimeRow>(await em.query(
-          `UPDATE "recruitment_runtime_controls"
+        const [afterRow] = returnedRows<RuntimeRow>(
+          await em.query(
+            `UPDATE "recruitment_runtime_controls"
            SET ${unique.map((scope) => `"${COLUMN[scope]}" = $1`).join(', ')},
                reason = $2, updated_by = $3, updated_at = now(),
                failsafe_halted = CASE WHEN $4::boolean THEN false ELSE failsafe_halted END,
@@ -201,8 +212,9 @@ export class RecruitmentRuntimeControlService {
            WHERE id = 1
            RETURNING ai_halted, worker_halted, outbound_halted, reason, updated_by, updated_at,
                      failsafe_halted, failsafe_reason, failsafe_at`,
-          [halted, reason, actor.employeeId ?? null, clearsFailsafe],
-        ));
+            [halted, reason, actor.employeeId ?? null, clearsFailsafe],
+          ),
+        );
         if (!afterRow) this.missing();
         const after = this.fromRow(afterRow, false);
         await this.audit.recordMandatory(em, {
@@ -252,14 +264,16 @@ export class RecruitmentRuntimeControlService {
         if (!row) this.missing();
         if (row.ai_halted || row.failsafe_halted) return null;
         const before = this.fromRow(row, false);
-        const [afterRow] = returnedRows<RuntimeRow>(await em.query(
-          `UPDATE "recruitment_runtime_controls"
+        const [afterRow] = returnedRows<RuntimeRow>(
+          await em.query(
+            `UPDATE "recruitment_runtime_controls"
            SET ai_halted = true, reason = $1, updated_by = $2, updated_at = now()
            WHERE id = 1
            RETURNING ai_halted, worker_halted, outbound_halted, reason, updated_by, updated_at,
                      failsafe_halted, failsafe_reason, failsafe_at`,
-          [reason, actor.employeeId ?? null],
-        ));
+            [reason, actor.employeeId ?? null],
+          ),
+        );
         if (!afterRow) this.missing();
         const after = this.fromRow(afterRow, false);
         await this.audit.recordMandatory(em, {
@@ -294,26 +308,55 @@ export class RecruitmentRuntimeControlService {
   }
 
   private async engageFailsafe(reason: string): Promise<void> {
-    this.localFailsafe = { reason, at: new Date() };
+    const latch = { reason, at: new Date(), persisted: false };
+    this.localFailsafe = latch;
     this.cached = null;
     this.notifyStop(new Set(ALL_SCOPES));
-    await this.persistFailsafe(reason);
+    latch.persisted = await this.persistFailsafe(reason);
     this.logger.error(
-      `runtime FAILSAFE scopes=AI,WORKER,OUTBOUND reason=${reason}`,
+      `runtime FAILSAFE scopes=AI,WORKER,OUTBOUND reason=${reason} persisted=${latch.persisted}`,
     );
   }
 
-  private async persistFailsafe(reason: string): Promise<void> {
-    try {
-      await this.dataSource.query(
-        `UPDATE "recruitment_runtime_controls"
-         SET failsafe_halted = true, failsafe_reason = $1,
-             failsafe_at = coalesce(failsafe_at, clock_timestamp())
-         WHERE id = 1 AND NOT failsafe_halted`,
-        [reason],
+  /**
+   * Đồng bộ latch RAM với DB sau mỗi lần đọc được dòng điều khiển: DB đang latch ⇒ đã lưu;
+   * latch từng lưu mà DB không còn ⇒ đã có RESUME đủ 3 phạm vi có audit (có thể ở process
+   * khác) ⇒ bỏ latch RAM; chưa từng lưu được ⇒ thử lưu lại.
+   */
+  private async reconcileLocalFailsafe(row: RuntimeRow): Promise<void> {
+    const latch = this.localFailsafe;
+    if (!latch) return;
+    if (row.failsafe_halted) {
+      latch.persisted = true;
+      return;
+    }
+    if (latch.persisted) {
+      this.localFailsafe = null;
+      this.logger.warn(
+        `runtime FAILSAFE đã được gỡ bằng RESUME có audit — bỏ latch RAM (${latch.reason})`,
       );
+      return;
+    }
+    latch.persisted = await this.persistFailsafe(latch.reason);
+  }
+
+  /** `true` khi latch đã nằm trong DB (ghi mới hoặc đã có sẵn). */
+  private async persistFailsafe(reason: string): Promise<boolean> {
+    try {
+      const rows = returnedRows(
+        await this.dataSource.query(
+          `UPDATE "recruitment_runtime_controls"
+           SET failsafe_halted = true,
+               failsafe_reason = CASE WHEN failsafe_halted THEN failsafe_reason ELSE $1 END,
+               failsafe_at = coalesce(failsafe_at, clock_timestamp())
+           WHERE id = 1 RETURNING id`,
+          [reason],
+        ),
+      );
+      return rows.length > 0;
     } catch {
-      // DB hoàn toàn không dùng được: latch RAM + state() fail-closed vẫn chặn process này.
+      // DB không ghi được: latch RAM + state() fail-closed vẫn chặn process này.
+      return false;
     }
   }
 

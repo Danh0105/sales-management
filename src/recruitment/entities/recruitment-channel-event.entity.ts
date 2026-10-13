@@ -62,11 +62,11 @@ import {
   'CHK_recruitment_channel_events_dispatch_after_reservation',
   `"ai_provider_dispatched_at" IS NULL OR "ai_control_version" IS NOT NULL`,
 )
-@Index('IDX_recruitment_channel_events_ai_quota', [
-  'aiReservationDay',
-  'aiReservationMonth',
-  'aiReservedAt',
-], { where: '"ai_control_version" IS NOT NULL' })
+@Index(
+  'IDX_recruitment_channel_events_ai_quota',
+  ['aiReservationDay', 'aiReservationMonth', 'aiReservedAt'],
+  { where: '"ai_control_version" IS NOT NULL' },
+)
 export class RecruitmentChannelEvent {
   @PrimaryGeneratedColumn({
     primaryKeyConstraintName: 'PK_recruitment_channel_events',
@@ -223,7 +223,11 @@ export class RecruitmentChannelEvent {
   aiReservationMonth!: string | null;
 
   /** Ghi trước khi gọi OpenClaw; request có thể đã tới provider thì không gửi lại mù. */
-  @Column({ name: 'ai_provider_dispatched_at', type: 'timestamptz', nullable: true })
+  @Column({
+    name: 'ai_provider_dispatched_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
   aiProviderDispatchedAt!: Date | null;
 
   /** SHA-256 (hex) của body thô — đối chiếu, không khôi phục được nội dung. */

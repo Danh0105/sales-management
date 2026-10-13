@@ -442,7 +442,13 @@ export class RecruitmentChannelWorker
     if (event.aiReservedTokens == null) {
       // Lượt từ bản code cũ chưa có reservation; không được cấp phép provider
       // chỉ dựa trên ai_control_version. HR đối soát và tạo event mới nếu cần.
-      return this.finishFailure(event, owner, config, 'LEGACY_UNRESERVED_TURN', 'rejected');
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'LEGACY_UNRESERVED_TURN',
+        'rejected',
+      );
     }
 
     let dispatch: 'DISPATCHED' | 'HALTED' | 'LOST' | 'UNCERTAIN';
@@ -546,7 +552,12 @@ export class RecruitmentChannelWorker
           event.aiReservedTokens != null &&
           outcome.usage.total > event.aiReservedTokens
         ) {
-          await this.haltForAccounting('TOKEN_RESERVATION_OVERRUN');
+          // Ngân sách tính theo greatest(đặt trước, thực tế) ⇒ phần vượt đã bị trừ đúng và
+          // lượt kế tiếp bị chặn ở reserve() khi hết ngân sách. Không dừng cả hệ thống vì một
+          // lượt dài (ngữ cảnh hội thoại thật tăng ~20k token/lượt); theo dõi qua ai-usage.
+          this.logger.warn(
+            `worker event=${event.id} token vượt đặt trước total=${outcome.usage.total} reserved=${event.aiReservedTokens}`,
+          );
         }
       } else {
         await this.haltForAccounting('TOKEN_USAGE_MISSING');
@@ -708,16 +719,19 @@ export class RecruitmentChannelWorker
 
   private async haltForAccounting(reason: string): Promise<void> {
     if (!this.runtime) throw new Error('RUNTIME_CONTROL_UNAVAILABLE');
-    await this.runtime.haltAiIfRunning(`AI_LIMIT ${reason}`, SYSTEM_ACTOR, (em, state) =>
-      this.alerts.raise(
-        {
-          type: HrAlertType.AI_LIMIT_REACHED,
-          severity: HrAlertSeverity.HIGH,
-          sourceKey: `ai-limit:${reason}:${(state.updatedAt ?? new Date()).toISOString()}`,
-          details: { limit: reason },
-        },
-        em,
-      ),
+    await this.runtime.haltAiIfRunning(
+      `AI_LIMIT ${reason}`,
+      SYSTEM_ACTOR,
+      (em, state) =>
+        this.alerts.raise(
+          {
+            type: HrAlertType.AI_LIMIT_REACHED,
+            severity: HrAlertSeverity.HIGH,
+            sourceKey: `ai-limit:${reason}:${(state.updatedAt ?? new Date()).toISOString()}`,
+            details: { limit: reason },
+          },
+          em,
+        ),
     );
   }
 
@@ -740,7 +754,7 @@ export class RecruitmentChannelWorker
     if (verdict.scope === 'GLOBAL') {
       // Chỉ worker đổi được trạng thái mới cảnh báo — mỗi lần tự dừng đúng 1 cảnh báo (khoá theo
       // thời điểm chuyển trạng thái, không gộp theo giờ: HR mở lại rồi chạm trần lần nữa vẫn được báo).
-      const halted = await this.runtime?.haltAiIfRunning(
+      await this.runtime?.haltAiIfRunning(
         `AI_LIMIT ${verdict.limit} ${verdict.used}/${verdict.max}`,
         SYSTEM_ACTOR,
         (em, state) =>

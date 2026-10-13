@@ -135,10 +135,13 @@ describe('RecruitmentRuntimeControlService', () => {
   function service(query: jest.Mock) {
     const audit = { recordMandatory: jest.fn().mockResolvedValue(undefined) };
     return {
-      svc: new RecruitmentRuntimeControlService({
-        query,
-        transaction: (fn: (em: unknown) => unknown) => fn({ query }),
-      } as any, audit as any),
+      svc: new RecruitmentRuntimeControlService(
+        {
+          query,
+          transaction: (fn: (em: unknown) => unknown) => fn({ query }),
+        } as any,
+        audit as any,
+      ),
       audit,
     };
   }
@@ -169,6 +172,82 @@ describe('RecruitmentRuntimeControlService', () => {
     },
   );
 
+  it('đọc lỗi → fail-closed khi còn lỗi, KHÔNG ghi latch bền; đọc lại được → hết dừng', async () => {
+    const query = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('connection reset'))
+      .mockResolvedValueOnce([row]);
+    const { svc } = service(query);
+    await expect(svc.state()).resolves.toMatchObject({ failClosed: true });
+    expect(query).toHaveBeenCalledTimes(1);
+    await expect(svc.state()).resolves.toMatchObject({
+      failClosed: false,
+      failsafeHalted: false,
+    });
+    expect(query.mock.calls.some(([sql]) => /UPDATE/.test(String(sql)))).toBe(
+      false,
+    );
+  });
+
+  describe('latch fail-safe khi lệnh dừng khẩn không commit được', () => {
+    const healthy = {
+      ...row,
+      worker_halted: false,
+      failsafe_halted: false,
+      failsafe_reason: null,
+      failsafe_at: null,
+    };
+    function failingStop(query: jest.Mock) {
+      const audit = { recordMandatory: jest.fn() };
+      return new RecruitmentRuntimeControlService(
+        {
+          query,
+          transaction: () => Promise.reject(new Error('audit insert failed')),
+        } as any,
+        audit as any,
+      );
+    }
+
+    it('đã lưu latch vào DB; RESUME đủ 3 phạm vi ở process khác gỡ latch DB → bỏ latch RAM', async () => {
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([[{ id: 1 }], 1]) // ghi latch bền thành công
+        .mockResolvedValueOnce([{ ...healthy, failsafe_halted: true }])
+        .mockResolvedValueOnce([healthy]); // process khác đã resume-all có audit
+      const svc = failingStop(query);
+      await expect(
+        svc.set([RuntimeControlScope.AI], true, 'dừng khẩn', HR),
+      ).rejects.toThrow('audit insert failed');
+      await expect(svc.state()).resolves.toMatchObject({ failClosed: true });
+      await expect(svc.state()).resolves.toMatchObject({
+        failClosed: false,
+        aiHalted: false,
+      });
+      expect(query).toHaveBeenCalledTimes(3);
+    });
+
+    it('chưa lưu được latch (DB lỗi lúc đó) → lần đọc sau lưu lại, vẫn dừng', async () => {
+      const query = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('db down')) // ghi latch thất bại
+        .mockResolvedValueOnce([healthy]) // đọc lại được, DB chưa có latch
+        .mockResolvedValueOnce([[{ id: 1 }], 1]); // lưu lại latch
+      const svc = failingStop(query);
+      await expect(
+        svc.set([RuntimeControlScope.AI], true, 'dừng khẩn', HR),
+      ).rejects.toThrow('audit insert failed');
+      await expect(svc.state()).resolves.toMatchObject({
+        failClosed: true,
+        aiHalted: true,
+        workerHalted: true,
+        outboundHalted: true,
+      });
+      expect(String(query.mock.calls[2][0])).toMatch(
+        /SET failsafe_halted = true/,
+      );
+    });
+  });
+
   it('maxAge > 0 dùng lại bản đọc gần đây; 0 luôn đọc mới', async () => {
     const query = jest.fn().mockResolvedValue([row]);
     const { svc } = service(query);
@@ -181,7 +260,10 @@ describe('RecruitmentRuntimeControlService', () => {
 
   it('dừng: chỉ đổi đúng cột của phạm vi, ghi lý do + người làm, audit before/after', async () => {
     const after = { ...row, ai_halted: true, outbound_halted: true };
-    const query = jest.fn().mockResolvedValueOnce([row]).mockResolvedValueOnce([[after], 1]);
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce([row])
+      .mockResolvedValueOnce([[after], 1]);
     const { svc, audit } = service(query);
     await expect(
       svc.set(
@@ -199,18 +281,21 @@ describe('RecruitmentRuntimeControlService', () => {
     expect(sql).toMatch(/SET "ai_halted" = \$1, "outbound_halted" = \$1,/);
     expect(sql).not.toMatch(/SET "worker_halted"/);
     expect(params).toEqual([true, 'nghi lộ dữ liệu', 158, false]);
-    expect(audit.recordMandatory).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      actor: HR,
-      action: 'RUNTIME_STOP',
-      entity: 'runtime-controls',
-      entityId: 1,
-      context: expect.objectContaining({
-        scopes: ['AI', 'OUTBOUND'],
-        reason: 'nghi lộ dữ liệu',
-        before: { ai: false, worker: true, outbound: false },
-        after: { ai: true, worker: true, outbound: true },
+    expect(audit.recordMandatory).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actor: HR,
+        action: 'RUNTIME_STOP',
+        entity: 'runtime-controls',
+        entityId: 1,
+        context: expect.objectContaining({
+          scopes: ['AI', 'OUTBOUND'],
+          reason: 'nghi lộ dữ liệu',
+          before: { ai: false, worker: true, outbound: false },
+          after: { ai: true, worker: true, outbound: true },
+        }),
       }),
-    }));
+    );
   });
 
   it('thiếu dòng khi đổi → 503, không audit', async () => {
@@ -236,16 +321,20 @@ describe('RecruitmentRuntimeControlService.haltAiIfRunning', () => {
   const make = (query: jest.Mock) => {
     const audit = { recordMandatory: jest.fn().mockResolvedValue(undefined) };
     return {
-      svc: new RecruitmentRuntimeControlService({
-        query,
-        transaction: (fn: (em: unknown) => unknown) => fn({ query }),
-      } as any, audit as any),
+      svc: new RecruitmentRuntimeControlService(
+        {
+          query,
+          transaction: (fn: (em: unknown) => unknown) => fn({ query }),
+        } as any,
+        audit as any,
+      ),
       audit,
     };
   };
 
   it('đổi được trạng thái (đang chạy → dừng) → audit RUNTIME_STOP hệ thống, trả state mới', async () => {
-    const query = jest.fn()
+    const query = jest
+      .fn()
       .mockResolvedValueOnce([{ ...running, ai_halted: false }])
       .mockResolvedValueOnce([[running], 1]);
     const { svc, audit } = make(query);
@@ -254,7 +343,8 @@ describe('RecruitmentRuntimeControlService.haltAiIfRunning', () => {
     ).resolves.toMatchObject({ aiHalted: true });
     expect(query.mock.calls[0][0]).toMatch(/FOR UPDATE/);
     expect(audit.recordMandatory).toHaveBeenCalledWith(
-      expect.anything(), expect.objectContaining({
+      expect.anything(),
+      expect.objectContaining({
         action: 'RUNTIME_STOP',
         context: expect.objectContaining({
           scopes: ['AI'],

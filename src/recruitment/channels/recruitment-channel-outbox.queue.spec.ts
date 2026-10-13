@@ -23,7 +23,10 @@ function fakeDb(
   control: { control_mode: string; control_version: number } | null,
   updated = true,
   /** Dòng `recruitment_runtime_controls`: `null` = không có dòng (fail-closed). */
-  runtime: { outbound_halted: boolean; failsafe_halted?: boolean } | null = { outbound_halted: false, failsafe_halted: false },
+  runtime: { outbound_halted: boolean; failsafe_halted?: boolean } | null = {
+    outbound_halted: false,
+    failsafe_halted: false,
+  },
 ) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const em = {
@@ -161,7 +164,10 @@ describe('RecruitmentChannelOutboxQueue.dispatch — cửa kiểm cuối (P3-6.5
 
 describe('RecruitmentChannelOutboxQueue.dispatch — dừng khẩn + pilot (P3-7.3 / G8)', () => {
   it.each([
-    ['outbound đang dừng khẩn', { outbound_halted: true, failsafe_halted: false }],
+    [
+      'outbound đang dừng khẩn',
+      { outbound_halted: true, failsafe_halted: false },
+    ],
     ['không có dòng điều khiển (fail-closed)', null],
   ])(
     '%s → HELD: trả về PENDING, hoàn lại lần thử, không ghi dispatched_at, không chặn tin',
