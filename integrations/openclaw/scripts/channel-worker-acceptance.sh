@@ -175,32 +175,24 @@ same "12. tin đến + tin đi do worker lưu, outbox trỏ đúng tin đi" \
 echo "== B. Lỗi OpenClaw / OpenAI: không PROCESSED giả, không mất nội dung"
 OUTBOX_OF="(select count(*) from recruitment_channel_outbox o where o.source_event_id = e.id)"
 E7="p34-$RUN_ID-e7"
-mock_chain "{mode:'503',times:1,then:{mode:'hang',times:1,then:{mode:'ok'}}}"
+mock_chain "{mode:'503',times:1,then:{mode:'ok'}}"
 send "$E7" "s${RUN_ID}e" "" "Tin cần giữ lại khi OpenClaw lỗi" >/dev/null
-wait_check "7. OpenClaw 5xx → FAILED có lịch thử lại, nội dung còn nguyên, chưa có outbox" 25 \
+wait_check "7. OpenClaw 5xx sau dispatch → FAILED terminal, nội dung còn nguyên, chưa có outbox" 25 \
   "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E7' and e.status = 'FAILED'
-     and e.last_error_code = 'AGENT_UNAVAILABLE' and e.next_attempt_at is not null
+     and e.last_error_code = 'AGENT_UNAVAILABLE' and e.next_attempt_at is null
      and e.normalized_message_text = 'Tin cần giữ lại khi OpenClaw lỗi' and $OUTBOX_OF = 0"
-wait_check "7. OpenClaw treo → timeout → FAILED thử lại, nội dung còn nguyên" 40 \
-  "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E7' and e.status = 'FAILED'
-     and e.last_error_code = 'AGENT_TIMEOUT' and e.normalized_message_text = 'Tin cần giữ lại khi OpenClaw lỗi' and $OUTBOX_OF = 0"
-wait_sql 40 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E7'" || true
-same "7. OpenClaw hồi phục → PROCESSED ở lần 3; tin đến canonical đúng nguyên văn; 1 outbox" \
-  "$(ev "$E7" "status || '/' || attempt_count")/$(sql "select count(*) from recruitment_messages where external_message_id = '$E7' and content = 'Tin cần giữ lại khi OpenClaw lỗi'")/$(sql "select count(*) from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = '$E7'")" \
-  "PROCESSED/3/1/1"
-same "7. OpenClaw nhận đúng chuỗi lần thử: 503 → treo → 200" "$(results_of "$E7")" "503,hang,200"
+same "7. 5xx có thể đã tính phí → chỉ 1 request, không tự retry" \
+  "$(ev "$E7" "status || '/' || attempt_count")|$(results_of "$E7")" "FAILED/1|503"
 
 E8="p34-$RUN_ID-e8"
-mock_chain "{mode:'quota',times:1,then:{mode:'rate',times:1,then:{mode:'billing402',times:1,then:{mode:'errortext',times:1,then:{mode:'ok'}}}}}"
+mock_chain "{mode:'quota',times:1,then:{mode:'ok'}}"
 send "$E8" "s${RUN_ID}f" "" "Tin gặp lúc OpenAI hết quota" >/dev/null
-wait_check "8. OpenAI hết quota (429 insufficient_quota) → FAILED thử lại, không PROCESSED" 25 \
-  "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E8' and e.status = 'FAILED' and e.last_error_code = 'PROVIDER_QUOTA' and e.next_attempt_at is not null and $OUTBOX_OF = 0"
-wait_check "8. OpenAI 429 rate limit → FAILED thử lại" 25 \
-  "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E8' and e.status = 'FAILED' and e.last_error_code = 'PROVIDER_RATE_LIMIT' and e.next_attempt_at is not null and $OUTBOX_OF = 0"
+wait_check "8. OpenAI hết quota (429 insufficient_quota) → FAILED terminal, không PROCESSED" 25 \
+  "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E8' and e.status = 'FAILED' and e.last_error_code = 'PROVIDER_QUOTA' and e.next_attempt_at is null and $OUTBOX_OF = 0"
 wait_sql 40 "select failure_code is not null from recruitment_channel_events where provider_message_id = '$E8'" || true
-same "8. 402 billing rồi 200 '⚠️ … credit_balance_exhausted' → không PROCESSED; lỗi model ở lần ≥3 → dead-letter" \
+same "8. provider quota → không gọi lại, dead-letter để HR đối soát" \
   "$(ev "$E8" "status || '/' || failure_code || '/' || (next_attempt_at is null) || '/' || attempt_count")|$(results_of "$E8")" \
-  "FAILED/AGENT_ERROR_TEXT/true/4|429-quota,429-rate,402,200-errortext"
+  "FAILED/PROVIDER_QUOTA/true/1|429-quota"
 same "8. không có outbox, không có tin đi nào cho event lỗi" \
   "$(sql "select count(*) from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = '$E8'")/$(sql "select count(*) from recruitment_messages where external_message_id = '$E8-reply'")" "0/0"
 same "14. event lỗi < 7 ngày → nội dung tin vẫn giữ để retry/debug" "$(ev "$E8" "normalized_message_text")" "Tin gặp lúc OpenAI hết quota"
@@ -210,13 +202,13 @@ CHK=$(sql "update recruitment_channel_events set status = 'PROCESSED' where prov
 check "DB chặn trạng thái PROCESSED khi còn nội dung tin (CHECK constraint)" "$(echo "$CHK" | grep -q CHK_recruitment_channel_events_text_status && echo t || echo f)" "$CHK"
 
 E8B="p34-$RUN_ID-e8b"
-mock_chain "{mode:'fallback',times:1,then:{mode:'incomplete',times:1,then:{mode:'ok'}}}"
+mock_chain "{mode:'fallback',times:1,then:{mode:'ok'}}"
 send "$E8B" "s${RUN_ID}k" >/dev/null
-wait_check "8. 200 'No response from OpenClaw.' → FAILED thử lại, không PROCESSED" 25 \
+wait_check "8. 200 'No response from OpenClaw.' → FAILED terminal, không PROCESSED" 25 \
   "select count(*) = 1 from recruitment_channel_events e where e.provider_message_id = '$E8B' and e.status = 'FAILED' and e.last_error_code = 'AGENT_EMPTY_REPLY' and $OUTBOX_OF = 0"
-wait_sql 40 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E8B'" || true
-same "8. 200 incomplete cũng không tính; lần 3 trả lời thật → PROCESSED" \
-  "$(ev "$E8B" "status || '/' || attempt_count")|$(results_of "$E8B")" "PROCESSED/3|200-fallback,200-incomplete,200"
+same "8. fallback không được coi là thành công và không gọi lại provider" \
+  "$(ev "$E8B" "status || '/' || attempt_count || '/' || (next_attempt_at is null)")|$(results_of "$E8B")" "FAILED/1/true|200-fallback"
+mock ok
 
 echo "== B2. Worker chết sau khi claim → lease hết hạn → worker khác xử lý"
 E6="p34-$RUN_ID-e6"
@@ -239,6 +231,8 @@ echo "== B3. Chết sau khi OpenClaw đã trả lời (response bị cắt) → 
 E11="p34-$RUN_ID-e11"
 mock ok-drop 0 1
 send "$E11" "s${RUN_ID}h" >/dev/null
+wait_sql 30 "select status = 'FAILED' and failure_code = 'AGENT_UNAVAILABLE' from recruitment_channel_events where provider_message_id = '$E11'" || true
+sql "update recruitment_channel_events set next_attempt_at = now() where provider_message_id = '$E11' and status = 'FAILED'" >/dev/null
 wait_sql 30 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E11'" || true
 same "11. lần 1 mất response → lần 2 dùng lại tin đi đã lưu, KHÔNG gọi OpenClaw lần hai" \
   "$(ev "$E11" "status || '/' || attempt_count")|$(results_of "$E11")" "PROCESSED/2|dropped"
@@ -257,9 +251,9 @@ wait_sql 20 "select last_error_code = 'AGENT_UNAVAILABLE' from recruitment_chann
 sql "update recruitment_channel_events set next_attempt_at = now() + interval '1 day', received_at = now() - interval '8 days' where provider_message_id = '$E15'" >/dev/null
 sql "update recruitment_channel_events set received_at = now() - interval '8 days' where provider_message_id = '$E8'" >/dev/null
 wait_sql 20 "select count(*) = 2 from recruitment_channel_events where provider_message_id in ('$E15', '$E8') and normalized_message_text is null" || true
-same "15. event lỗi quá 7 ngày → nội dung NULL, dead-letter (RETENTION_EXPIRED), không thử lại" \
-  "$(ev "$E15" "status || '/' || failure_code || '/' || (normalized_message_text is null) || '/' || (next_attempt_at is null) || '/' || (text_redacted_at is not null)")" "FAILED/RETENTION_EXPIRED/true/true/true"
-same "15. dead-letter cũ quá 7 ngày → nội dung NULL, giữ mã lỗi gốc" "$(ev "$E8" "failure_code || '/' || (normalized_message_text is null)")" "AGENT_ERROR_TEXT/true"
+same "15. event lỗi quá 7 ngày → nội dung NULL, giữ mã lỗi gốc, không thử lại" \
+  "$(ev "$E15" "status || '/' || failure_code || '/' || (normalized_message_text is null) || '/' || (next_attempt_at is null) || '/' || (text_redacted_at is not null)")" "FAILED/AGENT_UNAVAILABLE/true/true/true"
+same "15. dead-letter cũ quá 7 ngày → nội dung NULL, giữ mã lỗi gốc" "$(ev "$E8" "failure_code || '/' || (normalized_message_text is null)")" "PROVIDER_QUOTA/true"
 same "15. audit dead-letter RETENTION_EXPIRED cho cả hai" \
   "$(sql "select count(*) from activity_log where method = 'CHANNEL_EVENT_DEAD_LETTER' and context->>'stage' = 'RETENTION_EXPIRED' and \"createdAt\" >= '$T0'")" 2
 mock ok
