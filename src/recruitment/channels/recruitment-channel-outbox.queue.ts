@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { pilotFingerprint } from './recruitment-ai-safety.config';
 import { returnedRows } from './recruitment-channel-event.queue';
 import { OUTBOX_TEXT_RETENTION_DAYS } from './zalo-outbound.config';
 
@@ -32,7 +33,9 @@ export type DispatchGate =
   /** Tin canonical / hội thoại không còn — không gửi. */
   | { outcome: 'INVALID'; code: string }
   /** Mất lease (sender khác đã lấy dòng) — không ghi gì. */
-  | { outcome: 'LOST' };
+  | { outcome: 'LOST' }
+  /** Outbound đang dừng khẩn (hoặc không đọc được trạng thái) — trả về chờ, không mở kết nối. */
+  | { outcome: 'HELD' };
 
 interface ClaimRow {
   id: number | string;
@@ -169,8 +172,29 @@ export class RecruitmentChannelOutboxQueue {
     row: ClaimedOutbox,
     owner: string,
     redispatch = false,
+    pilotSenders: string[] | null = null,
   ): Promise<DispatchGate> {
     return this.dataSource.transaction(async (em) => {
+      // Dừng khẩn outbound (P3-7.3 / G8): khoá chia sẻ dòng điều khiển — thao tác dừng
+      // commit xong thì không dòng nào được ghi `dispatched_at` nữa. Không đọc được → giữ.
+      const [runtime]: Array<{ outbound_halted: boolean }> = await em.query(
+        `SELECT outbound_halted FROM "recruitment_runtime_controls" WHERE id = 1 FOR SHARE`,
+      );
+      if (runtime?.outbound_halted !== false) {
+        const held = returnedRows(
+          await em.query(
+            `UPDATE "recruitment_channel_outbox"
+             SET status = 'PENDING', attempt_count = greatest(attempt_count - 1, 0),
+                 dispatched_at = NULL, lease_until = NULL, lease_owner = NULL, updated_at = now()
+             WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
+               AND (dispatched_at IS NULL OR $3::boolean)
+             RETURNING id`,
+            [row.id, owner, redispatch],
+          ),
+        );
+        return held.length ? { outcome: 'HELD' } : { outcome: 'LOST' };
+      }
+
       const [control]: Array<{
         id: number;
         control_mode: string;
@@ -187,8 +211,16 @@ export class RecruitmentChannelOutboxQueue {
         : [];
       if (!control) return { outcome: 'INVALID', code: 'CANONICAL_MISSING' };
 
-      const code =
-        row.sourceType === 'AI_REPLY'
+      // Pilot: tin AI chỉ tới người nhận trong allowlist (tin HR viết tay luôn được gửi).
+      const pilotBlocked =
+        pilotSenders !== null &&
+        row.sourceType === 'AI_REPLY' &&
+        !pilotSenders.includes(
+          pilotFingerprint(row.channelAccountId, row.externalRecipientId),
+        );
+      const code = pilotBlocked
+        ? 'PILOT_RECIPIENT_BLOCKED'
+        : row.sourceType === 'AI_REPLY'
           ? suppressionCode(control, row.controlVersion)
           : null;
       if (!code) {
@@ -219,9 +251,12 @@ export class RecruitmentChannelOutboxQueue {
       if (!suppressed.length) return { outcome: 'LOST' };
       await em.query(
         `UPDATE "recruitment_messages"
-         SET metadata = metadata || '{"delivery": "SUPPRESSED_CONTROL_CHANGED"}'::jsonb
+         SET metadata = metadata || jsonb_build_object('delivery', $2::text)
          WHERE id = $1`,
-        [row.recruitmentMessageId],
+        [
+          row.recruitmentMessageId,
+          pilotBlocked ? 'SUPPRESSED_PILOT' : 'SUPPRESSED_CONTROL_CHANGED',
+        ],
       );
       return {
         outcome: 'SUPPRESSED',

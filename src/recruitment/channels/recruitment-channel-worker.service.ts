@@ -30,6 +30,7 @@ import {
   MessageContentType,
   MessageDirection,
   MessageSenderType,
+  RuntimeControlScope,
 } from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import { RecruitmentCandidateService } from '../services/recruitment-candidate.service';
@@ -38,7 +39,17 @@ import {
   invokeOpenClaw,
   type AgentFailureKind,
 } from './openclaw-responses.client';
+import { checkAiReply, type AiReplyViolation } from './ai-reply-policy';
+import {
+  type AiLimitVerdict,
+  RecruitmentAiLimitsService,
+} from './recruitment-ai-limits.service';
+import {
+  type AiSafetyConfig,
+  readAiSafetyConfig,
+} from './recruitment-ai-safety.config';
 import { RecruitmentConversationControlService } from './recruitment-conversation-control.service';
+import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentChannelEventQueue,
@@ -129,6 +140,10 @@ function asCanonicalError(error: unknown): CanonicalError {
  *
  * Không gửi tin Zalo (bước sau đọc outbox `PENDING`).
  */
+/** Nội dung thay thế tin AI bị chặn vì có dạng bí mật (P3-7.3 / G8). */
+const REDACTED_SECRET_REPLY =
+  '[Đã ẩn: câu trả lời AI có dạng bí mật — không gửi]';
+
 @Injectable()
 export class RecruitmentChannelWorker
   implements OnApplicationBootstrap, OnModuleDestroy
@@ -145,6 +160,9 @@ export class RecruitmentChannelWorker
   private loops: Promise<void>[] = [];
   private readonly inFlight = new Set<AbortController>();
   private nextJanitorAt = 0;
+  /** Pilot / trần / chính sách câu trả lời (P3-7.3 / G8); `null` khi cấu hình sai (đã chặn lúc boot). */
+  private readonly safety: AiSafetyConfig | null;
+  private lastHalted = false;
 
   constructor(
     configService: ConfigService,
@@ -158,11 +176,15 @@ export class RecruitmentChannelWorker
     private readonly audit: RecruitmentAuditService,
     private readonly control: RecruitmentConversationControlService,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly runtime?: RecruitmentRuntimeControlService,
+    private readonly limits?: RecruitmentAiLimitsService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isRecruitmentWorkerEnabled(get);
     const read = readRecruitmentWorkerConfig(get);
     this.config = 'config' in read ? read.config : null;
+    const safety = readAiSafetyConfig(get);
+    this.safety = 'config' in safety ? safety.config : null;
   }
 
   onApplicationBootstrap(): void {
@@ -191,12 +213,17 @@ export class RecruitmentChannelWorker
           this.nextJanitorAt = Date.now() + config.janitorMs;
           await this.expireRetention();
         }
+        if (await this.halted()) {
+          await sleep(config.pollMs + Math.floor(Math.random() * 250));
+          continue;
+        }
         const owner = `${this.workerId}:${randomUUID().slice(0, 8)}`;
         const event = await this.queue.claimNext(
           config.oaId,
           owner,
           config.leaseMs,
           config.settleMs,
+          this.safety?.pilotSenders ?? null,
         );
         if (!event) {
           await sleep(config.pollMs + Math.floor(Math.random() * 250));
@@ -318,6 +345,12 @@ export class RecruitmentChannelWorker
       instructions = control.resumeSignalPending
         ? RESUME_AFTER_TAKEOVER_INSTRUCTIONS
         : undefined;
+      if (!turnStarted && this.limits && this.safety) {
+        const verdict = await this.limits.evaluate(event, this.safety.limits);
+        if (!verdict.ok) {
+          return await this.limitReached(event, owner, inbound, verdict);
+        }
+      }
       if (turnStarted) {
         storedReply = await this.findStoredReply(event, inbound.conversationId);
       } else if (
@@ -341,6 +374,16 @@ export class RecruitmentChannelWorker
     if (storedReply) {
       // Lượt trước đã xong (tin đi đã nằm trong hội thoại) nhưng chưa kịp ghi kết quả
       // → gửi đúng bản đó, KHÔNG gọi OpenClaw lần hai.
+      const storedViolation = this.violation(storedReply.text, event);
+      if (storedViolation) {
+        return this.blockReply(
+          event,
+          owner,
+          inbound,
+          storedViolation,
+          storedReply.messageId,
+        );
+      }
       const result = await this.queue.complete(
         event,
         owner,
@@ -402,7 +445,15 @@ export class RecruitmentChannelWorker
           outcome.kind,
         );
       }
-
+      if (outcome.usage) {
+        await this.queue
+          .recordUsage(event.id, outcome.usage)
+          .catch((error) =>
+            this.logger.error(
+              `worker event=${event.id} ghi token lỗi error=${errorCode(error)}`,
+            ),
+          );
+      }
       let reply: CanonicalReply;
       try {
         reply = await this.ensureReply(event, subject, inbound, outcome.text);
@@ -414,6 +465,17 @@ export class RecruitmentChannelWorker
           config,
           failure.code,
           failure.kind,
+        );
+      }
+      // Kiểm đúng nội dung SẼ gửi (bản model đã lưu hoặc bản worker lưu).
+      const violation = this.violation(reply.text, event);
+      if (violation) {
+        return this.blockReply(
+          event,
+          owner,
+          inbound,
+          violation,
+          reply.messageId,
         );
       }
 
@@ -517,6 +579,136 @@ export class RecruitmentChannelWorker
   }
 
   /** Tin đi (`msg-reply`) mà một lần thử trước của event đã lưu, nếu có. */
+  /** Dừng khẩn WORKER hoặc AI (P3-7.3 / G8) — không bắt đầu lượt mới; log một lần khi đổi. */
+  private async halted(): Promise<boolean> {
+    if (!this.runtime) return false;
+    const state = await this.runtime.state();
+    const halted = state.workerHalted || state.aiHalted;
+    if (halted !== this.lastHalted) {
+      this.lastHalted = halted;
+      this.logger.warn(
+        halted
+          ? `worker: DỪNG KHẨN (worker=${state.workerHalted} ai=${state.aiHalted}${state.failClosed ? ' fail-closed' : ''}) — không claim tin`
+          : 'worker: mở lại — claim tin bình thường',
+      );
+    }
+    return halted;
+  }
+
+  private violation(text: string, event: ClaimedChannelEvent) {
+    return this.safety
+      ? checkAiReply(text, event.messageText ?? '', this.safety.replyPolicy)
+      : null;
+  }
+
+  /**
+   * Vượt trần (P3-7.3 / G8). Người gửi → không gọi AI, HR trả lời (cảnh báo theo hội thoại /
+   * giờ). Toàn hệ thống → tự DỪNG AI (audit hệ thống) + cảnh báo HR, trả event về hàng chờ để
+   * xử lý sau khi người vận hành mở lại.
+   */
+  private async limitReached(
+    event: ClaimedChannelEvent,
+    owner: string,
+    inbound: CanonicalInbound,
+    verdict: Exclude<AiLimitVerdict, { ok: true }>,
+  ): Promise<void> {
+    const details = {
+      limit: verdict.limit,
+      used: verdict.used,
+      max: verdict.max,
+    };
+    if (verdict.scope === 'GLOBAL') {
+      await this.runtime?.set(
+        [RuntimeControlScope.AI],
+        true,
+        `AI_LIMIT ${verdict.limit} ${verdict.used}/${verdict.max}`,
+        SYSTEM_ACTOR,
+      );
+      await this.alerts.raise({
+        type: HrAlertType.AI_LIMIT_REACHED,
+        severity: HrAlertSeverity.HIGH,
+        sourceKey: `ai-limit:${verdict.limit}:${new Date().toISOString().slice(0, 13)}`,
+        details,
+      });
+      const released = await this.queue.release(event, owner);
+      this.logger.error(
+        `worker event=${event.id} result=RELEASED ai=HALTED limit=${verdict.limit} used=${verdict.used}/${verdict.max}` +
+          `${released ? '' : ' (lease lost)'}`,
+      );
+      return;
+    }
+    const written = await this.queue.completeWithoutAi(
+      event,
+      owner,
+      inbound.conversationId,
+      ChannelEventAiDecision.SKIPPED_RATE_LIMITED,
+      (em) =>
+        this.alerts.raise(
+          {
+            type: HrAlertType.CANDIDATE_MESSAGE_WAITING,
+            severity: HrAlertSeverity.MEDIUM,
+            sourceKey: `conversation:${inbound.conversationId}:${verdict.limit}:${new Date().toISOString().slice(0, 13)}`,
+            candidateId: inbound.candidateId,
+            conversationId: inbound.conversationId,
+            eventId: event.id,
+            details,
+          },
+          em,
+        ),
+    );
+    this.logger.warn(
+      `worker event=${event.id} result=PROCESSED ai=${ChannelEventAiDecision.SKIPPED_RATE_LIMITED} ` +
+        `limit=${verdict.limit} used=${verdict.used}/${verdict.max} conversation=${inbound.conversationId}` +
+        `${written ? '' : ' (lease lost)'}`,
+    );
+  }
+
+  /**
+   * Câu trả lời vi phạm chính sách (P3-7.3 / G8): KHÔNG xếp hàng gửi; event PROCESSED với
+   * `BLOCKED_BY_POLICY`, cảnh báo HR (chỉ mã quy tắc, không nội dung); tin AI đã lưu
+   * đánh dấu không gửi để HR xem lại.
+   */
+  private async blockReply(
+    event: ClaimedChannelEvent,
+    owner: string,
+    inbound: CanonicalInbound,
+    violation: AiReplyViolation,
+    replyMessageId: number,
+  ): Promise<void> {
+    const written = await this.queue.completeWithoutAi(
+      event,
+      owner,
+      inbound.conversationId,
+      ChannelEventAiDecision.BLOCKED_BY_POLICY,
+      async (em) => {
+        await this.alerts.raise(
+          {
+            type: HrAlertType.AI_POLICY_HANDOFF,
+            severity: HrAlertSeverity.HIGH,
+            sourceKey: `event:${event.id}:reply-policy`,
+            candidateId: inbound.candidateId,
+            conversationId: inbound.conversationId,
+            eventId: event.id,
+            details: { rule: violation },
+          },
+          em,
+        );
+        // Dạng bí mật: không giữ nguyên văn trong hội thoại (HR vẫn thấy có tin bị chặn).
+        await em.query(
+          `UPDATE "recruitment_messages"
+           SET metadata = metadata || '{"delivery": "BLOCKED_BY_POLICY"}'::jsonb,
+               content = CASE WHEN $2::boolean THEN '${REDACTED_SECRET_REPLY}' ELSE content END
+           WHERE id = $1`,
+          [replyMessageId, violation === 'SECRET_LIKE'],
+        );
+      },
+    );
+    this.logger.warn(
+      `worker event=${event.id} result=PROCESSED ai=${ChannelEventAiDecision.BLOCKED_BY_POLICY} rule=${violation} ` +
+        `conversation=${inbound.conversationId}${written ? '' : ' (lease lost)'}`,
+    );
+  }
+
   private async findStoredReply(
     event: ClaimedChannelEvent,
     conversationId: number,

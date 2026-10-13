@@ -1,5 +1,6 @@
 import {
   classifyOpenClawResponse,
+  usageOf,
   invokeOpenClaw,
   OPENCLAW_EMPTY_REPLY_TEXT,
   type OpenClawClientConfig,
@@ -44,6 +45,48 @@ describe('classifyOpenClawResponse', () => {
       ok: true,
       text: 'Chào bạn, mình hỗ trợ nhé.',
       responseId: 'resp_1',
+      usage: null,
+    });
+  });
+
+  it('usage (định dạng OpenAI Responses của gateway) → token của lượt', () => {
+    const body = {
+      ...(completed('Chào bạn.') as Record<string, unknown>),
+      usage: {
+        input_tokens: 89_527,
+        input_tokens_details: {
+          cached_tokens: 76_063,
+          cache_write_tokens: 13_440,
+        },
+        output_tokens: 926,
+        output_tokens_details: { reasoning_tokens: 287 },
+        total_tokens: 90_453,
+      },
+    };
+    expect(classifyOpenClawResponse(200, body)).toMatchObject({
+      ok: true,
+      usage: { input: 89_527, cached: 76_063, output: 926, total: 90_453 },
+    });
+  });
+
+  it.each([
+    ['không có usage', undefined],
+    ['usage sai kiểu', { input_tokens: 'nhiều', output_tokens: 5 }],
+    ['token âm', { input_tokens: -1, output_tokens: 5 }],
+  ])('%s → usage null, lượt vẫn thành công', (_n, usage) => {
+    const body = { ...(completed('Chào.') as Record<string, unknown>), usage };
+    expect(classifyOpenClawResponse(200, body)).toMatchObject({
+      ok: true,
+      usage: null,
+    });
+  });
+
+  it('thiếu total_tokens → total = input + output', () => {
+    expect(usageOf({ input_tokens: 10, output_tokens: 5 })).toEqual({
+      input: 10,
+      cached: 0,
+      output: 5,
+      total: 15,
     });
   });
 

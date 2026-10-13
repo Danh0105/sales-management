@@ -72,6 +72,13 @@ services:
       RECRUITMENT_ZALO_TOKEN_KEY: ${STAGING_ZALO_TOKEN_KEY:?set STAGING_ZALO_TOKEN_KEY}
       RECRUITMENT_ZALO_API_URL: http://localhost:3198
       RECRUITMENT_ZALO_OAUTH_URL: http://localhost:3198
+      # P3-7.3 / G8: trần lượt / token. Staging chạy acceptance dồn dập (nhiều tin / người gửi /
+      # phút) nên mặc định nâng rất cao; bài g8-safety-acceptance tự đặt trần thấp khi thử.
+      RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR: ${RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR:-1000}
+      RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY: ${RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY:-10000}
+      RECRUITMENT_AI_MAX_TURNS_PER_DAY: ${RECRUITMENT_AI_MAX_TURNS_PER_DAY:-1000000}
+      RECRUITMENT_AI_DAILY_TOKEN_BUDGET: ${RECRUITMENT_AI_DAILY_TOKEN_BUDGET:-1000000000}
+      RECRUITMENT_AI_MONTHLY_TOKEN_BUDGET: ${RECRUITMENT_AI_MONTHLY_TOKEN_BUDGET:-2000000000}
       # FcmService bắt buộc có service account lúc khởi động. Staging KHÔNG dùng
       # credential Firebase thật: file giả do bootstrap sinh, không gửi được thông báo.
       FIREBASE_SERVICE_ACCOUNT_PATH: /run/kido/fake-firebase.json

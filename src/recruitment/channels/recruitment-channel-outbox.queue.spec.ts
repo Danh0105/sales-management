@@ -2,6 +2,7 @@ import {
   RecruitmentChannelOutboxQueue,
   type ClaimedOutbox,
 } from './recruitment-channel-outbox.queue';
+import { pilotFingerprint } from './recruitment-ai-safety.config';
 
 function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
   return {
@@ -21,11 +22,16 @@ function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
 function fakeDb(
   control: { control_mode: string; control_version: number } | null,
   updated = true,
+  /** Dòng `recruitment_runtime_controls`: `null` = không có dòng (fail-closed). */
+  runtime: { outbound_halted: boolean } | null = { outbound_halted: false },
 ) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const em = {
     query: jest.fn((sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
+      if (/FROM "recruitment_runtime_controls"/.test(sql)) {
+        return Promise.resolve(runtime ? [runtime] : []);
+      }
       if (/FROM "recruitment_conversations" c/.test(sql)) {
         return Promise.resolve(control ? [{ id: 9, ...control }] : []);
       }
@@ -96,7 +102,10 @@ describe('RecruitmentChannelOutboxQueue.dispatch — cửa kiểm cuối (P3-6.5
       expect(suppress.sql).toMatch(/source_type = 'AI_REPLY'/);
       expect(suppress.sql).toMatch(/dispatched_at IS NULL OR \$4::boolean/);
       expect(suppress.params).toEqual([21, 'o1', code, false]);
-      expect(db.ran(/SUPPRESSED_CONTROL_CHANGED/)[0].params).toEqual([301]);
+      expect(db.ran(/UPDATE "recruitment_messages"/)[0].params).toEqual([
+        301,
+        'SUPPRESSED_CONTROL_CHANGED',
+      ]);
     },
   );
 
@@ -148,4 +157,79 @@ describe('RecruitmentChannelOutboxQueue.dispatch — cửa kiểm cuối (P3-6.5
       expect(db.ran(/UPDATE "recruitment_messages"/)).toHaveLength(0);
     },
   );
+});
+
+describe('RecruitmentChannelOutboxQueue.dispatch — dừng khẩn + pilot (P3-7.3 / G8)', () => {
+  it.each([
+    ['outbound đang dừng khẩn', { outbound_halted: true }],
+    ['không có dòng điều khiển (fail-closed)', null],
+  ])(
+    '%s → HELD: trả về PENDING, hoàn lại lần thử, không ghi dispatched_at, không chặn tin',
+    async (_name, runtime) => {
+      const db = fakeDb(
+        { control_mode: 'AI_ACTIVE', control_version: 3 },
+        true,
+        runtime,
+      );
+      await expect(db.queue.dispatch(row(), 'o1')).resolves.toEqual({
+        outcome: 'HELD',
+      });
+      expect(db.ran(/FROM "recruitment_runtime_controls"/)[0].sql).toMatch(
+        /FOR SHARE/,
+      );
+      const [held] = db.ran(/SET status = 'PENDING'/);
+      expect(held.sql).toMatch(
+        /attempt_count = greatest\(attempt_count - 1, 0\)/,
+      );
+      expect(held.sql).toMatch(/dispatched_at = NULL/);
+      expect(held.params).toEqual([21, 'o1', false]);
+      expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+      expect(db.ran(/SUPPRESSED/)).toHaveLength(0);
+      expect(db.ran(/FROM "recruitment_conversations" c/)).toHaveLength(0);
+    },
+  );
+
+  it('đang dừng mà mất lease → LOST', async () => {
+    const db = fakeDb(
+      { control_mode: 'AI_ACTIVE', control_version: 3 },
+      false,
+      { outbound_halted: true },
+    );
+    await expect(db.queue.dispatch(row(), 'o1')).resolves.toEqual({
+      outcome: 'LOST',
+    });
+  });
+
+  it('pilot: tin AI tới người nhận NGOÀI allowlist → SUPPRESSED PILOT_RECIPIENT_BLOCKED, không gửi', async () => {
+    const db = fakeDb({ control_mode: 'AI_ACTIVE', control_version: 3 });
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, ['0000000000000000']),
+    ).resolves.toMatchObject({
+      outcome: 'SUPPRESSED',
+      code: 'PILOT_RECIPIENT_BLOCKED',
+    });
+    expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+    expect(db.ran(/UPDATE "recruitment_messages"/)[0].params).toEqual([
+      301,
+      'SUPPRESSED_PILOT',
+    ]);
+  });
+
+  it('pilot: người nhận TRONG allowlist → DISPATCHED; tin HR tới người ngoài allowlist vẫn gửi', async () => {
+    const allowed = pilotFingerprint('oa-recruit', '8812345');
+    const db = fakeDb({ control_mode: 'AI_ACTIVE', control_version: 3 });
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, [allowed]),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+
+    const hr = fakeDb({ control_mode: 'HUMAN_TAKEOVER', control_version: 4 });
+    await expect(
+      hr.queue.dispatch(
+        row({ sourceType: 'HR_MESSAGE', controlVersion: null }),
+        'o1',
+        false,
+        ['0000000000000000'],
+      ),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+  });
 });

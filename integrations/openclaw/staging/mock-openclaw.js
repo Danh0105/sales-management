@@ -16,6 +16,8 @@
 //   proxy       chuyển nguyên request tới gateway THẬT (OPENCLAW_UPSTREAM)
 //   proxy-drop  như proxy nhưng cắt kết nối sau khi gateway trả lời (`drop` lần đầu)
 //   503 | 500 | 401 | 400 | quota | rate | billing402 | hang | fallback | errortext | incomplete
+//   Tham số thêm (P3-7.3 / G8): "reply": "..." — câu trả lời của model giả (thay câu mặc định);
+//   "usage": {...} — trường `usage` (định dạng OpenAI Responses) trả kèm khi 200 completed.
 // GET /__log → danh sách request; POST /__reset → xoá log.
 const http = require('http');
 
@@ -34,11 +36,12 @@ const json = (res, status, body) => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
 };
-const completed = (text, status = 'completed') => ({
+const completed = (text, status = 'completed', usage) => ({
   id: `resp_mock_${Date.now()}`,
   object: 'response',
   status,
   output: [{ type: 'message', role: 'assistant', phase: 'final_answer', status, content: [{ type: 'output_text', text }] }],
+  ...(usage ? { usage } : {}),
 });
 const failed = (code) => ({ status: 'failed', output: [], error: { code, message: 'mock' } });
 
@@ -58,7 +61,7 @@ async function api(method, path, subject, body) {
 }
 
 /** Làm phần việc của model + plugin trong một lượt kênh. */
-async function fakeModelTurn(sessionKey, input, { save }) {
+async function fakeModelTurn(sessionKey, input, { save, replyText }) {
   const [, oa, user] = SESSION.exec(sessionKey) || [];
   if (!oa) throw new Error('session key không phải kênh zalo');
   const subject = `zalo:${oa}:${user}`;
@@ -67,7 +70,7 @@ async function fakeModelTurn(sessionKey, input, { save }) {
   const text = input.slice(header?.[0].length ?? 0);
   const found = await api('POST', 'candidates/find-or-create', subject, { source: 'ZALO' });
   const candidateId = found?.candidate?.id ?? found?.data?.candidate?.id;
-  const reply = `Mock đã nhận tin ${msgId} (${text.length} ký tự).`;
+  const reply = replyText || `Mock đã nhận tin ${msgId} (${text.length} ký tự).`;
   if (save) {
     const base = { candidateId, channel: 'ZALO', externalConversationId: 'ignored-by-subject' };
     await api('POST', 'conversations/message', subject, { ...base, senderType: 'CANDIDATE', direction: 'INBOUND', content: text, externalMessageId: msgId });
@@ -147,13 +150,16 @@ const server = http.createServer(async (req, res) => {
       case 'ok':
       case 'ok-nosave':
       case 'ok-drop': {
-        const reply = await fakeModelTurn(sessionKey, input, { save: current.mode !== 'ok-nosave' });
+        const reply = await fakeModelTurn(sessionKey, input, {
+          save: current.mode !== 'ok-nosave',
+          replyText: current.reply,
+        });
         if (current.mode === 'ok-drop' && dropping) {
           done('dropped');
           return req.socket.destroy();
         }
         done('200');
-        return json(res, 200, completed(reply));
+        return json(res, 200, completed(reply, 'completed', current.usage));
       }
       case 'proxy':
       case 'proxy-drop': {

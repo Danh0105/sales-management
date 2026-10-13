@@ -198,6 +198,8 @@ describe('RecruitmentZaloSender.process', () => {
     expect(queue.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ id: 21, controlVersion: 3 }),
       'o1',
+      false,
+      null,
     );
     expect(queue.markSent).toHaveBeenCalledWith(21, 'o1', 'z-1');
   });
@@ -445,10 +447,7 @@ describe('RecruitmentZaloSender.process', () => {
         .mockResolvedValueOnce(suppressed);
       await sender.process(row(), 'o1', config(zalo.url));
       expect(zalo.requests).toHaveLength(1);
-      expect(queue.dispatch.mock.calls.map((c) => c[2])).toEqual([
-        undefined,
-        true,
-      ]);
+      expect(queue.dispatch.mock.calls.map((c) => c[2])).toEqual([false, true]);
       expect(queue.markSent).not.toHaveBeenCalled();
       expect(queue.markRetry).not.toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalledWith(

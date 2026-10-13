@@ -247,6 +247,20 @@ export enum ChannelEventAiDecision {
   SKIPPED_CLOSED = 'SKIPPED_CLOSED',
   /** HR đổi chế độ điều khiển trong lúc OpenClaw đang chạy — bỏ câu trả lời của AI. */
   DISCARDED_CONTROL_CHANGED = 'DISCARDED_CONTROL_CHANGED',
+  /** Người gửi vượt trần lượt AI (giờ / ngày) — không gọi AI, HR trả lời. */
+  SKIPPED_RATE_LIMITED = 'SKIPPED_RATE_LIMITED',
+  /** Câu trả lời của AI vi phạm chính sách (lộ dữ liệu / dấu hiệu nội bộ) — không gửi. */
+  BLOCKED_BY_POLICY = 'BLOCKED_BY_POLICY',
+}
+
+/** Phạm vi dừng khẩn (bảng `recruitment_runtime_controls`). */
+export enum RuntimeControlScope {
+  /** API `/recruitment/ai/*` → 503 `AI_HALTED`; worker không bắt đầu lượt mới. */
+  AI = 'AI',
+  /** Worker không claim event mới. */
+  WORKER = 'WORKER',
+  /** Sender không mở kết nối gửi tin (tin giữ nguyên chờ). */
+  OUTBOUND = 'OUTBOUND',
 }
 
 export enum HrAlertType {
@@ -258,6 +272,8 @@ export enum HrAlertType {
   CHANNEL_EVENT_DEAD_LETTER = 'CHANNEL_EVENT_DEAD_LETTER',
   REFRESH_OUTCOME_UNKNOWN = 'REFRESH_OUTCOME_UNKNOWN',
   REPEATED_AI_FAILURE = 'REPEATED_AI_FAILURE',
+  /** Vượt trần lượt / token toàn hệ thống — AI đã tự dừng, cần người vận hành. */
+  AI_LIMIT_REACHED = 'AI_LIMIT_REACHED',
 }
 
 export enum HrAlertSeverity {

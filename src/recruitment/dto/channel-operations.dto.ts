@@ -1,5 +1,9 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  ArrayUnique,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -18,6 +22,7 @@ import {
   ChannelOutboxStatus,
   HrAlertStatus,
   HrAlertType,
+  RuntimeControlScope,
 } from '../recruitment.enums';
 
 /** HR gửi tin cho ứng viên qua kênh (Zalo OA tuyển dụng). */
@@ -60,6 +65,21 @@ export class MarkOutboxSentDto {
 export class ExcludeChannelEventDto {
   @IsEnum(ChannelEventExcludeReason)
   reason!: ChannelEventExcludeReason;
+}
+
+/** P3-7.3 / G8 — dừng khẩn / mở lại: phạm vi + lý do (ghi audit). */
+export class RuntimeControlChangeDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
+  @ArrayUnique()
+  @IsEnum(RuntimeControlScope, { each: true })
+  scopes!: RuntimeControlScope[];
+
+  @IsString()
+  @MinLength(5)
+  @MaxLength(200)
+  reason!: string;
 }
 
 export class RetryOutboxDto {

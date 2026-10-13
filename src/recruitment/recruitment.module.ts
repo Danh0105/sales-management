@@ -8,6 +8,10 @@ import { RecruitmentAiAuthGuard } from './ai/recruitment-ai-auth.guard';
 import { RecruitmentAiIdempotencyInterceptor } from './ai/recruitment-ai-idempotency.interceptor';
 import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.service';
 import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guard';
+import { RecruitmentAiRuntimeGuard } from './ai/recruitment-ai-runtime.guard';
+import { RecruitmentAiLimitsService } from './channels/recruitment-ai-limits.service';
+import { assertAiSafetyConfig } from './channels/recruitment-ai-safety.config';
+import { RecruitmentRuntimeControlService } from './channels/recruitment-runtime-control.service';
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
 import { RecruitmentChannelOutboxQueue } from './channels/recruitment-channel-outbox.queue';
@@ -49,6 +53,7 @@ import { RecruitmentChannelQuarantine } from './entities/recruitment-channel-qua
 import { RecruitmentConversation } from './entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from './entities/recruitment-handoff.entity';
 import { RecruitmentHrAlert } from './entities/recruitment-hr-alert.entity';
+import { RecruitmentRuntimeControl } from './entities/recruitment-runtime-control.entity';
 import { RecruitmentInterviewSlot } from './entities/recruitment-interview-slot.entity';
 import { RecruitmentInterview } from './entities/recruitment-interview.entity';
 import { RecruitmentJob } from './entities/recruitment-job.entity';
@@ -99,6 +104,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentChannelQuarantine,
       RecruitmentZaloCredential,
       RecruitmentHrAlert,
+      RecruitmentRuntimeControl,
       Department,
       Employee,
     ]),
@@ -130,6 +136,9 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     { provide: INTERVIEW_SLOT_PROVIDER, useClass: DbInterviewSlotProvider },
     RecruitmentAiAuthGuard,
     RecruitmentAiRateLimitGuard,
+    RecruitmentAiRuntimeGuard,
+    RecruitmentRuntimeControlService,
+    RecruitmentAiLimitsService,
     RecruitmentAiIdempotencyInterceptor,
     RecruitmentAiOwnershipService,
     RecruitmentZaloWebhookService,
@@ -154,5 +163,6 @@ export class RecruitmentModule implements OnModuleInit {
     assertRecruitmentZaloConfig(get);
     assertRecruitmentWorkerConfig(get);
     assertZaloOutboundConfig(get);
+    assertAiSafetyConfig(get);
   }
 }

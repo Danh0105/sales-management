@@ -68,6 +68,9 @@ function setup(
     controlVersion?: number;
     resumeSignalPending?: boolean;
     priorReply?: boolean;
+    /** Env (cấu hình an toàn G8: pilot, trần, chính sách). */
+    env?: Record<string, string>;
+    limitVerdict?: unknown;
   } = {},
 ) {
   const txEm = { tx: true, query: jest.fn().mockResolvedValue([]) };
@@ -90,6 +93,8 @@ function setup(
       },
     ),
     fail: jest.fn().mockResolvedValue(true),
+    recordUsage: jest.fn().mockResolvedValue(undefined),
+    release: jest.fn().mockResolvedValue(true),
   };
   const conversations = {
     saveMessage: jest
@@ -155,8 +160,12 @@ function setup(
     }),
   };
   const alerts = { raise: jest.fn().mockResolvedValue(true) };
+  const runtime = { set: jest.fn().mockResolvedValue({}) };
+  const limits = {
+    evaluate: jest.fn().mockResolvedValue(opts.limitVerdict ?? { ok: true }),
+  };
   const worker = new RecruitmentChannelWorker(
-    { get: () => undefined } as any,
+    { get: (key: string) => opts.env?.[key] } as any,
     queue as any,
     conversations as any,
     candidateService as any,
@@ -165,10 +174,14 @@ function setup(
     audit as any,
     control as any,
     alerts as any,
+    runtime as any,
+    limits as any,
   );
   return {
     worker,
     queue,
+    runtime,
+    limits,
     conversations,
     candidates,
     candidateService,
@@ -608,5 +621,207 @@ describe('RecruitmentChannelWorker.process', () => {
       expect.stringMatching(/DISCARDED_CONTROL_CHANGED/),
       [77],
     );
+  });
+});
+
+describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () => {
+  let logs: string[];
+  let fetchSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    logs = [];
+    for (const level of ['log', 'warn', 'error'] as const) {
+      jest
+        .spyOn(Logger.prototype, level)
+        .mockImplementation((message: unknown) => {
+          logs.push(String(message));
+        });
+    }
+    fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(okResponse());
+  });
+
+  afterEach(() => {
+    const all = logs.join('\n');
+    for (const secret of [TEXT, SENDER]) expect(all).not.toContain(secret);
+    jest.restoreAllMocks();
+  });
+
+  it('vượt trần lượt của người gửi → KHÔNG gọi OpenClaw, PROCESSED SKIPPED_RATE_LIMITED + cảnh báo HR', async () => {
+    const { worker, queue, alerts, runtime, txEm } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'SENDER',
+        limit: 'SENDER_HOURLY_TURNS',
+        used: 10,
+        max: 10,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.markAiStarted).not.toHaveBeenCalled();
+    expect(queue.completeWithoutAi.mock.calls[0][3]).toBe(
+      'SKIPPED_RATE_LIMITED',
+    );
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'CANDIDATE_MESSAGE_WAITING',
+        conversationId: 55,
+        eventId: 11,
+        details: { limit: 'SENDER_HOURLY_TURNS', used: 10, max: 10 },
+      }),
+      txEm,
+    );
+    expect(runtime.set).not.toHaveBeenCalled();
+  });
+
+  it('vượt trần toàn hệ thống → tự DỪNG AI (actor hệ thống) + cảnh báo AI_LIMIT_REACHED, trả event về hàng chờ', async () => {
+    const { worker, queue, alerts, runtime } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TOKENS',
+        used: 30_000_001,
+        max: 30_000_000,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(runtime.set).toHaveBeenCalledWith(
+      ['AI'],
+      true,
+      expect.stringMatching(/^AI_LIMIT DAILY_TOKENS/),
+      expect.objectContaining({ type: 'SYSTEM' }),
+    );
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'AI_LIMIT_REACHED', severity: 'HIGH' }),
+    );
+    expect(queue.release).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11 }),
+      'w1:abc',
+    );
+    expect(queue.completeWithoutAi).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
+  });
+
+  it('lượt đã bắt đầu (chạy lại) không bị kiểm trần lần nữa', async () => {
+    const { worker, limits } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TURNS',
+        used: 9,
+        max: 1,
+      },
+      storedReply: REPLY,
+      priorReply: true,
+    });
+    await worker.process(
+      event({ attemptCount: 2, aiControlVersion: 3 }),
+      'w1:abc',
+      CONFIG,
+    );
+    expect(limits.evaluate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'dấu hiệu nội bộ (tên tool)',
+      'Mình sẽ gọi recruitment_get_candidate để xem',
+      'INTERNAL_MARKER',
+    ],
+    ['số điện thoại lạ', 'Bạn gọi chị Hoa 0987654321 nhé', 'FOREIGN_CONTACT'],
+    [
+      'URL ngoài danh sách',
+      'Xem thêm tại https://evil.example.com/x',
+      'FOREIGN_URL',
+    ],
+  ])(
+    'câu trả lời vi phạm chính sách (%s) → KHÔNG xếp hàng gửi, BLOCKED_BY_POLICY + cảnh báo HR (mã quy tắc)',
+    async (_n, reply, rule) => {
+      fetchSpy.mockResolvedValue(okResponse(reply));
+      const { worker, queue, alerts, txEm } = setup({ storedReply: reply });
+      await worker.process(event(), 'w1:abc', CONFIG);
+      expect(queue.complete).not.toHaveBeenCalled();
+      expect(queue.completeWithoutAi.mock.calls[0][3]).toBe(
+        'BLOCKED_BY_POLICY',
+      );
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'AI_POLICY_HANDOFF',
+          eventId: 11,
+          details: { rule },
+        }),
+        txEm,
+      );
+      expect(JSON.stringify(alerts.raise.mock.calls)).not.toContain(reply);
+      expect(txEm.query).toHaveBeenCalledWith(
+        expect.stringContaining('BLOCKED_BY_POLICY'),
+        [101, false],
+      );
+    },
+  );
+
+  it('câu trả lời có dạng bí mật → chặn + che nội dung tin AI đã lưu (không giữ nguyên văn)', async () => {
+    const reply = 'Key là sk-abcdefghijklmnop1234';
+    fetchSpy.mockResolvedValue(okResponse(reply));
+    const { worker, queue, alerts, txEm } = setup({ storedReply: reply });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({ details: { rule: 'SECRET_LIKE' } }),
+      txEm,
+    );
+    const [sql, params] = txEm.query.mock.calls.find(([q]) =>
+      String(q).includes('BLOCKED_BY_POLICY'),
+    )!;
+    expect(sql).toMatch(/content = CASE WHEN \$2::boolean THEN '\[Đã ẩn/);
+    expect(params).toEqual([101, true]);
+  });
+
+  it('câu trả lời nhắc lại SĐT của chính ứng viên / liên hệ được phép / miền được phép → gửi bình thường', async () => {
+    const reply =
+      'Mình đã ghi nhận số 0912345678 của bạn. Hotline 1900 1234 56, chi tiết tại https://kidoedu.vn/tuyen-dung';
+    fetchSpy.mockResolvedValue(okResponse(reply));
+    const { worker, queue } = setup({
+      storedReply: reply,
+      env: {
+        RECRUITMENT_AI_REPLY_ALLOWED_CONTACTS: '1900123456',
+        RECRUITMENT_AI_REPLY_ALLOWED_DOMAINS: 'kidoedu.vn',
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.complete).toHaveBeenCalled();
+    expect(queue.completeWithoutAi).not.toHaveBeenCalled();
+  });
+
+  it('usage của OpenClaw → ghi token của lượt', async () => {
+    const body = {
+      id: 'resp_1',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: REPLY }],
+        },
+      ],
+      usage: {
+        input_tokens: 1000,
+        input_tokens_details: { cached_tokens: 800 },
+        output_tokens: 50,
+        total_tokens: 1050,
+      },
+    };
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    const { worker, queue } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.recordUsage).toHaveBeenCalledWith(11, {
+      input: 1000,
+      cached: 800,
+      output: 50,
+      total: 1050,
+    });
   });
 });

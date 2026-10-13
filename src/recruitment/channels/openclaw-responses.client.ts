@@ -27,8 +27,21 @@ export interface OpenClawClientConfig {
  */
 export type AgentFailureKind = 'infra' | 'provider' | 'agent' | 'rejected';
 
+/** Token của lượt theo `usage` (định dạng OpenAI Responses) — input gồm cả phần cache. */
+export interface AgentUsage {
+  input: number;
+  cached: number;
+  output: number;
+  total: number;
+}
+
 export type AgentOutcome =
-  | { ok: true; text: string; responseId: string | null }
+  | {
+      ok: true;
+      text: string;
+      responseId: string | null;
+      usage: AgentUsage | null;
+    }
   | {
       ok: false;
       code: string;
@@ -169,6 +182,29 @@ export function classifyOpenClawResponse(
     ok: true,
     text,
     responseId: typeof record.id === 'string' ? record.id : null,
+    usage: usageOf(record.usage),
+  };
+}
+
+/** `usage` của gateway (`toOpenAiResponsesUsage`); thiếu / sai kiểu → `null`, không chặn lượt. */
+export function usageOf(value: unknown): AgentUsage | null {
+  if (!isRecord(value)) return null;
+  const count = (v: unknown) =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0
+      ? Math.round(v)
+      : null;
+  const input = count(value.input_tokens);
+  const output = count(value.output_tokens);
+  const total = count(value.total_tokens);
+  if (input === null || output === null) return null;
+  const details = isRecord(value.input_tokens_details)
+    ? value.input_tokens_details
+    : {};
+  return {
+    input,
+    cached: count(details.cached_tokens) ?? 0,
+    output,
+    total: total ?? input + output,
   };
 }
 

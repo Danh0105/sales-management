@@ -24,7 +24,8 @@ export type RecruitmentAuditEntity =
   | 'channel-events'
   | 'channel-outbox'
   | 'channel-quarantine'
-  | 'hr-alerts';
+  | 'hr-alerts'
+  | 'runtime-controls';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -70,7 +71,10 @@ export type RecruitmentAuditAction =
   | 'OUTBOX_MARK_SENT'
   | 'OUTBOX_RETRY'
   | 'OUTBOX_DEAD_LETTER'
-  | 'HR_ALERT_ACKNOWLEDGE';
+  | 'HR_ALERT_ACKNOWLEDGE'
+  /** P3-7.3 / G8 — dừng khẩn / mở lại AI, worker, outbound (người vận hành hoặc hệ thống tự dừng). */
+  | 'RUNTIME_STOP'
+  | 'RUNTIME_RESUME';
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng

@@ -176,6 +176,22 @@ export class RecruitmentChannelEvent {
   })
   aiDecision!: ChannelEventAiDecision | null;
 
+  /**
+   * Token của lượt AI theo `usage` OpenClaw (P3-7.3 / G8): input gồm cả phần cache,
+   * cached = phần đọc từ cache. Dùng cho trần ngân sách ngày / tháng.
+   */
+  @Column({ name: 'ai_input_tokens', type: 'int', nullable: true })
+  aiInputTokens!: number | null;
+
+  @Column({ name: 'ai_cached_tokens', type: 'int', nullable: true })
+  aiCachedTokens!: number | null;
+
+  @Column({ name: 'ai_output_tokens', type: 'int', nullable: true })
+  aiOutputTokens!: number | null;
+
+  @Column({ name: 'ai_total_tokens', type: 'int', nullable: true })
+  aiTotalTokens!: number | null;
+
   /** SHA-256 (hex) của body thô — đối chiếu, không khôi phục được nội dung. */
   @Column({ name: 'payload_hash', type: 'varchar', length: 64 })
   payloadHash!: string;

@@ -17,9 +17,11 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/role-guard';
 import { Roles } from '../../auth/roles.decorator';
+import { RecruitmentAiLimitsService } from '../channels/recruitment-ai-limits.service';
 import { RecruitmentChannelEventOperationsService } from '../channels/recruitment-channel-event-operations.service';
 import { RecruitmentConversationControlService } from '../channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from '../channels/recruitment-hr-alert.service';
+import { RecruitmentRuntimeControlService } from '../channels/recruitment-runtime-control.service';
 import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outbox-operations.service';
 import { RecruitmentZaloQuarantineService } from '../channels/recruitment-zalo-quarantine.service';
 import {
@@ -31,6 +33,7 @@ import {
   OutboxQueryDto,
   ResumeConversationAiDto,
   RetryOutboxDto,
+  RuntimeControlChangeDto,
 } from '../dto/channel-operations.dto';
 import {
   hrActor,
@@ -116,7 +119,36 @@ export class RecruitmentOperationsController {
     private readonly alerts: RecruitmentHrAlertService,
     private readonly quarantine: RecruitmentZaloQuarantineService,
     private readonly events: RecruitmentChannelEventOperationsService,
+    private readonly runtime: RecruitmentRuntimeControlService,
+    private readonly aiLimits: RecruitmentAiLimitsService,
   ) {}
+
+  /** P3-7.3 / G8 — trạng thái dừng khẩn AI / worker / outbound. */
+  @Get('runtime-controls')
+  runtimeControls() {
+    return this.runtime.state();
+  }
+
+  /** Dừng khẩn (không cần restart): AI / WORKER / OUTBOUND, có lý do, ghi audit. */
+  @Post('runtime-controls/stop')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  stopRuntime(@Body() dto: RuntimeControlChangeDto, @Req() req: Request) {
+    return this.runtime.set(dto.scopes, true, dto.reason, hrActor(req.user!));
+  }
+
+  @Post('runtime-controls/resume')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  resumeRuntime(@Body() dto: RuntimeControlChangeDto, @Req() req: Request) {
+    return this.runtime.set(dto.scopes, false, dto.reason, hrActor(req.user!));
+  }
+
+  /** Lượt / token AI hôm nay, tháng này so với trần; pilot bật hay không (không lộ danh sách). */
+  @Get('ai-usage')
+  aiUsage() {
+    return this.aiLimits.summary();
+  }
 
   /** P3-7.3 — số event inbox theo trạng thái + lý do, tin đang chờ (không nội dung). */
   @Get('events/stats')

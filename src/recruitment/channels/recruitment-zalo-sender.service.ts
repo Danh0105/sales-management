@@ -17,7 +17,9 @@ import {
   type ClaimedOutbox,
   type DispatchGate,
 } from './recruitment-channel-outbox.queue';
+import { readAiSafetyConfig } from './recruitment-ai-safety.config';
 import { retryDelayMs } from './recruitment-channel-worker.config';
+import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentZaloCredentialStore,
@@ -67,6 +69,9 @@ export class RecruitmentZaloSender
   private readonly logger = new Logger('RecruitmentZaloSender');
   private readonly enabled: boolean;
   private readonly config: ZaloOutboundConfig | null;
+  /** Fingerprint người nhận được phép khi pilot (`null` = không pilot). */
+  private readonly pilotSenders: string[] | null;
+  private lastHalted = false;
   private readonly senderId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
   private loops: Promise<void>[] = [];
@@ -78,11 +83,14 @@ export class RecruitmentZaloSender
     private readonly audit: RecruitmentAuditService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly runtime?: RecruitmentRuntimeControlService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isZaloOutboundEnabled(get);
     const read = readZaloOutboundConfig(get);
     this.config = 'config' in read ? read.config : null;
+    const safety = readAiSafetyConfig(get);
+    this.pilotSenders = 'config' in safety ? safety.config.pilotSenders : null;
   }
 
   onApplicationBootstrap(): void {
@@ -108,6 +116,10 @@ export class RecruitmentZaloSender
         if (slot === 0 && Date.now() >= nextMaintenance) {
           nextMaintenance = Date.now() + Math.max(config.pollMs * 5, 2_000);
           await this.maintenance(config);
+        }
+        if (await this.outboundHalted()) {
+          await sleep(config.pollMs + Math.floor(Math.random() * 200));
+          continue;
         }
         const owner = `${this.senderId}:${randomUUID().slice(0, 8)}`;
         const row = await this.queue.claimNext(
@@ -159,7 +171,12 @@ export class RecruitmentZaloSender
       );
     }
 
-    const gate = await this.queue.dispatch(row, owner);
+    const gate = await this.queue.dispatch(
+      row,
+      owner,
+      false,
+      this.pilotSenders,
+    );
     if (gate.outcome !== 'DISPATCHED') {
       return this.notDispatched(row, owner, config, gate, started);
     }
@@ -186,7 +203,12 @@ export class RecruitmentZaloSender
         }
         // Lần trước Zalo từ chối token (chắc chắn chưa tới) và refresh có thể lâu —
         // HR có thể đã tiếp quản trong lúc đó: kiểm lại trước lần gửi thứ hai.
-        const again = await this.queue.dispatch(row, owner, true);
+        const again = await this.queue.dispatch(
+          row,
+          owner,
+          true,
+          this.pilotSenders,
+        );
         if (again.outcome !== 'DISPATCHED') {
           return this.notDispatched(row, owner, config, again, started);
         }
@@ -369,6 +391,11 @@ export class RecruitmentZaloSender
     started: number,
   ): Promise<void> {
     switch (gate.outcome) {
+      case 'HELD':
+        this.logger.warn(
+          `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
+        );
+        return;
       case 'LOST':
         this.logger.warn(
           `sender outbox=${row.id} lease lost trước khi gửi — bỏ`,
@@ -397,6 +424,19 @@ export class RecruitmentZaloSender
           network: false,
         });
     }
+  }
+
+  /** Dừng khẩn outbound (P3-7.3 / G8) — đọc mới mỗi vòng; log một lần khi đổi trạng thái. */
+  private async outboundHalted(): Promise<boolean> {
+    if (!this.runtime) return false;
+    const halted = (await this.runtime.state()).outboundHalted;
+    if (halted !== this.lastHalted) {
+      this.lastHalted = halted;
+      if (halted)
+        this.logger.warn('sender: outbound đang DỪNG KHẨN — không claim tin');
+      else this.logger.warn('sender: outbound mở lại');
+    }
+    return halted;
   }
 
   private async maintenance(config: ZaloOutboundConfig) {
