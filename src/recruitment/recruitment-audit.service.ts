@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 
+import { ActivityLog } from '../activity-log/activity-log.entity';
 import { ActivityLogService } from '../activity-log/activity-log.service';
 import { capPayload } from '../activity-log/activity-log.util';
 import { RecruitmentActorType } from './recruitment.enums';
@@ -76,6 +78,18 @@ export type RecruitmentAuditAction =
   | 'RUNTIME_STOP'
   | 'RUNTIME_RESUME';
 
+export interface RecruitmentAuditParams {
+  actor: RecruitmentActor;
+  action: RecruitmentAuditAction;
+  entity: RecruitmentAuditEntity;
+  entityId: number;
+  before?: unknown;
+  after?: unknown;
+  context?: Record<string, unknown>;
+  /** `false` cho thao tác bị từ chối (vd. `AI_SUBJECT_DENIED`). */
+  success?: boolean;
+}
+
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng
  * bảng audit riêng.
@@ -94,21 +108,27 @@ export type RecruitmentAuditAction =
 export class RecruitmentAuditService {
   constructor(private readonly activityLog: ActivityLogService) {}
 
-  async record(params: {
-    actor: RecruitmentActor;
-    action: RecruitmentAuditAction;
-    entity: RecruitmentAuditEntity;
-    entityId: number;
-    before?: unknown;
-    after?: unknown;
-    context?: Record<string, unknown>;
-    /** `false` cho thao tác bị từ chối (vd. `AI_SUBJECT_DENIED`). */
-    success?: boolean;
-  }): Promise<void> {
+  async record(params: RecruitmentAuditParams): Promise<void> {
+    await this.activityLog.record(this.entry(params));
+  }
+
+  /**
+   * Audit bắt buộc cho Recruitment Operations. Khác `record()` best-effort dùng
+   * chung toàn hệ thống, lời gọi này INSERT thẳng qua EntityManager của transaction
+   * nghiệp vụ và **không nuốt lỗi**. Vì vậy state + audit cùng commit hoặc cùng rollback.
+   */
+  async recordMandatory(
+    em: EntityManager,
+    params: RecruitmentAuditParams,
+  ): Promise<void> {
+    await em.insert(ActivityLog, this.entry(params));
+  }
+
+  private entry(params: RecruitmentAuditParams): Partial<ActivityLog> {
     const { actor, action, entity, entityId } = params;
     const resource = `recruitment-${entity}`;
 
-    await this.activityLog.record({
+    return {
       actorId: actorIdOf(actor),
       actorName: actor.name,
       actorRoles: actor.roles,
@@ -120,14 +140,15 @@ export class RecruitmentAuditService {
         actorType: actor.type,
         entity,
         entityId,
+        result: params.success === false ? 'REJECTED' : 'SUCCESS',
         ...(params.context ?? {}),
       },
       beforeData: capPayload(toPlain(params.before)) as unknown,
       afterData: capPayload(toPlain(params.after)) as unknown,
       changes: capPayload(diff(params.before, params.after)) as unknown,
-      statusCode: null,
+      statusCode: params.success === false ? null : 200,
       success: params.success ?? true,
-    });
+    };
   }
 }
 

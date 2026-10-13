@@ -6,9 +6,6 @@ import {
 
 import { RecruitmentRuntimeControlService } from '../channels/recruitment-runtime-control.service';
 
-/** Bản đọc trạng thái dừng khẩn dùng lại tối đa chừng này (mỗi request API AI). */
-const RUNTIME_STATE_MAX_AGE_MS = 1000;
-
 /**
  * Dừng khẩn AI (P3-7.3 / G8) cho API `/recruitment/ai/*`: chạy SAU guard xác thực — đang dừng
  * (hoặc không đọc được trạng thái — fail-closed) → 503 `AI_HALTED`, không chạm dữ liệu.
@@ -18,7 +15,8 @@ export class RecruitmentAiRuntimeGuard implements CanActivate {
   constructor(private readonly runtime: RecruitmentRuntimeControlService) {}
 
   async canActivate(): Promise<boolean> {
-    const state = await this.runtime.state(RUNTIME_STATE_MAX_AGE_MS);
+    // Mỗi tool request đọc DB mới: không có cửa sổ cache 1 giây sau emergency stop.
+    const state = await this.runtime.state();
     if (state.aiHalted) {
       throw new ServiceUnavailableException({
         code: 'AI_HALTED',

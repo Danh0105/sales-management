@@ -194,10 +194,10 @@ same "5. cảnh báo HR CANDIDATE_MESSAGE_WAITING có trần + số lượt (kh�
 stop "$P-w4"
 
 echo "== 6. Trần token toàn hệ thống → tự DỪNG AI (audit hệ thống) + cảnh báo"
-DAY_TOKENS=$(sql "select coalesce(sum(ai_total_tokens), 0) from recruitment_channel_events where processed_at >= date_trunc('day', now() at time zone 'Asia/Ho_Chi_Minh') at time zone 'Asia/Ho_Chi_Minh'")
-BUDGET=$((DAY_TOKENS + 5000))
+DAY_RESERVED=$(sql "select coalesce(sum(greatest(ai_reserved_tokens, coalesce(ai_total_tokens,0))), 0) from recruitment_channel_events where ai_reservation_day = (now() at time zone 'Asia/Ho_Chi_Minh')::date")
+BUDGET=$((DAY_RESERVED + 6000))
 mock_mode '{"mode":"ok","usage":{"input_tokens":5000,"input_tokens_details":{"cached_tokens":4000},"output_tokens":100,"total_tokens":5100}}'
-start_worker "$P-w5" 3048 -e RECRUITMENT_AI_DAILY_TOKEN_BUDGET="$BUDGET"
+start_worker "$P-w5" 3048 -e RECRUITMENT_AI_DAILY_TOKEN_BUDGET="$BUDGET" -e RECRUITMENT_AI_TOKEN_RESERVATION_PER_TURN=6000
 send "$D-1" "$D" "Tin G8 ngan sach mot $RUN_ID" >/dev/null
 wait_sql 30 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$D-1'" || true
 same "6. lượt 1: token ghi theo usage (input/cached/output/total)" "$(ev "$D-1" "ai_input_tokens || '/' || ai_cached_tokens || '/' || ai_output_tokens || '/' || ai_total_tokens")" "5000/4000/100/5100"

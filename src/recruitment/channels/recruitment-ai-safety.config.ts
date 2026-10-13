@@ -21,6 +21,8 @@ export interface AiLimits {
   maxTurnsPerDay: number;
   dailyTokenBudget: number;
   monthlyTokenBudget: number;
+  /** Dung lượng tối đa dành trước cho một lượt provider, tính vào ngân sách tới hết kỳ. */
+  tokenReservationPerTurn: number;
 }
 
 export interface AiReplyPolicyConfig {
@@ -44,6 +46,7 @@ export const DEFAULT_AI_LIMITS: AiLimits = Object.freeze({
   // ~90k token / lượt (phần lớn là cache ngữ cảnh) × 300 lượt.
   dailyTokenBudget: 30_000_000,
   monthlyTokenBudget: 500_000_000,
+  tokenReservationPerTurn: 200_000,
 });
 
 const FINGERPRINT = /^[0-9a-f]{16}$/;
@@ -121,12 +124,21 @@ export function readAiSafetyConfig(
       1,
       2_000_000_000,
     ),
+    tokenReservationPerTurn: int(
+      'RECRUITMENT_AI_TOKEN_RESERVATION_PER_TURN',
+      DEFAULT_AI_LIMITS.tokenReservationPerTurn,
+      1,
+      1_000_000,
+    ),
   };
   if (limits.maxTurnsPerSenderDay < limits.maxTurnsPerSenderHour) {
     invalid.push('RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY');
   }
   if (limits.monthlyTokenBudget < limits.dailyTokenBudget) {
     invalid.push('RECRUITMENT_AI_MONTHLY_TOKEN_BUDGET');
+  }
+  if (limits.dailyTokenBudget < limits.tokenReservationPerTurn) {
+    invalid.push('RECRUITMENT_AI_DAILY_TOKEN_BUDGET');
   }
 
   const allowedDomains = list('RECRUITMENT_AI_REPLY_ALLOWED_DOMAINS').map((v) =>

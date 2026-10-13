@@ -36,6 +36,8 @@ function event(
     messageText: TEXT,
     attemptCount: 1,
     aiControlVersion: null,
+    aiProviderDispatchedAt: null,
+    aiReservedTokens: null,
     ...overrides,
   };
 }
@@ -45,6 +47,7 @@ function okResponse(text = REPLY) {
     JSON.stringify({
       id: 'resp_1',
       status: 'completed',
+      usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 },
       output: [
         {
           type: 'message',
@@ -79,6 +82,7 @@ function setup(
   const queue = {
     heartbeat: jest.fn().mockResolvedValue(true),
     markAiStarted: jest.fn().mockResolvedValue(true),
+    markProviderDispatched: jest.fn().mockResolvedValue('DISPATCHED'),
     complete: jest
       .fn()
       .mockResolvedValue({ completed: true, outboxId: 5, discarded: false }),
@@ -164,16 +168,24 @@ function setup(
   const alerts = { raise: jest.fn().mockResolvedValue(true) };
   const runtime = {
     set: jest.fn().mockResolvedValue({}),
+    state: jest.fn().mockResolvedValue({ aiHalted: false, workerHalted: false }),
+    onStop: jest.fn().mockReturnValue(jest.fn()),
     haltAiIfRunning: jest
-      .fn()
-      .mockResolvedValue(
-        opts.haltedByOther
+      .fn(async (_reason: string, _actor: unknown, alsoInTx?: (em: unknown, state: unknown) => Promise<unknown>) => {
+        const state = opts.haltedByOther
           ? null
-          : { aiHalted: true, updatedAt: new Date('2026-10-13T01:48:00.123Z') },
-      ),
+          : { aiHalted: true, updatedAt: new Date('2026-10-13T01:48:00.123Z') };
+        if (state) await alsoInTx?.(txEm, state);
+        return state;
+      }),
   };
   const limits = {
     evaluate: jest.fn().mockResolvedValue(opts.limitVerdict ?? { ok: true }),
+    reserve: jest.fn().mockResolvedValue(
+      opts.limitVerdict && (opts.limitVerdict as { ok?: boolean }).ok === false
+        ? { kind: 'LIMIT', verdict: opts.limitVerdict }
+        : { kind: 'RESERVED' },
+    ),
   };
   const worker = new RecruitmentChannelWorker(
     { get: (key: string) => opts.env?.[key] } as any,
@@ -282,7 +294,7 @@ describe('RecruitmentChannelWorker.process', () => {
       }),
     );
     expect(queue.complete).toHaveBeenCalledWith(
-      event(),
+      expect.objectContaining({ id: 11, aiControlVersion: 3, aiReservedTokens: 200_000 }),
       'w1:abc',
       {
         externalRecipientId: SENDER,
@@ -319,7 +331,7 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('OpenAI hết quota (429) → FAILED có lịch thử lại, không PROCESSED, không có tin đi', async () => {
+  it('OpenAI hết quota (429) sau dispatch → FAILED cuối, không retry mù', async () => {
     fetchSpy.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -335,7 +347,7 @@ describe('RecruitmentChannelWorker.process', () => {
       expect.anything(),
       'w1:abc',
       'PROVIDER_QUOTA',
-      4000,
+      null,
     );
     expect(queue.complete).not.toHaveBeenCalled();
     // Chỉ tin đến (idempotent) — không có tin đi nào cho lượt lỗi.
@@ -345,7 +357,7 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('OpenClaw 5xx → thử lại', async () => {
+  it('OpenClaw 5xx sau dispatch → FAILED cuối, không retry mù', async () => {
     fetchSpy.mockResolvedValue(new Response('', { status: 503 }));
     const { worker, queue } = setup();
     await worker.process(event(), 'w1:abc', CONFIG);
@@ -353,7 +365,7 @@ describe('RecruitmentChannelWorker.process', () => {
       expect.anything(),
       'w1:abc',
       'AGENT_UNAVAILABLE',
-      1000,
+      null,
     );
   });
 
@@ -554,18 +566,24 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('lượt mới: ghi bền version điều khiển (markAiStarted) TRƯỚC khi gọi OpenClaw', async () => {
-    const { worker, queue } = setup();
+  it('lượt mới: reserve quota và ghi mốc dispatch TRƯỚC khi gọi OpenClaw', async () => {
+    const { worker, queue, limits } = setup();
     await worker.process(event(), 'w1:abc', CONFIG);
-    expect(queue.markAiStarted).toHaveBeenCalledWith(event(), 'w1:abc', 3);
-    expect(queue.markAiStarted.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(limits.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11 }), 'w1:abc', 3,
+      expect.objectContaining({ tokenReservationPerTurn: 200_000 }),
+    );
+    expect(limits.reserve.mock.invocationCallOrder[0]).toBeLessThan(
+      queue.markProviderDispatched.mock.invocationCallOrder[0],
+    );
+    expect(queue.markProviderDispatched.mock.invocationCallOrder[0]).toBeLessThan(
       fetchSpy.mock.invocationCallOrder[0],
     );
   });
 
-  it('mất lease trước khi ghi version → không gọi OpenClaw, không ghi kết quả', async () => {
-    const { worker, queue } = setup();
-    queue.markAiStarted.mockResolvedValue(false);
+  it('mất lease trước khi reserve → không gọi OpenClaw, không ghi kết quả', async () => {
+    const { worker, queue, limits } = setup();
+    limits.reserve.mockResolvedValue({ kind: 'LOST' });
     await worker.process(event(), 'w1:abc', CONFIG);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
@@ -577,7 +595,7 @@ describe('RecruitmentChannelWorker.process', () => {
       priorReply: true,
     });
     await worker.process(
-      event({ attemptCount: 2, aiControlVersion: 3 }),
+      event({ attemptCount: 2, aiControlVersion: 3, aiReservedTokens: 200000 }),
       'w2:def',
       CONFIG,
     );
@@ -600,7 +618,7 @@ describe('RecruitmentChannelWorker.process', () => {
   it('chạy lại lượt đã bắt đầu, chưa có tin đi → chạy lại lượt AI dưới version cũ (dù handoff của chính lượt làm AI_PAUSED)', async () => {
     const { worker, queue } = setup({ controlState: 'AI_PAUSED' });
     await worker.process(
-      event({ attemptCount: 2, aiControlVersion: 3 }),
+      event({ attemptCount: 2, aiControlVersion: 3, aiReservedTokens: 200000 }),
       'w2:def',
       CONFIG,
     );
@@ -703,7 +721,7 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
   });
 
   it('vượt trần toàn hệ thống → tự DỪNG AI (actor hệ thống) + cảnh báo AI_LIMIT_REACHED, trả event về hàng chờ', async () => {
-    const { worker, queue, alerts, runtime } = setup({
+    const { worker, queue, alerts, runtime, txEm } = setup({
       limitVerdict: {
         ok: false,
         scope: 'GLOBAL',
@@ -717,6 +735,7 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
     expect(runtime.haltAiIfRunning).toHaveBeenCalledWith(
       expect.stringMatching(/^AI_LIMIT DAILY_TOKENS/),
       expect.objectContaining({ type: 'SYSTEM' }),
+      expect.any(Function),
     );
     expect(alerts.raise).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -724,6 +743,7 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
         severity: 'HIGH',
         sourceKey: 'ai-limit:DAILY_TOKENS:2026-10-13T01:48:00.123Z',
       }),
+      txEm,
     );
     expect(queue.release).toHaveBeenCalledWith(
       expect.objectContaining({ id: 11 }),

@@ -251,6 +251,8 @@ export enum ChannelEventAiDecision {
   SKIPPED_RATE_LIMITED = 'SKIPPED_RATE_LIMITED',
   /** Câu trả lời của AI vi phạm chính sách (lộ dữ liệu / dấu hiệu nội bộ) — không gửi. */
   BLOCKED_BY_POLICY = 'BLOCKED_BY_POLICY',
+  /** Emergency stop đã commit trong lúc lượt AI chạy — bỏ tin, không tạo outbox. */
+  DISCARDED_RUNTIME_HALTED = 'DISCARDED_RUNTIME_HALTED',
 }
 
 /** Phạm vi dừng khẩn (bảng `recruitment_runtime_controls`). */

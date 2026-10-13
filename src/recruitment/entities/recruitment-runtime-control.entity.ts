@@ -38,4 +38,14 @@ export class RecruitmentRuntimeControl {
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
+
+  /** Fallback bền nếu transaction emergency stop không thể ghi mandatory audit. */
+  @Column({ name: 'failsafe_halted', type: 'boolean', default: false })
+  failsafeHalted!: boolean;
+
+  @Column({ name: 'failsafe_reason', type: 'varchar', length: 100, nullable: true })
+  failsafeReason!: string | null;
+
+  @Column({ name: 'failsafe_at', type: 'timestamptz', nullable: true })
+  failsafeAt!: Date | null;
 }

@@ -40,7 +40,7 @@ function fakeDb(row: Record<string, unknown> | undefined) {
 }
 
 function service(db: ReturnType<typeof fakeDb>) {
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = { recordMandatory: jest.fn().mockResolvedValue(undefined) };
   const svc = new RecruitmentChannelEventOperationsService(
     db.dataSource as any,
     audit as any,
@@ -70,7 +70,7 @@ describe('RecruitmentChannelEventOperationsService.exclude', () => {
       );
       // Chỉ áp khi trạng thái chưa đổi kể từ lúc khoá (fencing).
       expect(update.sql).toMatch(/WHERE id = \$1 AND status = \$3/);
-      expect(audit.record).toHaveBeenCalledWith({
+      expect(audit.recordMandatory).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         actor: HR,
         action: 'CHANNEL_EVENT_EXCLUDE',
         entity: 'channel-events',
@@ -82,7 +82,7 @@ describe('RecruitmentChannelEventOperationsService.exclude', () => {
           to: 'IGNORED',
           textRemoved: true,
         },
-      });
+      }));
     },
   );
 
@@ -98,7 +98,7 @@ describe('RecruitmentChannelEventOperationsService.exclude', () => {
       idempotent: true,
     });
     expect(db.ran(/^\s*UPDATE/)).toHaveLength(0);
-    expect(audit.record).not.toHaveBeenCalled();
+    expect(audit.recordMandatory).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -120,7 +120,7 @@ describe('RecruitmentChannelEventOperationsService.exclude', () => {
       expect(error).toBeInstanceOf(ConflictException);
       expect(error.getResponse()).toMatchObject({ code, status });
       expect(db.ran(/^\s*UPDATE/)).toHaveLength(0);
-      expect(audit.record).not.toHaveBeenCalled();
+      expect(audit.recordMandatory).not.toHaveBeenCalled();
     },
   );
 

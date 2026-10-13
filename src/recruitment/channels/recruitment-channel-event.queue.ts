@@ -17,6 +17,9 @@ export interface ClaimedChannelEvent {
   attemptCount: number;
   /** Version điều khiển lúc lượt AI của event bắt đầu (lần thử trước), `null` nếu chưa. */
   aiControlVersion: number | null;
+  /** Đã mở khả năng gửi request tới provider; không retry mù nếu outcome chưa rõ. */
+  aiProviderDispatchedAt: Date | null;
+  aiReservedTokens: number | null;
 }
 
 interface ClaimRow {
@@ -27,6 +30,8 @@ interface ClaimRow {
   normalized_message_text: string | null;
   attempt_count: number | string;
   ai_control_version: number | string | null;
+  ai_provider_dispatched_at: Date | null;
+  ai_reserved_tokens: number | string | null;
 }
 
 export interface OutboxDraft {
@@ -156,7 +161,8 @@ export class RecruitmentChannelEventQueue {
                         AND (coalesce(o.provider_created_at, o.received_at), o.id)
                           < (coalesce(e.provider_created_at, e.received_at), e.id))))
          RETURNING e.id, e.channel_account_id, e.external_sender_id, e.provider_message_id,
-                   e.normalized_message_text, e.attempt_count, e.ai_control_version`,
+                   e.normalized_message_text, e.attempt_count, e.ai_control_version,
+                   e.ai_provider_dispatched_at, e.ai_reserved_tokens`,
           [head.id, oaId, head.sender, leaseMs, owner, settleMs, pilotSenders],
         ),
       );
@@ -173,6 +179,9 @@ export class RecruitmentChannelEventQueue {
           row.ai_control_version === null
             ? null
             : Number(row.ai_control_version),
+        aiProviderDispatchedAt: row.ai_provider_dispatched_at,
+        aiReservedTokens:
+          row.ai_reserved_tokens === null ? null : Number(row.ai_reserved_tokens),
       };
     });
   }
@@ -201,29 +210,57 @@ export class RecruitmentChannelEventQueue {
       `UPDATE "recruitment_channel_events"
        SET ai_input_tokens = $2, ai_cached_tokens = $3, ai_output_tokens = $4,
            ai_total_tokens = $5, updated_at = now()
-       WHERE id = $1`,
+       WHERE id = $1 AND ai_total_tokens IS NULL`,
       [eventId, usage.input, usage.cached, usage.output, usage.total],
     );
   }
 
   /**
-   * Ghi bền "lượt AI bắt đầu dưới version điều khiển này" — TRƯỚC khi gọi
-   * OpenClaw (fencing theo lease). `false` = đã mất lease.
+   * Commit dấu mốc trước khi mở kết nối OpenClaw. Runtime row FOR SHARE tạo thứ tự
+   * rõ với operator stop/auto-halt FOR UPDATE. Sau mốc này, crash/timeout không được
+   * tự gửi lại request vì provider có thể đã nhận và tính phí.
    */
-  async markAiStarted(
+  async markProviderDispatched(
     event: ClaimedChannelEvent,
     owner: string,
-    controlVersion: number,
-  ): Promise<boolean> {
-    const rows = returnedRows(
-      await this.dataSource.query(
-        `UPDATE "recruitment_channel_events" SET ai_control_version = $3, updated_at = now()
-         WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
-         RETURNING id`,
-        [event.id, owner, controlVersion],
-      ),
-    );
-    return rows.length > 0;
+  ): Promise<'DISPATCHED' | 'HALTED' | 'LOST' | 'UNCERTAIN'> {
+    return this.dataSource.transaction(async (em) => {
+      const [runtime]: Array<{
+        ai_halted: boolean;
+        worker_halted: boolean;
+        failsafe_halted: boolean;
+      }> = await em.query(
+        `SELECT ai_halted, worker_halted, failsafe_halted
+         FROM "recruitment_runtime_controls" WHERE id = 1 FOR SHARE`,
+      );
+      if (
+        !runtime ||
+        runtime.ai_halted ||
+        runtime.worker_halted ||
+        runtime.failsafe_halted
+      ) {
+        return 'HALTED';
+      }
+      const rows = returnedRows(
+        await em.query(
+          `UPDATE "recruitment_channel_events"
+           SET ai_provider_dispatched_at = clock_timestamp(), updated_at = now()
+           WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
+             AND ai_control_version IS NOT NULL AND ai_reserved_tokens IS NOT NULL
+             AND ai_provider_dispatched_at IS NULL
+           RETURNING id`,
+          [event.id, owner],
+        ),
+      );
+      if (rows.length) return 'DISPATCHED';
+      const [row]: Array<{ ai_provider_dispatched_at: Date | null }> =
+        await em.query(
+          `SELECT ai_provider_dispatched_at FROM "recruitment_channel_events"
+           WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2`,
+          [event.id, owner],
+        );
+      return row?.ai_provider_dispatched_at ? 'UNCERTAIN' : 'LOST';
+    });
   }
 
   /** Gia hạn lease khi lượt còn chạy. `false` = đã mất lease → phải dừng, không ghi kết quả. */
@@ -262,8 +299,29 @@ export class RecruitmentChannelEventQueue {
     discarded: boolean;
   }> {
     return this.dataSource.transaction(async (em) => {
+      const [runtime]: Array<{ ai_halted: boolean; failsafe_halted: boolean }> =
+        await em.query(
+          `SELECT ai_halted, failsafe_halted FROM "recruitment_runtime_controls"
+           WHERE id = 1 FOR SHARE`,
+        );
       if (!(await this.markProcessed(em, event, owner, fence.conversationId))) {
         return { completed: false, outboxId: null, discarded: false };
+      }
+      if (!runtime || runtime.ai_halted || runtime.failsafe_halted) {
+        await this.setDecision(
+          em,
+          event.id,
+          ChannelEventAiDecision.DISCARDED_RUNTIME_HALTED,
+        );
+        if (outbox.recruitmentMessageId) {
+          await em.query(
+            `UPDATE "recruitment_messages"
+             SET metadata = metadata || '{"delivery": "DISCARDED_RUNTIME_HALTED"}'::jsonb
+             WHERE id = $1`,
+            [outbox.recruitmentMessageId],
+          );
+        }
+        return { completed: true, outboxId: null, discarded: true };
       }
       const [control]: Array<{
         control_mode: string;

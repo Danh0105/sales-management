@@ -177,10 +177,16 @@ export class RecruitmentChannelOutboxQueue {
     return this.dataSource.transaction(async (em) => {
       // Dừng khẩn outbound (P3-7.3 / G8): khoá chia sẻ dòng điều khiển — thao tác dừng
       // commit xong thì không dòng nào được ghi `dispatched_at` nữa. Không đọc được → giữ.
-      const [runtime]: Array<{ outbound_halted: boolean }> = await em.query(
-        `SELECT outbound_halted FROM "recruitment_runtime_controls" WHERE id = 1 FOR SHARE`,
+      const [runtime]: Array<{
+        outbound_halted: boolean;
+        failsafe_halted: boolean;
+      }> = await em.query(
+        `SELECT outbound_halted, failsafe_halted FROM "recruitment_runtime_controls" WHERE id = 1 FOR SHARE`,
       );
-      if (runtime?.outbound_halted !== false) {
+      if (
+        runtime?.outbound_halted !== false ||
+        runtime?.failsafe_halted !== false
+      ) {
         const held = returnedRows(
           await em.query(
             `UPDATE "recruitment_channel_outbox"

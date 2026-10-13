@@ -30,6 +30,7 @@ import {
   MessageContentType,
   MessageDirection,
   MessageSenderType,
+  RuntimeControlScope,
 } from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import { RecruitmentCandidateService } from '../services/recruitment-candidate.service';
@@ -162,6 +163,7 @@ export class RecruitmentChannelWorker
   /** Pilot / trần / chính sách câu trả lời (P3-7.3 / G8); `null` khi cấu hình sai (đã chặn lúc boot). */
   private readonly safety: AiSafetyConfig | null;
   private lastHalted = false;
+  private readonly stopListening: (() => void) | undefined;
 
   constructor(
     configService: ConfigService,
@@ -184,6 +186,14 @@ export class RecruitmentChannelWorker
     this.config = 'config' in read ? read.config : null;
     const safety = readAiSafetyConfig(get);
     this.safety = 'config' in safety ? safety.config : null;
+    this.stopListening = this.runtime?.onStop?.((scopes) => {
+      if (
+        scopes.has(RuntimeControlScope.AI) ||
+        scopes.has(RuntimeControlScope.WORKER)
+      ) {
+        for (const controller of this.inFlight) controller.abort();
+      }
+    });
   }
 
   onApplicationBootstrap(): void {
@@ -200,6 +210,7 @@ export class RecruitmentChannelWorker
 
   async onModuleDestroy(): Promise<void> {
     this.running = false;
+    this.stopListening?.();
     // Lượt đang chạy bị huỷ → ghi lỗi tạm (thử lại ngay ở lần claim sau).
     for (const controller of this.inFlight) controller.abort();
     await Promise.allSettled(this.loops);
@@ -344,21 +355,34 @@ export class RecruitmentChannelWorker
       instructions = control.resumeSignalPending
         ? RESUME_AFTER_TAKEOVER_INSTRUCTIONS
         : undefined;
-      if (!turnStarted && this.limits && this.safety) {
-        const verdict = await this.limits.evaluate(event, this.safety.limits);
-        if (!verdict.ok) {
-          return await this.limitReached(event, owner, inbound, verdict);
-        }
-      }
       if (turnStarted) {
         storedReply = await this.findStoredReply(event, inbound.conversationId);
-      } else if (
-        !(await this.queue.markAiStarted(event, owner, control.version))
-      ) {
-        this.logger.warn(
-          `worker event=${event.id} lease lost trước khi gọi OpenClaw — bỏ`,
+      } else if (this.limits && this.safety) {
+        const reservation = await this.limits.reserve(
+          event,
+          owner,
+          control.version,
+          this.safety.limits,
         );
-        return;
+        if (reservation.kind === 'LIMIT') {
+          return await this.limitReached(
+            event,
+            owner,
+            inbound,
+            reservation.verdict,
+          );
+        }
+        if (reservation.kind === 'HALTED') {
+          await this.queue.release(event, owner);
+          return;
+        }
+        if (reservation.kind === 'LOST' || reservation.kind === 'UNCERTAIN') {
+          return;
+        }
+        event.aiControlVersion = control.version;
+        event.aiReservedTokens = this.safety.limits.tokenReservationPerTurn;
+      } else {
+        throw new Error('AI_QUOTA_RESERVATION_UNAVAILABLE');
       }
     } catch {
       return this.finishFailure(
@@ -401,9 +425,61 @@ export class RecruitmentChannelWorker
       return;
     }
 
+    if (event.aiProviderDispatchedAt) {
+      // Worker trước đã có thể gửi request tới provider. Không gọi lần hai khi
+      // chưa biết outcome; HR đối soát tin canonical / chi phí.
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_OUTCOME_UNKNOWN',
+        'infra',
+      );
+    }
+
+    if (event.aiReservedTokens == null) {
+      // Lượt từ bản code cũ chưa có reservation; không được cấp phép provider
+      // chỉ dựa trên ai_control_version. HR đối soát và tạo event mới nếu cần.
+      return this.finishFailure(event, owner, config, 'LEGACY_UNRESERVED_TURN', 'rejected');
+    }
+
+    let dispatch: 'DISPATCHED' | 'HALTED' | 'LOST' | 'UNCERTAIN';
+    try {
+      dispatch = await this.queue.markProviderDispatched(event, owner);
+    } catch {
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_DISPATCH_GATE_FAILED',
+        'infra',
+      );
+    }
+    if (dispatch === 'HALTED') {
+      await this.queue.fail(
+        event,
+        owner,
+        'RUNTIME_HALTED_PRE_DISPATCH',
+        config.retryBaseMs,
+      );
+      return;
+    }
+    if (dispatch === 'LOST') return;
+    if (dispatch === 'UNCERTAIN') {
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_OUTCOME_UNKNOWN',
+        'infra',
+      );
+    }
+    event.aiProviderDispatchedAt = new Date();
+
     const controller = new AbortController();
     this.inFlight.add(controller);
     let leaseLost = false;
+    let watchBusy = false;
     const heartbeat = setInterval(
       () => {
         this.queue
@@ -418,6 +494,19 @@ export class RecruitmentChannelWorker
       },
       Math.max(1000, Math.floor(config.leaseMs / 3)),
     );
+    const stopWatch = setInterval(() => {
+      if (watchBusy) return;
+      watchBusy = true;
+      this.runtime
+        ?.state()
+        .then((state) => {
+          if (state.aiHalted || state.workerHalted) controller.abort();
+        })
+        .catch(() => controller.abort())
+        .finally(() => {
+          watchBusy = false;
+        });
+    }, 500);
 
     try {
       const outcome = await invokeOpenClaw(
@@ -445,13 +534,27 @@ export class RecruitmentChannelWorker
         );
       }
       if (outcome.usage) {
-        await this.queue
-          .recordUsage(event.id, outcome.usage)
-          .catch((error) =>
-            this.logger.error(
-              `worker event=${event.id} ghi token lỗi error=${errorCode(error)}`,
-            ),
-          );
+        try {
+          await this.queue.recordUsage(event.id, outcome.usage);
+        } catch {
+          await this.haltForAccounting('TOKEN_USAGE_STORE_FAILED');
+          throw new Error('TOKEN_USAGE_STORE_FAILED');
+        }
+        if (
+          event.aiReservedTokens != null &&
+          outcome.usage.total > event.aiReservedTokens
+        ) {
+          await this.haltForAccounting('TOKEN_RESERVATION_OVERRUN');
+        }
+      } else {
+        await this.haltForAccounting('TOKEN_USAGE_MISSING');
+        return this.finishFailure(
+          event,
+          owner,
+          config,
+          'TOKEN_USAGE_MISSING',
+          'rejected',
+        );
       }
       let reply: CanonicalReply;
       try {
@@ -496,6 +599,7 @@ export class RecruitmentChannelWorker
       );
     } finally {
       clearInterval(heartbeat);
+      clearInterval(stopWatch);
       this.inFlight.delete(controller);
     }
   }
@@ -600,6 +704,21 @@ export class RecruitmentChannelWorker
       : null;
   }
 
+  private async haltForAccounting(reason: string): Promise<void> {
+    if (!this.runtime) throw new Error('RUNTIME_CONTROL_UNAVAILABLE');
+    await this.runtime.haltAiIfRunning(`AI_LIMIT ${reason}`, SYSTEM_ACTOR, (em, state) =>
+      this.alerts.raise(
+        {
+          type: HrAlertType.AI_LIMIT_REACHED,
+          severity: HrAlertSeverity.HIGH,
+          sourceKey: `ai-limit:${reason}:${(state.updatedAt ?? new Date()).toISOString()}`,
+          details: { limit: reason },
+        },
+        em,
+      ),
+    );
+  }
+
   /**
    * Vượt trần (P3-7.3 / G8). Người gửi → không gọi AI, HR trả lời (cảnh báo theo hội thoại /
    * giờ). Toàn hệ thống → tự DỪNG AI (audit hệ thống) + cảnh báo HR, trả event về hàng chờ để
@@ -622,15 +741,17 @@ export class RecruitmentChannelWorker
       const halted = await this.runtime?.haltAiIfRunning(
         `AI_LIMIT ${verdict.limit} ${verdict.used}/${verdict.max}`,
         SYSTEM_ACTOR,
+        (em, state) =>
+          this.alerts.raise(
+            {
+              type: HrAlertType.AI_LIMIT_REACHED,
+              severity: HrAlertSeverity.HIGH,
+              sourceKey: `ai-limit:${verdict.limit}:${(state.updatedAt ?? new Date()).toISOString()}`,
+              details,
+            },
+            em,
+          ),
       );
-      if (halted) {
-        await this.alerts.raise({
-          type: HrAlertType.AI_LIMIT_REACHED,
-          severity: HrAlertSeverity.HIGH,
-          sourceKey: `ai-limit:${verdict.limit}:${(halted.updatedAt ?? new Date()).toISOString()}`,
-          details,
-        });
-      }
       const released = await this.queue.release(event, owner);
       this.logger.error(
         `worker event=${event.id} result=RELEASED ai=HALTED limit=${verdict.limit} used=${verdict.used}/${verdict.max}` +
@@ -745,6 +866,7 @@ export class RecruitmentChannelWorker
     kind: AgentFailureKind,
   ): Promise<void> {
     const terminal =
+      event.aiProviderDispatchedAt != null ||
       kind === 'rejected' ||
       (kind === 'agent' && event.attemptCount >= MAX_AGENT_ATTEMPTS);
     const retryInMs = terminal

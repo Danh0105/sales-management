@@ -50,6 +50,23 @@ import {
   'CHK_recruitment_channel_events_text_status',
   `"normalized_message_text" IS NULL OR "status" IN ('RECEIVED', 'PROCESSING', 'FAILED')`,
 )
+@Check(
+  'CHK_recruitment_channel_events_reserved_tokens_nonnegative',
+  `"ai_reserved_tokens" IS NULL OR "ai_reserved_tokens" >= 0`,
+)
+@Check(
+  'CHK_recruitment_channel_events_reservation_complete',
+  `num_nonnulls("ai_reserved_tokens", "ai_reserved_at", "ai_reservation_day", "ai_reservation_month") IN (0, 4)`,
+)
+@Check(
+  'CHK_recruitment_channel_events_dispatch_after_reservation',
+  `"ai_provider_dispatched_at" IS NULL OR "ai_control_version" IS NOT NULL`,
+)
+@Index('IDX_recruitment_channel_events_ai_quota', [
+  'aiReservationDay',
+  'aiReservationMonth',
+  'aiReservedAt',
+], { where: '"ai_control_version" IS NOT NULL' })
 export class RecruitmentChannelEvent {
   @PrimaryGeneratedColumn({
     primaryKeyConstraintName: 'PK_recruitment_channel_events',
@@ -191,6 +208,23 @@ export class RecruitmentChannelEvent {
 
   @Column({ name: 'ai_total_tokens', type: 'int', nullable: true })
   aiTotalTokens!: number | null;
+
+  /** Quota đã giữ bền trước lần gọi provider; retry cùng event không giữ thêm. */
+  @Column({ name: 'ai_reserved_tokens', type: 'int', nullable: true })
+  aiReservedTokens!: number | null;
+
+  @Column({ name: 'ai_reserved_at', type: 'timestamptz', nullable: true })
+  aiReservedAt!: Date | null;
+
+  @Column({ name: 'ai_reservation_day', type: 'date', nullable: true })
+  aiReservationDay!: string | null;
+
+  @Column({ name: 'ai_reservation_month', type: 'date', nullable: true })
+  aiReservationMonth!: string | null;
+
+  /** Ghi trước khi gọi OpenClaw; request có thể đã tới provider thì không gửi lại mù. */
+  @Column({ name: 'ai_provider_dispatched_at', type: 'timestamptz', nullable: true })
+  aiProviderDispatchedAt!: Date | null;
 
   /** SHA-256 (hex) của body thô — đối chiếu, không khôi phục được nội dung. */
   @Column({ name: 'payload_hash', type: 'varchar', length: 64 })

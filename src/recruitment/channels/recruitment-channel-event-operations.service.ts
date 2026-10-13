@@ -83,24 +83,31 @@ export class RecruitmentChannelEventOperationsService {
          WHERE id = $1 AND status = $3::text::"recruitment_channel_events_status_enum"`,
         [id, reason, row.status],
       );
-      return { changed: true, from: row.status, hadText: row.has_text };
-    });
-
-    if (outcome.changed) {
-      await this.audit.record({
+      await this.audit.recordMandatory(em, {
         actor,
         action: 'CHANNEL_EVENT_EXCLUDE',
         entity: 'channel-events',
         entityId: id,
+        before: {
+          status: row.status,
+          failureCode: row.failure_code,
+          hasText: row.has_text,
+        },
+        after: {
+          status: ChannelEventStatus.IGNORED,
+          failureCode: reason,
+          hasText: false,
+        },
         context: {
           eventId: id,
           reason,
-          from: outcome.from,
+          from: row.status,
           to: ChannelEventStatus.IGNORED,
-          textRemoved: outcome.hadText,
+          textRemoved: row.has_text,
         },
       });
-    }
+      return { changed: true, from: row.status, hadText: row.has_text };
+    });
     const [current]: Array<Record<string, unknown>> =
       await this.dataSource.query(
         `SELECT id, status, failure_code AS "failureCode", processed_at AS "processedAt",
