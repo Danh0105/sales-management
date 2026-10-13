@@ -72,3 +72,24 @@ The first two final-image G8 runs failed the token fixture because their test bu
 3. **Evidence gaps:** no pristine-volume staging acceptance, real OpenClaw LLM conversation suite, real midnight-crossing concurrency test, or live 3010/3011 migration rehearsal on an isolated production-like clone. The unrelated full-unit failure also remains open.
 
 **Requested handoff:** review this NO-GO report and approve a separate remediation/acceptance gate if desired. Do not proceed to P2, P3, G8.1, GitHub push, or production release from this report.
+
+## Addendum — independent review and re-acceptance at `874b1bc` (2026-10-13 13:56)
+
+Reviewed the seven P1-FIX commits above. HARD-01 (state and mandatory audit in one transaction) and HARD-02 (count and
+reservation under the runtime-row lock, provider call after commit) hold. Changes in `874b1bc`:
+
+- A token overrun (actual > per-turn reservation) is charged in full via `greatest(reserved, actual)` and counted in
+  `ai-usage`, but no longer auto-halts AI: 21 real turns from run `20261013-105115` grew ~20k tokens/turn and reached
+  187,107 of the 200,000 reservation by turn 7, so the halt would stop a normal pilot conversation. Budgets still refuse
+  admission in `reserve()`.
+- A runtime-controls read error fails closed only while it lasts and no longer writes the durable fail-safe latch. The
+  latch is still written when a stop or auto-halt cannot commit with its audit, and a process drops its RAM latch once a
+  stored latch was cleared by an audited resume-all.
+- `7a7e25e` did not pass ESLint (34 errors in six source files: formatting and one unused variable); fixed.
+
+`9fea071` adds `p373-migration-guard.js` (the two new migrations only, `lock_timeout`), exercised on a scratch database.
+
+Results on image `kido-sales-staging:874b1bc`: unit 1532/1533 (pre-existing `expense-request` only); P1-FIX DB 14/14
+(16/32/64 workers: one reservation each); P1-FIX HTTP 3/3; G8 44/44 twice; quarantine 49, control 56, worker 36
+(`SKIP_REAL=1`), R1 18, outbound 41, webhook 55, subject 38, tool E2E 20. Remaining decisions (cross-process fallback,
+provider-side budget) are operational: see `/opt/kido-recruiter/runs/release-g8-874b1bc/FAST-TRACK-REPORT.md`.
