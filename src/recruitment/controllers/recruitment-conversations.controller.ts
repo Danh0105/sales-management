@@ -17,11 +17,13 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/role-guard';
 import { Roles } from '../../auth/roles.decorator';
+import { RecruitmentChannelEventOperationsService } from '../channels/recruitment-channel-event-operations.service';
 import { RecruitmentConversationControlService } from '../channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from '../channels/recruitment-hr-alert.service';
 import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outbox-operations.service';
 import { RecruitmentZaloQuarantineService } from '../channels/recruitment-zalo-quarantine.service';
 import {
+  ExcludeChannelEventDto,
   HrAlertQueryDto,
   HrMessageDto,
   MarkOutboxSentDto,
@@ -113,7 +115,29 @@ export class RecruitmentOperationsController {
     private readonly control: RecruitmentConversationControlService,
     private readonly alerts: RecruitmentHrAlertService,
     private readonly quarantine: RecruitmentZaloQuarantineService,
+    private readonly events: RecruitmentChannelEventOperationsService,
   ) {}
+
+  /** P3-7.3 — số event inbox theo trạng thái + lý do, tin đang chờ (không nội dung). */
+  @Get('events/stats')
+  eventStats() {
+    return this.events.stats();
+  }
+
+  /**
+   * P3-7.3 R1 — loại event inbox (RECEIVED / FAILED) khỏi xử lý nghiệp vụ, vd. tin thử nội bộ.
+   * Giữ dòng + metadata để audit, xoá nội dung; gọi lại cùng lý do → idempotent.
+   */
+  @Post('events/:id/exclude')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  excludeEvent(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ExcludeChannelEventDto,
+    @Req() req: Request,
+  ) {
+    return this.events.exclude(id, dto.reason, hrActor(req.user!));
+  }
 
   /** P3-7.2A — số request webhook đang/đã cách ly theo trạng thái (không nội dung). */
   @Get('webhook-quarantine')

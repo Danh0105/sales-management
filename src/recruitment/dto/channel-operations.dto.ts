@@ -14,6 +14,7 @@ import {
 
 import {
   ApplicationStatus,
+  ChannelEventExcludeReason,
   ChannelOutboxStatus,
   HrAlertStatus,
   HrAlertType,
@@ -53,6 +54,12 @@ export class MarkOutboxSentDto {
   @IsString()
   @Matches(/^[A-Za-z0-9._:-]{1,128}$/)
   providerMessageId?: string;
+}
+
+/** R1 — loại event inbox khỏi xử lý nghiệp vụ; lý do bắt buộc, chỉ giá trị đã định nghĩa. */
+export class ExcludeChannelEventDto {
+  @IsEnum(ChannelEventExcludeReason)
+  reason!: ChannelEventExcludeReason;
 }
 
 export class RetryOutboxDto {

@@ -51,6 +51,8 @@ export type RecruitmentAuditAction =
   | 'AI_SUBJECT_DENIED'
   /** Tin ứng viên không xử lý được (lỗi cuối hoặc quá hạn giữ) — HR cần xem. */
   | 'CHANNEL_EVENT_DEAD_LETTER'
+  /** P3-7.3 R1 — người vận hành loại event inbox khỏi xử lý (vd. tin thử); không ghi nội dung. */
+  | 'CHANNEL_EVENT_EXCLUDE'
   /** Tin trả lời không gửi được ra Zalo — HR cần xem. */
   | 'CHANNEL_OUTBOX_DEAD_LETTER'
   /** Tin trả lời có thể đã tới Zalo nhưng không rõ — cần đối soát, không tự gửi lại. */

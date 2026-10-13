@@ -13,6 +13,7 @@ import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-eve
 import { RecruitmentChannelOutboxQueue } from './channels/recruitment-channel-outbox.queue';
 import { RecruitmentConversationControlService } from './channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from './channels/recruitment-hr-alert.service';
+import { RecruitmentChannelEventOperationsService } from './channels/recruitment-channel-event-operations.service';
 import { RecruitmentOutboxOperationsService } from './channels/recruitment-outbox-operations.service';
 import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
 import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
@@ -141,6 +142,7 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentHrAlertService,
     RecruitmentConversationControlService,
     RecruitmentOutboxOperationsService,
+    RecruitmentChannelEventOperationsService,
   ],
 })
 export class RecruitmentModule implements OnModuleInit {

@@ -176,6 +176,15 @@ export enum ChannelEventStatus {
 }
 
 /**
+ * Lý do người vận hành loại một event inbox khỏi xử lý nghiệp vụ — ghi vào `failure_code`
+ * của event `IGNORED` (phân biệt với `IGNORED` do loại event không hỗ trợ: `failure_code` NULL).
+ */
+export enum ChannelEventExcludeReason {
+  /** Tin thử nội bộ (vd. gửi trong lúc nghiệm thu webhook, trước khi bật worker). */
+  TEST_MESSAGE = 'TEST_MESSAGE',
+}
+
+/**
  * Tin trả lời chờ gửi ra kênh (worker P3-4 tạo `PENDING`, sender P3-5 gửi).
  *
  * - `SENDING`: đã claim; `dispatched_at` có giá trị = request có thể đã tới Zalo.
