@@ -30,7 +30,6 @@ import {
   MessageContentType,
   MessageDirection,
   MessageSenderType,
-  RuntimeControlScope,
 } from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import { RecruitmentCandidateService } from '../services/recruitment-candidate.service';
@@ -618,18 +617,20 @@ export class RecruitmentChannelWorker
       max: verdict.max,
     };
     if (verdict.scope === 'GLOBAL') {
-      await this.runtime?.set(
-        [RuntimeControlScope.AI],
-        true,
+      // Chỉ worker đổi được trạng thái mới cảnh báo — mỗi lần tự dừng đúng 1 cảnh báo (khoá theo
+      // thời điểm chuyển trạng thái, không gộp theo giờ: HR mở lại rồi chạm trần lần nữa vẫn được báo).
+      const halted = await this.runtime?.haltAiIfRunning(
         `AI_LIMIT ${verdict.limit} ${verdict.used}/${verdict.max}`,
         SYSTEM_ACTOR,
       );
-      await this.alerts.raise({
-        type: HrAlertType.AI_LIMIT_REACHED,
-        severity: HrAlertSeverity.HIGH,
-        sourceKey: `ai-limit:${verdict.limit}:${new Date().toISOString().slice(0, 13)}`,
-        details,
-      });
+      if (halted) {
+        await this.alerts.raise({
+          type: HrAlertType.AI_LIMIT_REACHED,
+          severity: HrAlertSeverity.HIGH,
+          sourceKey: `ai-limit:${verdict.limit}:${(halted.updatedAt ?? new Date()).toISOString()}`,
+          details,
+        });
+      }
       const released = await this.queue.release(event, owner);
       this.logger.error(
         `worker event=${event.id} result=RELEASED ai=HALTED limit=${verdict.limit} used=${verdict.used}/${verdict.max}` +

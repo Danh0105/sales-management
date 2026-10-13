@@ -250,7 +250,7 @@ if echo "$DOWN" | grep -q "OK"; then
   "${DC[@]}" run --rm --no-deps -T staging-api node - dist/migrations/1792700000000-add-recruitment-ai-safety-controls.js up < staging/run-migration.js >/dev/null 2>&1 || true
 fi
 same "8. còn SKIPPED_RATE_LIMITED / BLOCKED_BY_POLICY / AI_LIMIT_REACHED → down bị chặn, bảng còn nguyên" \
-  "$(echo "$DOWN" | grep -c 'LỖI — đã rollback: còn dữ liệu dùng quyết định AI')|$(sql "select to_regclass('public.recruitment_runtime_controls') is not null")" "1|true"
+  "$(echo "$DOWN" | grep -c 'LỖI — đã rollback: còn dữ liệu dùng quyết định AI')|$(sql "select to_regclass('public.recruitment_runtime_controls') is not null")" "1|t"
 
 echo "== 9. Log"
 stop "$R" "${WORKERS[@]}" "${SENDERS[@]}"

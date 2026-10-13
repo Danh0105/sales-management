@@ -226,6 +226,57 @@ describe('RecruitmentRuntimeControlService', () => {
   });
 });
 
+describe('RecruitmentRuntimeControlService.haltAiIfRunning', () => {
+  const SYSTEM = { type: RecruitmentActorType.SYSTEM, name: 'system' };
+  const running = {
+    ai_halted: true,
+    worker_halted: false,
+    outbound_halted: false,
+    reason: 'AI_LIMIT DAILY_TOKENS 5100/5000',
+    updated_by: null,
+    updated_at: new Date('2026-10-13T01:48:00Z'),
+  };
+  const make = (query: jest.Mock) => {
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    return {
+      svc: new RecruitmentRuntimeControlService({ query } as any, audit as any),
+      audit,
+    };
+  };
+
+  it('đổi được trạng thái (đang chạy → dừng) → audit RUNTIME_STOP hệ thống, trả state mới', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce([[{ id: 1 }], 1])
+      .mockResolvedValueOnce([running]);
+    const { svc, audit } = make(query);
+    await expect(
+      svc.haltAiIfRunning('AI_LIMIT DAILY_TOKENS 5100/5000', SYSTEM as any),
+    ).resolves.toMatchObject({ aiHalted: true });
+    expect(query.mock.calls[0][0]).toMatch(/WHERE id = 1 AND NOT ai_halted/);
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_STOP',
+        context: expect.objectContaining({
+          scopes: ['AI'],
+          before: { ai: false, worker: false, outbound: false },
+          after: { ai: true, worker: false, outbound: false },
+        }),
+      }),
+    );
+  });
+
+  it('AI đã dừng sẵn → null, không audit (nhiều worker chạm trần cùng lúc → 1 audit)', async () => {
+    const query = jest.fn().mockResolvedValueOnce([[], 0]);
+    const { svc, audit } = make(query);
+    await expect(
+      svc.haltAiIfRunning('AI_LIMIT DAILY_TURNS 300/300', SYSTEM as any),
+    ).resolves.toBeNull();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('RecruitmentAiRuntimeGuard', () => {
   it('AI đang dừng (hoặc fail-closed) → 503 AI_HALTED', async () => {
     const guard = new RecruitmentAiRuntimeGuard({

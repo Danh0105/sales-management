@@ -71,6 +71,8 @@ function setup(
     /** Env (cấu hình an toàn G8: pilot, trần, chính sách). */
     env?: Record<string, string>;
     limitVerdict?: unknown;
+    /** AI đã bị worker khác / người vận hành dừng trước (haltAiIfRunning → null). */
+    haltedByOther?: boolean;
   } = {},
 ) {
   const txEm = { tx: true, query: jest.fn().mockResolvedValue([]) };
@@ -160,7 +162,16 @@ function setup(
     }),
   };
   const alerts = { raise: jest.fn().mockResolvedValue(true) };
-  const runtime = { set: jest.fn().mockResolvedValue({}) };
+  const runtime = {
+    set: jest.fn().mockResolvedValue({}),
+    haltAiIfRunning: jest
+      .fn()
+      .mockResolvedValue(
+        opts.haltedByOther
+          ? null
+          : { aiHalted: true, updatedAt: new Date('2026-10-13T01:48:00.123Z') },
+      ),
+  };
   const limits = {
     evaluate: jest.fn().mockResolvedValue(opts.limitVerdict ?? { ok: true }),
   };
@@ -674,6 +685,23 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
     expect(runtime.set).not.toHaveBeenCalled();
   });
 
+  it('vượt trần toàn hệ thống khi AI đã bị dừng (worker khác vừa dừng) → không cảnh báo trùng, vẫn trả event về hàng chờ', async () => {
+    const { worker, queue, alerts } = setup({
+      haltedByOther: true,
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TURNS',
+        used: 300,
+        max: 300,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(alerts.raise).not.toHaveBeenCalled();
+    expect(queue.release).toHaveBeenCalled();
+  });
+
   it('vượt trần toàn hệ thống → tự DỪNG AI (actor hệ thống) + cảnh báo AI_LIMIT_REACHED, trả event về hàng chờ', async () => {
     const { worker, queue, alerts, runtime } = setup({
       limitVerdict: {
@@ -686,14 +714,16 @@ describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () =>
     });
     await worker.process(event(), 'w1:abc', CONFIG);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(runtime.set).toHaveBeenCalledWith(
-      ['AI'],
-      true,
+    expect(runtime.haltAiIfRunning).toHaveBeenCalledWith(
       expect.stringMatching(/^AI_LIMIT DAILY_TOKENS/),
       expect.objectContaining({ type: 'SYSTEM' }),
     );
     expect(alerts.raise).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'AI_LIMIT_REACHED', severity: 'HIGH' }),
+      expect.objectContaining({
+        type: 'AI_LIMIT_REACHED',
+        severity: 'HIGH',
+        sourceKey: 'ai-limit:DAILY_TOKENS:2026-10-13T01:48:00.123Z',
+      }),
     );
     expect(queue.release).toHaveBeenCalledWith(
       expect.objectContaining({ id: 11 }),

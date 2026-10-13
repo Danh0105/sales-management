@@ -163,6 +163,44 @@ export class RecruitmentRuntimeControlService {
     );
     return after;
   }
+
+  /**
+   * Tự dừng AI khi vượt trần toàn hệ thống: chỉ lời gọi nào ĐỔI được trạng thái (đang chạy →
+   * dừng) mới ghi audit và nhận state mới; AI đã dừng sẵn (worker khác vừa dừng, người vận hành
+   * dừng) hoặc thiếu dòng → `null`, không ghi gì. Nhiều worker chạm trần cùng lúc → đúng 1 audit.
+   */
+  async haltAiIfRunning(
+    reason: string,
+    actor: RecruitmentActor,
+  ): Promise<RuntimeControlState | null> {
+    const rows = returnedRows(
+      await this.dataSource.query(
+        `UPDATE "recruitment_runtime_controls"
+         SET ai_halted = true, reason = $1, updated_by = $2, updated_at = now()
+         WHERE id = 1 AND NOT ai_halted RETURNING id`,
+        [reason, actor.employeeId],
+      ),
+    );
+    if (!rows.length) return null;
+    this.cached = null;
+    const after = await this.state();
+    await this.audit.record({
+      actor,
+      action: 'RUNTIME_STOP',
+      entity: 'runtime-controls',
+      entityId: 1,
+      context: {
+        scopes: [RuntimeControlScope.AI],
+        reason,
+        before: { ...flags(after), ai: false },
+        after: flags(after),
+      },
+    });
+    this.logger.warn(
+      `runtime STOP scopes=${RuntimeControlScope.AI} actor=${actor.type}:${actor.employeeId ?? '-'}`,
+    );
+    return after;
+  }
 }
 
 function flags(state: RuntimeControlState) {
