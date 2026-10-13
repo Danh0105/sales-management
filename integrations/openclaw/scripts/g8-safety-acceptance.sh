@@ -194,7 +194,16 @@ same "5. cảnh báo HR CANDIDATE_MESSAGE_WAITING có trần + số lượt (kh�
 stop "$P-w4"
 
 echo "== 6. Trần token toàn hệ thống → tự DỪNG AI (audit hệ thống) + cảnh báo"
-DAY_RESERVED=$(sql "select coalesce(sum(greatest(ai_reserved_tokens, coalesce(ai_total_tokens,0))), 0) from recruitment_channel_events where ai_reservation_day = (now() at time zone 'Asia/Ho_Chi_Minh')::date")
+# Giống cửa quota thật: fixture từ bản cũ chưa có reservation vẫn tính usage
+# theo processed_at; không được bỏ qua chúng khi chọn trần cho test này.
+DAY_RESERVED=$(sql "select coalesce(sum(case
+  when ai_reservation_day = (now() at time zone 'Asia/Ho_Chi_Minh')::date
+    then greatest(ai_reserved_tokens, coalesce(ai_total_tokens,0))
+  when ai_reservation_day is null and processed_at >=
+    (date_trunc('day', now() at time zone 'Asia/Ho_Chi_Minh') at time zone 'Asia/Ho_Chi_Minh')
+    and processed_at < ((date_trunc('day', now() at time zone 'Asia/Ho_Chi_Minh') + interval '1 day') at time zone 'Asia/Ho_Chi_Minh')
+    then coalesce(ai_total_tokens,0) else 0 end), 0)
+  from recruitment_channel_events")
 BUDGET=$((DAY_RESERVED + 6000))
 mock_mode '{"mode":"ok","usage":{"input_tokens":5000,"input_tokens_details":{"cached_tokens":4000},"output_tokens":100,"total_tokens":5100}}'
 start_worker "$P-w5" 3048 -e RECRUITMENT_AI_DAILY_TOKEN_BUDGET="$BUDGET" -e RECRUITMENT_AI_TOKEN_RESERVATION_PER_TURN=6000
