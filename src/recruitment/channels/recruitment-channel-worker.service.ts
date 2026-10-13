@@ -58,6 +58,7 @@ import {
 import {
   isRecruitmentWorkerEnabled,
   MAX_AGENT_ATTEMPTS,
+  MAX_INFRA_ATTEMPTS,
   readRecruitmentWorkerConfig,
   retryDelayMs,
   type RecruitmentWorkerConfig,
@@ -869,6 +870,7 @@ export class RecruitmentChannelWorker
     const terminal =
       event.aiProviderDispatchedAt != null ||
       kind === 'rejected' ||
+      (kind === 'infra' && event.attemptCount >= MAX_INFRA_ATTEMPTS) ||
       (kind === 'agent' && event.attemptCount >= MAX_AGENT_ATTEMPTS);
     const retryInMs = terminal
       ? null

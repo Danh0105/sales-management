@@ -566,6 +566,16 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
+  it('lỗi hạ tầng trước dispatch đạt lần thử thứ ba → dead-letter, không gọi provider', async () => {
+    const { worker, queue, control } = setup();
+    control.control.mockRejectedValue(new Error('db'));
+    await worker.process(event({ attemptCount: 3 }), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.fail).toHaveBeenCalledWith(
+      expect.anything(), 'w1:abc', 'CONTROL_CHECK_FAILED', null,
+    );
+  });
+
   it('lượt mới: reserve quota và ghi mốc dispatch TRƯỚC khi gọi OpenClaw', async () => {
     const { worker, queue, limits } = setup();
     await worker.process(event(), 'w1:abc', CONFIG);
