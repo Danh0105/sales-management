@@ -137,8 +137,13 @@ export class PolicyService {
         category?: string,
     ) {
         const policy = await this.findOne(id);
-        if (policy.status !== PolicyStatus.DIRECTOR_APPROVED) {
-            throw new BadRequestException('Chỉ được upload hợp đồng cho chính sách đã được Giám đốc duyệt');
+        const uploadableStatuses = [
+            PolicyStatus.PENDING,
+            PolicyStatus.SALE_ADMIN_APPROVED,
+            PolicyStatus.DIRECTOR_APPROVED,
+        ];
+        if (!uploadableStatuses.includes(policy.status)) {
+            throw new BadRequestException('Chỉ được upload hợp đồng cho chính sách đang chờ duyệt hoặc đã được duyệt');
         }
 
         const list = (Array.isArray(files) ? files : files ? [files] : []).filter(Boolean);
