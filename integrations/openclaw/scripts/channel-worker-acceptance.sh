@@ -304,12 +304,21 @@ same "12. lượt thật: hội thoại canonical có đủ tin đến (đúng t
 same "13. lượt thật: nội dung tin đã xoá khỏi inbox" \
   "$(sql "select count(*) from recruitment_channel_events where provider_message_id like 'p34-$RUN_ID-r%' and normalized_message_text is not null")" 0
 
-echo "== C2. Lượt thật bị mất response (worker 'chết' sau khi OpenClaw chạy xong) → retry"
+echo "== C2. Lượt thật bị mất response sau provider → dừng để HR đối soát; retry có chủ đích dùng lại tin canonical"
 E11R="p34-$RUN_ID-rc1"
 mock proxy-drop 0 1
 send "$E11R" "$RC" "" "Mình tên Hùng, số 0911222333, muốn ứng tuyển kinh doanh ở Cà Mau, có 2 năm kinh nghiệm bán hàng" >/dev/null
+wait_sql 900 "select status = 'FAILED' and failure_code = 'AGENT_UNAVAILABLE' and next_attempt_at is null from recruitment_channel_events where provider_message_id = '$E11R'" || true
+same "11. lượt thật mất response sau dispatch → FAILED terminal để HR đối soát, không tự gọi model lần hai" \
+  "$(ev "$E11R" "status || '/' || failure_code || '/' || attempt_count || '/' || (next_attempt_at is null)")|$(analyze "import json,sys; print(','.join(e['result'] for e in json.load(sys.stdin) if e['msgId']=='$E11R'))")" \
+  "FAILED/AGENT_UNAVAILABLE/1/true|dropped-after-200"
+same "11. trước đối soát: có đúng 1 tin đi canonical nhưng chưa có outbox nên không thể gửi" \
+  "$(sql "select count(*) from recruitment_messages where external_message_id = '$E11R-reply'")/$(sql "select count(*) from recruitment_channel_outbox o join recruitment_channel_events e on e.id = o.source_event_id where e.provider_message_id = '$E11R'")" "1/0"
+# Mô phỏng quyết định đối soát của HR/test operator: chỉ mở lại event khi đã thấy tin canonical.
+# Worker phải dùng đúng tin đó và không phát sinh request provider thứ hai.
+sql "update recruitment_channel_events set next_attempt_at = now() where provider_message_id = '$E11R' and status = 'FAILED'" >/dev/null
 wait_sql 900 "select status = 'PROCESSED' from recruitment_channel_events where provider_message_id = '$E11R'" || true
-same "11. lượt thật: lần 1 mất response → lần 2 gửi tin đi đã lưu, KHÔNG chạy model lần hai (kể cả khi chính lượt đó đã chuyển HR)" \
+same "11. sau đối soát: lần 2 xếp đúng tin đi đã lưu, KHÔNG chạy model lần hai (kể cả khi chính lượt đó đã chuyển HR)" \
   "$(ev "$E11R" "status || '/' || attempt_count")|$(analyze "import json,sys; print(','.join(e['result'] for e in json.load(sys.stdin) if e['msgId']=='$E11R'))")" "PROCESSED/2|dropped-after-200"
 same "11. lượt thật chạy 2 lần không nhân bản nghiệp vụ: ứng viên / hồ sơ / tin đến / tin đi / handoff mở / phỏng vấn / outbox" \
   "$(sql "select (select count(*) from recruitment_candidates c where c.zalo_oa_id = '$OA' and c.zalo_user_id = '$RC')
