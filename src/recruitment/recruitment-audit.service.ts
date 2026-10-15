@@ -73,6 +73,11 @@ export type RecruitmentAuditAction =
   | 'OUTBOX_MARK_SENT'
   | 'OUTBOX_RETRY'
   | 'OUTBOX_DEAD_LETTER'
+  | 'OUTBOX_APPROVE'
+  | 'OUTBOX_EDIT_AND_APPROVE'
+  | 'OUTBOX_REJECT'
+  | 'OUTBOX_APPROVAL_REVOKE'
+  | 'OUTBOX_APPROVAL_EXPIRE'
   | 'HR_ALERT_ACKNOWLEDGE'
   /** P3-7.3 / G8 — dừng khẩn / mở lại AI, worker, outbound (người vận hành hoặc hệ thống tự dừng). */
   | 'RUNTIME_STOP'

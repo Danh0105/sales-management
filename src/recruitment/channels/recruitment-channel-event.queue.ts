@@ -357,8 +357,8 @@ export class RecruitmentChannelEventQueue {
       const inserted: Array<{ id: number }> = await em.query(
         `INSERT INTO "recruitment_channel_outbox"
            ("source_event_id", "source_type", "channel", "channel_account_id",
-            "external_recipient_id", "message_text", "recruitment_message_id", "control_version")
-         VALUES ($1, 'AI_REPLY', 'ZALO', $2, $3, $4, $5, $6)
+            "external_recipient_id", "message_text", "recruitment_message_id", "control_version", "status")
+         VALUES ($1, 'AI_REPLY', 'ZALO', $2, $3, $4, $5, $6, 'AWAITING_APPROVAL')
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
@@ -370,6 +370,26 @@ export class RecruitmentChannelEventQueue {
           fence.expectedVersion,
         ],
       );
+      // P3.2: approval + CREATED event commit together with AI outbox.
+      // ON CONFLICT means the existing outbox is reused, not approved again.
+      if (inserted[0]?.id) {
+        const outboxId = Number(inserted[0].id);
+
+        await em.query(
+          `INSERT INTO "recruitment_outbox_approvals"
+             ("outbox_id", "state", "version")
+           VALUES ($1, 'AWAITING_APPROVAL', 0)`,
+          [outboxId],
+        );
+
+        await em.query(
+          `INSERT INTO "recruitment_outbox_approval_events"
+             ("outbox_id", "version", "action")
+           VALUES ($1, 0, 'CREATED')`,
+          [outboxId],
+        );
+      }
+
       await this.setDecision(em, event.id, ChannelEventAiDecision.AI_REPLIED);
       await em.query(
         `UPDATE "recruitment_conversations" SET resume_signal_pending = false

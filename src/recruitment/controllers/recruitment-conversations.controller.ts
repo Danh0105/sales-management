@@ -23,6 +23,7 @@ import { RecruitmentConversationControlService } from '../channels/recruitment-c
 import { RecruitmentHrAlertService } from '../channels/recruitment-hr-alert.service';
 import { RecruitmentRuntimeControlService } from '../channels/recruitment-runtime-control.service';
 import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outbox-operations.service';
+import { RecruitmentOutboxApprovalService } from '../channels/recruitment-outbox-approval.service';
 import { RecruitmentZaloQuarantineService } from '../channels/recruitment-zalo-quarantine.service';
 import {
   ExcludeChannelEventDto,
@@ -41,6 +42,11 @@ import {
   RECRUITMENT_TAKEOVER_ROLES,
   RECRUITMENT_VIEW_ROLES,
 } from '../recruitment.roles';
+import {
+  ApproveOutboxDto,
+  EditAndApproveOutboxDto,
+  RejectOutboxDto,
+} from '../dto/outbox-approval.dto';
 import { recruitmentValidationPipe } from './validation';
 
 /**
@@ -115,6 +121,7 @@ export class RecruitmentConversationsController {
 export class RecruitmentOperationsController {
   constructor(
     private readonly outbox: RecruitmentOutboxOperationsService,
+    private readonly approvals: RecruitmentOutboxApprovalService,
     private readonly control: RecruitmentConversationControlService,
     private readonly alerts: RecruitmentHrAlertService,
     private readonly quarantine: RecruitmentZaloQuarantineService,
@@ -191,6 +198,57 @@ export class RecruitmentOperationsController {
   @Get('outbox')
   listOutbox(@Query() query: OutboxQueryDto) {
     return this.outbox.list(query);
+  }
+
+
+  /** P3.2 — HR duyệt nguyên văn phản hồi AI. */
+  @Post('outbox/:id/approve')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  approveOutbox(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveOutboxDto,
+    @Req() req: Request,
+  ) {
+    return this.approvals.approve(
+      id,
+      dto.requestId,
+      hrActor(req.user!),
+    );
+  }
+
+  /** P3.2 — HR sửa nội dung và duyệt trong một transaction. */
+  @Post('outbox/:id/edit-and-approve')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  editAndApproveOutbox(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: EditAndApproveOutboxDto,
+    @Req() req: Request,
+  ) {
+    return this.approvals.editAndApprove(
+      id,
+      dto.text,
+      dto.requestId,
+      hrActor(req.user!),
+    );
+  }
+
+  /** P3.2 — HR từ chối, không gửi phản hồi AI. */
+  @Post('outbox/:id/reject')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  rejectOutbox(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectOutboxDto,
+    @Req() req: Request,
+  ) {
+    return this.approvals.reject(
+      id,
+      dto.reason,
+      dto.requestId,
+      hrActor(req.user!),
+    );
   }
 
   /** Xác nhận Zalo đã nhận — không mở kết nối nào. */

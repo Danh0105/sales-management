@@ -49,7 +49,7 @@ interface ClaimRow {
 }
 
 /** Dòng chưa xong (chặn các tin sau của cùng người nhận). SENT/DEAD_LETTER/SUPPRESSED là kết thúc. */
-const UNFINISHED = `(o.status IN ('PENDING', 'SENDING', 'RETRY', 'UNKNOWN'))`;
+const UNFINISHED = `(o.status IN ('AWAITING_APPROVAL', 'PENDING', 'SENDING', 'RETRY', 'UNKNOWN'))`;
 
 /**
  * Hàng đợi gửi trên `recruitment_channel_outbox` (PostgreSQL, không Redis) — cùng
@@ -118,7 +118,24 @@ export class RecruitmentChannelOutboxQueue {
                lease_owner = $5, next_attempt_at = NULL, dispatched_at = NULL, updated_at = now()
            WHERE t.id = $1 AND t.channel = 'ZALO' AND t.channel_account_id = $2
              AND t.external_recipient_id = $3
-             AND (t.status = 'PENDING'
+             AND (
+                t.source_type <> 'AI_REPLY'
+                OR EXISTS (
+                  SELECT 1
+                  FROM "recruitment_outbox_approvals" a
+                  WHERE a.outbox_id = t.id
+                    AND a.state = 'APPROVED'
+                    AND a.approved_by IS NOT NULL
+                    AND a.approved_at IS NOT NULL
+                    AND a.expires_at > now()
+                    AND a.approved_text_sha256 IS NOT NULL
+                    AND a.approved_oa_id = t.channel_account_id
+                    AND a.approved_recipient_id = t.external_recipient_id
+                    AND a.approved_control_version = t.control_version
+                    AND a.approved_message_id = t.recruitment_message_id
+                )
+              )
+              AND (t.status = 'PENDING'
                   OR (t.status = 'RETRY' AND t.next_attempt_at <= now())
                   OR (t.status = 'SENDING' AND t.lease_until < now() AND t.dispatched_at IS NULL))
              AND NOT EXISTS (
@@ -217,6 +234,46 @@ export class RecruitmentChannelOutboxQueue {
         : [];
       if (!control) return { outcome: 'INVALID', code: 'CANONICAL_MISSING' };
 
+      // P3.2: final approval check. Fail closed on missing or changed data.
+      // Locks prevent approval/canonical/outbox edits until dispatch commits.
+      const approvalValid =
+        row.sourceType !== 'AI_REPLY' ||
+        (
+          await em.query(
+            `SELECT a.outbox_id
+             FROM "recruitment_channel_outbox" o
+             JOIN "recruitment_outbox_approvals" a ON a.outbox_id = o.id
+             JOIN "recruitment_messages" m ON m.id = o.recruitment_message_id
+             WHERE o.id = $1
+               AND o.status = 'SENDING'
+               AND o.lease_owner = $2
+               AND o.source_type = 'AI_REPLY'
+               AND o.channel = 'ZALO'
+               AND o.message_text = $3
+               AND o.channel_account_id = $4
+               AND o.external_recipient_id = $5
+               AND o.recruitment_message_id = $6
+               AND o.control_version = $7
+               AND a.state = 'APPROVED'
+               AND a.approved_by IS NOT NULL
+               AND a.approved_at IS NOT NULL
+               AND a.expires_at > clock_timestamp()
+               AND a.approved_oa_id = o.channel_account_id
+               AND a.approved_recipient_id = o.external_recipient_id
+               AND a.approved_control_version = o.control_version
+               AND a.approved_message_id = o.recruitment_message_id
+               AND m.content = o.message_text
+               AND a.approved_text_sha256 =
+                   encode(sha256(convert_to(m.content, 'UTF8')), 'hex')
+             FOR SHARE OF o, a, m`,
+            [
+              row.id, owner, row.messageText,
+              row.channelAccountId, row.externalRecipientId,
+              row.recruitmentMessageId, row.controlVersion,
+            ],
+          )
+        ).length > 0;
+
       // Pilot: tin AI chỉ tới người nhận trong allowlist (tin HR viết tay luôn được gửi).
       const pilotBlocked =
         pilotSenders !== null &&
@@ -227,7 +284,8 @@ export class RecruitmentChannelOutboxQueue {
       const code = pilotBlocked
         ? 'PILOT_RECIPIENT_BLOCKED'
         : row.sourceType === 'AI_REPLY'
-          ? suppressionCode(control, row.controlVersion)
+          ? (suppressionCode(control, row.controlVersion) ??
+              (approvalValid ? null : 'APPROVAL_INVALID'))
           : null;
       if (!code) {
         const dispatched = returnedRows(
@@ -261,7 +319,11 @@ export class RecruitmentChannelOutboxQueue {
          WHERE id = $1`,
         [
           row.recruitmentMessageId,
-          pilotBlocked ? 'SUPPRESSED_PILOT' : 'SUPPRESSED_CONTROL_CHANGED',
+          pilotBlocked
+             ? 'SUPPRESSED_PILOT'
+             : code === 'APPROVAL_INVALID'
+               ? 'SUPPRESSED_APPROVAL_INVALID'
+               : 'SUPPRESSED_CONTROL_CHANGED',
         ],
       );
       return {

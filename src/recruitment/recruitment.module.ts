@@ -19,6 +19,8 @@ import { RecruitmentConversationControlService } from './channels/recruitment-co
 import { RecruitmentHrAlertService } from './channels/recruitment-hr-alert.service';
 import { RecruitmentChannelEventOperationsService } from './channels/recruitment-channel-event-operations.service';
 import { RecruitmentOutboxOperationsService } from './channels/recruitment-outbox-operations.service';
+import { RecruitmentOutboxApprovalService } from './channels/recruitment-outbox-approval.service';
+import { RecruitmentOutboxApprovalExpiryService } from './channels/recruitment-outbox-approval-expiry.service';
 import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
 import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
 import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-webhook.controller';
@@ -151,6 +153,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentHrAlertService,
     RecruitmentConversationControlService,
     RecruitmentOutboxOperationsService,
+    RecruitmentOutboxApprovalService,
+    RecruitmentOutboxApprovalExpiryService,
     RecruitmentChannelEventOperationsService,
   ],
 })

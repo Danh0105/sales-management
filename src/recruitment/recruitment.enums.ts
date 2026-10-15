@@ -197,6 +197,7 @@ export enum ChannelEventExcludeReason {
  *   mở kết nối; không gửi lại, không chặn hàng (P3-6.5).
  */
 export enum ChannelOutboxStatus {
+  AWAITING_APPROVAL = 'AWAITING_APPROVAL',
   PENDING = 'PENDING',
   SENDING = 'SENDING',
   SENT = 'SENT',
