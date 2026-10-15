@@ -111,9 +111,27 @@ describe('PolicyService — nhiều hợp đồng PDF', () => {
     expect(storage.remove).toHaveBeenCalledTimes(2);
   });
 
-  it('chưa được Giám đốc duyệt thì không cho upload', async () => {
-    const { service } = make({ ...approved(), status: PolicyStatus.PENDING });
+  it.each([
+    PolicyStatus.PENDING,
+    PolicyStatus.SALE_ADMIN_APPROVED,
+  ])('cho phép upload khi chính sách ở trạng thái %s', async (status) => {
+    const { service, storage } = make({ ...approved(), status });
+    const saved = (await service.uploadContract(1, pdf('a.pdf'), uploader)) as never as {
+      contractFiles: { originalName: string }[];
+    };
+
+    expect(storage.store).toHaveBeenCalledTimes(1);
+    expect(saved.contractFiles[0].originalName).toBe('a.pdf');
+  });
+
+  it.each([
+    PolicyStatus.DRAFT,
+    PolicyStatus.REJECTED,
+  ])('không cho upload khi chính sách ở trạng thái %s', async (status) => {
+    const { service, storage } = make({ ...approved(), status });
+
     await expect(service.uploadContract(1, pdf('a.pdf'), uploader)).rejects.toThrow(BadRequestException);
+    expect(storage.store).not.toHaveBeenCalled();
   });
 
   it('xoá một file: cập nhật danh sách, cột đơn trỏ file còn lại mới nhất, rồi mới xoá đĩa', async () => {
