@@ -23,6 +23,53 @@ const APPROVAL_TTL_MINUTES = 30;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Dòng PostgreSQL đọc trong transaction duyệt (cột int có thể về dạng string nên vẫn ép `Number`). */
+interface TargetRow {
+  conversation_id: number | string;
+}
+
+interface ConversationLockRow {
+  id: number | string;
+  status: string;
+  control_mode: string;
+  control_version: number | string;
+}
+
+interface OutboxLockRow {
+  id: number;
+  status: string;
+  source_type: string;
+  channel: string;
+  channel_account_id: string;
+  external_recipient_id: string | null;
+  recruitment_message_id: number;
+  control_version: number;
+  message_text: string | null;
+  dispatched_at: Date | null;
+}
+
+interface ApprovalLockRow {
+  outbox_id: number;
+  state: string;
+  version: number | string;
+}
+
+interface MessageLockRow {
+  id: number;
+  conversation_id: number | string;
+  content: string | null;
+  sender_type: string;
+  direction: string;
+}
+
+interface ApprovalEventRow {
+  outbox_id: number | string;
+  action: string;
+  actor_employee_id: number | string | null;
+  reason?: string | null;
+  current_sha256?: string | null;
+}
+
 @Injectable()
 export class RecruitmentOutboxApprovalService {
   constructor(
@@ -31,11 +78,7 @@ export class RecruitmentOutboxApprovalService {
     private readonly audit: RecruitmentAuditService,
   ) {}
 
-  async approve(
-    outboxId: number,
-    requestId: string,
-    actor: RecruitmentActor,
-  ) {
+  async approve(outboxId: number, requestId: string, actor: RecruitmentActor) {
     const allowedRoles: readonly string[] = RECRUITMENT_OPERATIONS_ROLES;
 
     if (
@@ -56,7 +99,7 @@ export class RecruitmentOutboxApprovalService {
 
     return this.dataSource.transaction(async (em) => {
       // Locate conversation without locking outbox first.
-      const [target] = await em.query(
+      const [target]: TargetRow[] = await em.query(
         `SELECT m.conversation_id
          FROM "recruitment_channel_outbox" o
          JOIN "recruitment_messages" m
@@ -71,7 +114,7 @@ export class RecruitmentOutboxApprovalService {
       }
 
       // Lock order: conversation -> outbox -> approval -> message.
-      const [conversation] = await em.query(
+      const [conversation]: ConversationLockRow[] = await em.query(
         `SELECT id, status, control_mode, control_version
          FROM "recruitment_conversations"
          WHERE id = $1
@@ -79,7 +122,7 @@ export class RecruitmentOutboxApprovalService {
         [target.conversation_id],
       );
 
-      const [outbox] = await em.query(
+      const [outbox]: OutboxLockRow[] = await em.query(
         `SELECT id, status, source_type, channel,
                 channel_account_id, external_recipient_id,
                 recruitment_message_id, control_version,
@@ -90,7 +133,7 @@ export class RecruitmentOutboxApprovalService {
         [outboxId],
       );
 
-      const [approval] = await em.query(
+      const [approval]: ApprovalLockRow[] = await em.query(
         `SELECT outbox_id, state, version
          FROM "recruitment_outbox_approvals"
          WHERE outbox_id = $1
@@ -102,7 +145,7 @@ export class RecruitmentOutboxApprovalService {
         throw new ConflictException('APPROVAL_RECORD_MISSING');
       }
 
-      const [message] = await em.query(
+      const [message]: MessageLockRow[] = await em.query(
         `SELECT id, conversation_id, content,
                 sender_type, direction
          FROM "recruitment_messages"
@@ -112,7 +155,7 @@ export class RecruitmentOutboxApprovalService {
       );
 
       // Same requestId must never create a second decision.
-      const [existing] = await em.query(
+      const [existing]: ApprovalEventRow[] = await em.query(
         `SELECT outbox_id, action, actor_employee_id
          FROM "recruitment_outbox_approval_events"
          WHERE request_id = $1::uuid`,
@@ -135,9 +178,7 @@ export class RecruitmentOutboxApprovalService {
         };
       }
 
-      const configuredOa = this.config.get<string>(
-        'RECRUITMENT_ZALO_OA_ID',
-      );
+      const configuredOa = this.config.get<string>('RECRUITMENT_ZALO_OA_ID');
 
       if (
         !conversation ||
@@ -154,8 +195,7 @@ export class RecruitmentOutboxApprovalService {
         outbox.dispatched_at !== null ||
         approval.state !== 'AWAITING_APPROVAL' ||
         !message ||
-        Number(message.conversation_id) !==
-          Number(conversation.id) ||
+        Number(message.conversation_id) !== Number(conversation.id) ||
         message.sender_type !== 'AI' ||
         message.direction !== 'OUTBOUND' ||
         typeof message.content !== 'string' ||
@@ -171,7 +211,7 @@ export class RecruitmentOutboxApprovalService {
 
       const nextVersion = Number(approval.version) + 1;
 
-      const approvalUpdated = await em.query(
+      const approvalUpdated: unknown = await em.query(
         `UPDATE "recruitment_outbox_approvals"
          SET state = 'APPROVED',
              version = $2,
@@ -200,7 +240,7 @@ export class RecruitmentOutboxApprovalService {
         ],
       );
 
-      const outboxUpdated = await em.query(
+      const outboxUpdated: unknown = await em.query(
         `UPDATE "recruitment_channel_outbox"
          SET status = 'PENDING',
              updated_at = now()
@@ -223,13 +263,7 @@ export class RecruitmentOutboxApprovalService {
            (outbox_id, version, action,
             actor_employee_id, request_id, current_sha256)
          VALUES ($1, $2, 'APPROVED', $3, $4::uuid, $5)`,
-        [
-          outboxId,
-          nextVersion,
-          actor.employeeId,
-          requestId,
-          hash,
-        ],
+        [outboxId, nextVersion, actor.employeeId, requestId, hash],
       );
 
       // No message content or candidate PII in activity_log.
@@ -293,7 +327,7 @@ export class RecruitmentOutboxApprovalService {
     }
 
     return this.dataSource.transaction(async (em) => {
-      const [target] = await em.query(
+      const [target]: TargetRow[] = await em.query(
         `SELECT m.conversation_id
          FROM "recruitment_channel_outbox" o
          JOIN "recruitment_messages" m
@@ -305,13 +339,20 @@ export class RecruitmentOutboxApprovalService {
       if (!target) throw new NotFoundException('AI_OUTBOX_NOT_FOUND');
 
       // Consistent lock order: conversation -> outbox -> approval -> message.
-      const [conversation] = await em.query(
+      const [conversation]: Pick<ConversationLockRow, 'id'>[] = await em.query(
         `SELECT id FROM "recruitment_conversations"
          WHERE id = $1 FOR UPDATE`,
         [target.conversation_id],
       );
 
-      const [outbox] = await em.query(
+      const [outbox]: Pick<
+        OutboxLockRow,
+        | 'id'
+        | 'status'
+        | 'source_type'
+        | 'recruitment_message_id'
+        | 'dispatched_at'
+      >[] = await em.query(
         `SELECT id, status, source_type, recruitment_message_id,
                 dispatched_at
          FROM "recruitment_channel_outbox"
@@ -319,7 +360,7 @@ export class RecruitmentOutboxApprovalService {
         [outboxId],
       );
 
-      const [approval] = await em.query(
+      const [approval]: ApprovalLockRow[] = await em.query(
         `SELECT outbox_id, state, version
          FROM "recruitment_outbox_approvals"
          WHERE outbox_id = $1 FOR UPDATE`,
@@ -330,14 +371,14 @@ export class RecruitmentOutboxApprovalService {
         throw new ConflictException('APPROVAL_RECORD_MISSING');
       }
 
-      const [message] = await em.query(
+      const [message]: Omit<MessageLockRow, 'content'>[] = await em.query(
         `SELECT id, conversation_id, sender_type, direction
          FROM "recruitment_messages"
          WHERE id = $1 FOR UPDATE`,
         [outbox.recruitment_message_id],
       );
 
-      const [existing] = await em.query(
+      const [existing]: ApprovalEventRow[] = await em.query(
         `SELECT outbox_id, action, actor_employee_id, reason
          FROM "recruitment_outbox_approval_events"
          WHERE request_id = $1::uuid`,
@@ -374,7 +415,7 @@ export class RecruitmentOutboxApprovalService {
 
       const rejectOutboxUpdated = returnedRows(
         await em.query(
-        `UPDATE "recruitment_channel_outbox"
+          `UPDATE "recruitment_channel_outbox"
          SET status = 'SUPPRESSED',
              message_text = NULL,
              text_redacted_at = now(),
@@ -387,13 +428,13 @@ export class RecruitmentOutboxApprovalService {
            AND dispatched_at IS NULL
            AND source_type = 'AI_REPLY'
          RETURNING id`,
-        [outboxId],
+          [outboxId],
         ),
       );
 
       const rejectApprovalUpdated = returnedRows(
         await em.query(
-        `UPDATE "recruitment_outbox_approvals"
+          `UPDATE "recruitment_outbox_approvals"
          SET state = 'REJECTED',
              version = $2,
              rejected_by = $3,
@@ -403,18 +444,18 @@ export class RecruitmentOutboxApprovalService {
          WHERE outbox_id = $1
            AND state = 'AWAITING_APPROVAL'
          RETURNING outbox_id`,
-        [outboxId, nextVersion, actor.employeeId, cleanReason],
+          [outboxId, nextVersion, actor.employeeId, cleanReason],
         ),
       );
 
       const rejectMessageUpdated = returnedRows(
         await em.query(
-        `UPDATE "recruitment_messages"
+          `UPDATE "recruitment_messages"
          SET metadata = metadata ||
              jsonb_build_object('delivery', 'SUPPRESSED_HR_REJECTED')
          WHERE id = $1
          RETURNING id`,
-        [outbox.recruitment_message_id],
+          [outbox.recruitment_message_id],
         ),
       );
 
@@ -513,7 +554,7 @@ export class RecruitmentOutboxApprovalService {
       .digest('hex');
 
     return this.dataSource.transaction(async (em) => {
-      const [target] = await em.query(
+      const [target]: TargetRow[] = await em.query(
         `SELECT m.conversation_id
          FROM "recruitment_channel_outbox" o
          JOIN "recruitment_messages" m
@@ -527,14 +568,14 @@ export class RecruitmentOutboxApprovalService {
       }
 
       // Lock order: conversation -> outbox -> approval -> canonical.
-      const [conversation] = await em.query(
+      const [conversation]: ConversationLockRow[] = await em.query(
         `SELECT id, status, control_mode, control_version
          FROM "recruitment_conversations"
          WHERE id = $1 FOR UPDATE`,
         [target.conversation_id],
       );
 
-      const [outbox] = await em.query(
+      const [outbox]: OutboxLockRow[] = await em.query(
         `SELECT id, status, source_type, channel,
                 channel_account_id, external_recipient_id,
                 recruitment_message_id, control_version,
@@ -544,7 +585,7 @@ export class RecruitmentOutboxApprovalService {
         [outboxId],
       );
 
-      const [approval] = await em.query(
+      const [approval]: ApprovalLockRow[] = await em.query(
         `SELECT outbox_id, state, version
          FROM "recruitment_outbox_approvals"
          WHERE outbox_id = $1 FOR UPDATE`,
@@ -555,14 +596,14 @@ export class RecruitmentOutboxApprovalService {
         throw new ConflictException('APPROVAL_RECORD_MISSING');
       }
 
-      const [message] = await em.query(
+      const [message]: MessageLockRow[] = await em.query(
         `SELECT id, conversation_id, content, sender_type, direction
          FROM "recruitment_messages"
          WHERE id = $1 FOR UPDATE`,
         [outbox.recruitment_message_id],
       );
 
-      const [existing] = await em.query(
+      const [existing]: ApprovalEventRow[] = await em.query(
         `SELECT outbox_id, action, actor_employee_id, current_sha256
          FROM "recruitment_outbox_approval_events"
          WHERE request_id = $1::uuid`,
@@ -583,14 +624,13 @@ export class RecruitmentOutboxApprovalService {
         return { outboxId, approved: true, idempotent: true };
       }
 
-      const configuredOa = this.config.get<string>(
-        'RECRUITMENT_ZALO_OA_ID',
-      );
+      const configuredOa = this.config.get<string>('RECRUITMENT_ZALO_OA_ID');
 
       if (
         conversation.status !== 'ACTIVE' ||
         conversation.control_mode !== 'AI_ACTIVE' ||
-        Number(conversation.control_version) !== Number(outbox.control_version) ||
+        Number(conversation.control_version) !==
+          Number(outbox.control_version) ||
         outbox.status !== 'AWAITING_APPROVAL' ||
         outbox.source_type !== 'AI_REPLY' ||
         outbox.channel !== 'ZALO' ||
@@ -656,8 +696,11 @@ export class RecruitmentOutboxApprovalService {
            WHERE outbox_id = $1 AND state = 'AWAITING_APPROVAL'
            RETURNING outbox_id`,
           [
-            outboxId, nextVersion, actor.employeeId,
-            APPROVAL_TTL_MINUTES, nextHash,
+            outboxId,
+            nextVersion,
+            actor.employeeId,
+            APPROVAL_TTL_MINUTES,
+            nextHash,
             outbox.channel_account_id,
             outbox.external_recipient_id,
             outbox.control_version,
@@ -680,8 +723,12 @@ export class RecruitmentOutboxApprovalService {
             request_id, previous_sha256, current_sha256)
          VALUES ($1, $2, 'EDITED_AND_APPROVED', $3, $4::uuid, $5, $6)`,
         [
-          outboxId, nextVersion, actor.employeeId,
-          requestId, previousHash, nextHash,
+          outboxId,
+          nextVersion,
+          actor.employeeId,
+          requestId,
+          previousHash,
+          nextHash,
         ],
       );
 

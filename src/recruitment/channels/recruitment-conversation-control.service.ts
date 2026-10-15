@@ -103,7 +103,10 @@ export class RecruitmentConversationControlService {
       const row = await this.load(conversationId, em, true);
       if (row.control_mode === ConversationControlMode.HUMAN_TAKEOVER) {
         await this.revokeUndispatchedAi(
-          em, conversationId, actor, 'CONTROL_HUMAN_TAKEOVER',
+          em,
+          conversationId,
+          actor,
+          'CONTROL_HUMAN_TAKEOVER',
         );
         return { control: this.toControl(row), changed: false };
       }
@@ -115,7 +118,10 @@ export class RecruitmentConversationControlService {
       );
       const aiOutbound = await this.aiOutbound(em, conversationId);
       await this.revokeUndispatchedAi(
-        em, conversationId, actor, 'CONTROL_HUMAN_TAKEOVER',
+        em,
+        conversationId,
+        actor,
+        'CONTROL_HUMAN_TAKEOVER',
       );
       return {
         control: await this.control(conversationId, em),
@@ -204,14 +210,20 @@ export class RecruitmentConversationControlService {
       const row = await this.load(conversationId, em, true);
       if (row.control_mode === ConversationControlMode.CLOSED) {
         await this.revokeUndispatchedAi(
-          em, conversationId, actor, 'CONTROL_CLOSED',
+          em,
+          conversationId,
+          actor,
+          'CONTROL_CLOSED',
         );
         return { control: this.toControl(row), changed: false };
       }
       await this.setMode(em, row, ConversationControlMode.CLOSED, actor);
       const aiOutbound = await this.aiOutbound(em, conversationId);
       await this.revokeUndispatchedAi(
-        em, conversationId, actor, 'CONTROL_CLOSED',
+        em,
+        conversationId,
+        actor,
+        'CONTROL_CLOSED',
       );
       return {
         control: await this.control(conversationId, em),
@@ -323,7 +335,10 @@ export class RecruitmentConversationControlService {
         tookOver = true;
         aiOutbound = await this.aiOutbound(em, conversationId);
         await this.revokeUndispatchedAi(
-          em, conversationId, actor, 'CONTROL_HUMAN_TAKEOVER',
+          em,
+          conversationId,
+          actor,
+          'CONTROL_HUMAN_TAKEOVER',
         );
       }
       const [message]: Array<{ id: number }> = await em.query(
@@ -467,9 +482,8 @@ export class RecruitmentConversationControlService {
         throw new ConflictException('OUTBOX_REVOKE_FAILED');
       }
 
-      const changedApproval: Array<{ version: number }> =
-        await em.query(
-          `WITH changed AS (
+      const changedApproval: Array<{ version: number }> = await em.query(
+        `WITH changed AS (
              UPDATE "recruitment_outbox_approvals"
              SET state = 'REVOKED',
                  version = version + 1,
@@ -479,8 +493,8 @@ export class RecruitmentConversationControlService {
              RETURNING version
            )
            SELECT version FROM changed`,
-          [id],
-        );
+        [id],
+      );
 
       if (changedApproval.length > 1) {
         throw new ConflictException('APPROVAL_REVOKE_FAILED');
@@ -491,12 +505,7 @@ export class RecruitmentConversationControlService {
           `INSERT INTO "recruitment_outbox_approval_events"
              (outbox_id, version, action, actor_employee_id, reason)
            VALUES ($1, $2, 'REVOKED', $3, $4)`,
-          [
-            id,
-            changedApproval[0].version,
-            actor.employeeId,
-            reason,
-          ],
+          [id, changedApproval[0].version, actor.employeeId, reason],
         );
       }
 

@@ -1,9 +1,4 @@
-import {
-  IsString,
-  IsUUID,
-  MaxLength,
-  MinLength,
-} from 'class-validator';
+import { IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 
 export class ApproveOutboxDto {
   @IsUUID()

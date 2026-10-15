@@ -200,7 +200,6 @@ export class RecruitmentOperationsController {
     return this.outbox.list(query);
   }
 
-
   /** P3.2 — HR duyệt nguyên văn phản hồi AI. */
   @Post('outbox/:id/approve')
   @HttpCode(200)
@@ -210,11 +209,7 @@ export class RecruitmentOperationsController {
     @Body() dto: ApproveOutboxDto,
     @Req() req: Request,
   ) {
-    return this.approvals.approve(
-      id,
-      dto.requestId,
-      hrActor(req.user!),
-    );
+    return this.approvals.approve(id, dto.requestId, hrActor(req.user!));
   }
 
   /** P3.2 — HR sửa nội dung và duyệt trong một transaction. */

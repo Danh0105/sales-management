@@ -239,7 +239,7 @@ export class RecruitmentChannelOutboxQueue {
       const approvalValid =
         row.sourceType !== 'AI_REPLY' ||
         (
-          await em.query(
+          await em.query<Array<{ outbox_id: number }>>(
             `SELECT a.outbox_id
              FROM "recruitment_channel_outbox" o
              JOIN "recruitment_outbox_approvals" a ON a.outbox_id = o.id
@@ -267,9 +267,13 @@ export class RecruitmentChannelOutboxQueue {
                    encode(sha256(convert_to(m.content, 'UTF8')), 'hex')
              FOR SHARE OF o, a, m`,
             [
-              row.id, owner, row.messageText,
-              row.channelAccountId, row.externalRecipientId,
-              row.recruitmentMessageId, row.controlVersion,
+              row.id,
+              owner,
+              row.messageText,
+              row.channelAccountId,
+              row.externalRecipientId,
+              row.recruitmentMessageId,
+              row.controlVersion,
             ],
           )
         ).length > 0;
@@ -285,7 +289,7 @@ export class RecruitmentChannelOutboxQueue {
         ? 'PILOT_RECIPIENT_BLOCKED'
         : row.sourceType === 'AI_REPLY'
           ? (suppressionCode(control, row.controlVersion) ??
-              (approvalValid ? null : 'APPROVAL_INVALID'))
+            (approvalValid ? null : 'APPROVAL_INVALID'))
           : null;
       if (!code) {
         const dispatched = returnedRows(
@@ -320,10 +324,10 @@ export class RecruitmentChannelOutboxQueue {
         [
           row.recruitmentMessageId,
           pilotBlocked
-             ? 'SUPPRESSED_PILOT'
-             : code === 'APPROVAL_INVALID'
-               ? 'SUPPRESSED_APPROVAL_INVALID'
-               : 'SUPPRESSED_CONTROL_CHANGED',
+            ? 'SUPPRESSED_PILOT'
+            : code === 'APPROVAL_INVALID'
+              ? 'SUPPRESSED_APPROVAL_INVALID'
+              : 'SUPPRESSED_CONTROL_CHANGED',
         ],
       );
       return {

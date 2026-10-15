@@ -34,7 +34,7 @@ export class RecruitmentOutboxApprovalExpiryService {
       throw new Error('P32_EXPIRY_CONFIG_INVALID');
     }
 
-    const [schema] = await this.dataSource.query(
+    const [schema]: Array<{ ready: boolean }> = await this.dataSource.query(
       `SELECT
          to_regclass('public.recruitment_outbox_approvals') IS NOT NULL
          AND to_regclass('public.recruitment_outbox_approval_events') IS NOT NULL
@@ -82,18 +82,19 @@ export class RecruitmentOutboxApprovalExpiryService {
 
   private async expireOne(outboxId: number, pendingTtlMinutes: number) {
     return this.dataSource.transaction(async (em) => {
-      const [target] = await em.query(
-        `SELECT m.conversation_id
+      const [target]: Array<{ conversation_id: number | string }> =
+        await em.query(
+          `SELECT m.conversation_id
          FROM "recruitment_channel_outbox" o
          JOIN "recruitment_messages" m
            ON m.id = o.recruitment_message_id
          WHERE o.id = $1 AND o.source_type = 'AI_REPLY'`,
-        [outboxId],
-      );
+          [outboxId],
+        );
 
       if (!target) return false;
 
-      const [conversation] = await em.query(
+      const [conversation]: Array<{ id: number | string }> = await em.query(
         `SELECT id FROM "recruitment_conversations"
          WHERE id = $1 FOR UPDATE`,
         [target.conversation_id],
@@ -101,7 +102,13 @@ export class RecruitmentOutboxApprovalExpiryService {
 
       if (!conversation) return false;
 
-      const [outbox] = await em.query(
+      const [outbox]: Array<{
+        id: number;
+        status: string;
+        source_type: string;
+        recruitment_message_id: number;
+        dispatched_at: Date | null;
+      }> = await em.query(
         `SELECT id, status, source_type, recruitment_message_id,
                 dispatched_at
          FROM "recruitment_channel_outbox"
@@ -109,7 +116,11 @@ export class RecruitmentOutboxApprovalExpiryService {
         [outboxId],
       );
 
-      const [approval] = await em.query(
+      const [approval]: Array<{
+        state: string;
+        version: number;
+        due: boolean;
+      }> = await em.query(
         `SELECT state, version,
                 (
                   (state = 'AWAITING_APPROVAL'
@@ -142,7 +153,12 @@ export class RecruitmentOutboxApprovalExpiryService {
         return false;
       }
 
-      const [message] = await em.query(
+      const [message]: Array<{
+        id: number;
+        conversation_id: number | string;
+        sender_type: string;
+        direction: string;
+      }> = await em.query(
         `SELECT id, conversation_id, sender_type, direction
          FROM "recruitment_messages"
          WHERE id = $1 FOR UPDATE`,
