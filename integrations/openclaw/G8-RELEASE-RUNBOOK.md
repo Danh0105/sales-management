@@ -9,7 +9,7 @@ Không bước nào ở đây tự bật AI, worker, outbound hay gửi Zalo.
 |---|---|
 | Nhánh / commit mã | `release/g8-p32` — mã runtime **`fdaa3ed`** (= `344befd` [p32 + master `6e79e1b`] + API màn HR + trần canary mặc định); commit sau chỉ đổi `integrations/` |
 | Artifact backend | `/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed/dist` — hash dist `a782a48a1cac837a` (sha256 danh sách file, bỏ `*.tsbuildinfo`); unit 1536/1537 (lỗi duy nhất có sẵn trên master) |
-| Artifact frontend | `/var/www/kido-app/dist-g8-4dd3cc9` — hash `44d5487b4d16765d`, bundle `index-H-XitS5S.js`; kido-app nhánh `release/g8-fe` `4dd3cc9` (= `ab4e9a1` + `9c154a6` + route/menu G8), build worktree sạch + `npm ci`. **Chặn 16/10**: live (`index-D2fn2Z-L.js`, build 16/10 09:37 từ working tree) chứa WIP chưa commit của màn khác (BBCS, mã ĐVQHNS, đề nghị chi tháng, check-out & báo giảng…) ⇒ deploy sẽ gỡ các thay đổi đó. Bản cũ `dist-g8-hrconsole` (`e75dbbc70cc53ce4`) build từ working tree — không deploy |
+| Artifact frontend | **Đã deploy 16/10 14:39** — kido-app `release/g8-fe-live` `1520f5a` (= `4dd3cc9` + 8 commit WIP đang live từ build 16/10 09:37, chủ WIP đồng ý; asset `public/*` PWA + model FaceId đưa vào git) → `/opt/kido-recruiter/releases/kido-app-g8-1520f5a/dist`, hash `a533c0eacfe19ca4`, bundle `index-CDAzqw7_.js`; build 2 lần từ worktree sạch + `npm ci` trùng hash. Backup bản trước: `/root/kido-app-dist-backups/dist-20261016-143901` (`87449e90…`). Không dùng `dist-g8-hrconsole` / `dist-g8-4dd3cc9` |
 | Script | `production/deploy-3010.sh` · `rollback-3010.sh` · `deploy-fe.sh` · `activate-g8.sh c0|c1|c2|off` · `g8-health.sh`; vận hành: `G8-OPERATIONS.md` |
 | Đang chạy 3010 | **`fdaa3ed`** từ 16/10 14:09 (`deploy-3010.sh`, dist `a782a48a1cac837a`, backup `/root/backups/g8-release-20261016-140920`); AI / worker / outbound tắt. Bản WIP trên đĩa trước đó chuyển sang `dist-before-g8-20261016-140920` — không dùng để rollback |
 | Rollback | `/opt/kido-recruiter/releases/rollback-6e79e1b/dist` — hash `d35c4525df905174` = đúng artifact Codex đã deploy 14/10 |
@@ -81,7 +81,7 @@ HR `runtime-controls/stop` 3 phạm vi → xác nhận audit + 0 request mới �
 
 ## 7. Điều kiện còn thiếu trước canary (không chặn deploy mục 3)
 
-1. **Màn duyệt tin cho HR**: kido-app chưa có giao diện approve / edit-and-approve / reject outbox (chỉ có API) ⇒ cần màn
+1. ~~Màn duyệt tin cho HR~~ — đã lên production 16/10 14:39; còn HR #158 xác minh bằng tài khoản thật: `python3 -I production/hr-verify-3010.py` (chỉ GET, mật khẩu ẩn, không in token).
    hình (hoặc công cụ dòng lệnh có đăng nhập HR) trước C1.
 2. Xác nhận trần chi phí cứng của project OpenAI production (khoá đã ở `/opt/kido-recruiter-prod/.env`).
 3. Cập nhật 4 bộ nghiệm thu cũ (control / outbound / worker / g8-safety) thêm bước HR duyệt; hội thoại model thật trên staging `344befd`.

@@ -6,9 +6,9 @@
 #   SRC=<artifact> EXPECT=<hash16> integrations/openclaw/production/deploy-fe.sh [--check]
 #
 # Artifact phải build từ commit (worktree sạch + npm ci). Không có giá trị mặc định: bản
-# dist-g8-hrconsole (e75dbbc70cc53ce4) build từ working tree — KHÔNG deploy. Bản tái tạo được
-# dist-g8-4dd3cc9 (44d5487b4d16765d, kido-app release/g8-fe 4dd3cc9) bị chặn 16/10: live đang
-# chạy WIP chưa commit của màn khác, deploy sẽ gỡ các thay đổi đó (xem G8-RELEASE-RUNBOOK.md).
+# dist-g8-hrconsole (e75dbbc70cc53ce4) build từ working tree — KHÔNG deploy; dist-g8-4dd3cc9 thiếu
+# WIP live + asset public (FaceId) — KHÔNG deploy. Bản đã deploy 16/10 14:39: kido-app
+# release/g8-fe-live 1520f5a → /opt/kido-recruiter/releases/kido-app-g8-1520f5a/dist (a533c0eacfe19ca4).
 set -Eeuo pipefail
 SRC="${SRC:?đặt SRC=<thư mục artifact build từ commit>}"
 EXPECT="${EXPECT:?đặt EXPECT=<hash 16 ký tự của artifact>}"
