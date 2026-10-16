@@ -1,6 +1,6 @@
 # AI Recruiter — Vận hành production (G8)
 
-Trạng thái đến khi có GO: **AI, worker, Zalo outbound TẮT**; gateway chạy rỗi; mọi tin AI phải được Nhân sự duyệt.
+Trạng thái đến khi SYSTEM OWNER cấp GO (`production/g8-owner-go.py`): **AI, worker, Zalo outbound TẮT**; gateway chạy rỗi; mọi tin AI phải được Nhân sự duyệt.
 
 ## 1. Luồng xử lý
 
@@ -81,7 +81,7 @@ Xác nhận cảnh báo sau khi xử lý (nút ✓ trong Vận hành).
 - Giao diện: Tuyển dụng → thẻ số liệu, **Mức dùng AI**, **Vận hành** (cảnh báo, hàng đợi, hoạt động gần đây).
 - Log: `pm2 logs sales-management` (logrotate); gateway `docker logs kido-recruiter-prod-openclaw-gateway-1` (dòng `kido-trace`
   chỉ có tên tool/endpoint/HTTP status — không nội dung, không key); audit `activity_log` (path `/recruitment-*`).
-- Chi phí: trần token ngày/tháng ở backend + hạn mức cứng của project OpenAI production (đặt trên OpenAI, xác nhận trước GO).
+- Chi phí: trần token ngày/tháng ở backend + hạn mức cứng của project OpenAI production (Owner xác nhận đúng project trong `approve c1|c2`).
 
 ## 8. Biến môi trường (3010) — file `/opt/kido-recruiter-prod/3010-g8.env` (600 root, nạp bằng `activate-g8.sh c0`)
 
@@ -102,15 +102,13 @@ Xác nhận cảnh báo sau khi xử lý (nút ✓ trong Vận hành).
 
 Gateway: `/opt/kido-recruiter-prod/.env` (`OPENAI_API_KEY` project riêng, `OPENCLAW_GATEWAY_TOKEN`, `RECRUITMENT_CHANNEL_API_KEY`).
 
-## 9. Checklist go-live (theo thứ tự, mỗi dòng cần người duyệt)
+## 9. Checklist go-live (GO do SYSTEM OWNER cấp từng cổng — G8-RELEASE-RUNBOOK §6)
 
-- [ ] 3 chữ ký GO (HR, vận hành, privacy) + danh sách ứng viên pilot đã đồng ý.
-- [ ] Hạn mức chi phí cứng của project OpenAI production đã đặt.
-- [ ] Deploy backend: `production/deploy-3010.sh --check` → `deploy-3010.sh` (tự rollback nếu smoke hỏng).
-- [ ] Deploy frontend: `production/deploy-fe.sh --check` → `deploy-fe.sh`.
-- [ ] HR đăng nhập kido-app, thấy tab Duyệt tin AI / Hội thoại Zalo / Vận hành; `g8-health.sh` sạch.
-- [ ] Diễn tập dừng khẩn: Vận hành → Dừng khẩn tất cả → kiểm `g8-health.sh` → Mở lại (có lý do).
-- [ ] `activate-g8.sh c0 --go …` → HR dừng khẩn **Gửi Zalo** → `activate-g8.sh c1 --go …` → tài khoản nội bộ nhắn 1 tin → bản nháp vào
-      Chờ duyệt, Zalo 0 tin.
-- [ ] HR duyệt bản nháp → `activate-g8.sh c2 --go …` → HR mở lại **Gửi Zalo** → đúng 1 tin tới đúng tài khoản nội bộ.
-- [ ] Mở rộng pilot (≤ 5 ứng viên) chỉ sau báo cáo ngày đầu.
+- [x] Deploy backend (`deploy-3010.sh`, 16/10 14:09) · frontend (`deploy-fe.sh`, 16/10 14:39) · HR verify 6/6.
+- [ ] P0: `RECRUITMENT_ZALO_APP_SECRET` vào `3010-g8.env` + credential OA vào `recruitment_zalo_credentials` (lệnh ở runbook §6).
+- [ ] `g8-owner-go.py approve c0` → `activate-g8.sh c0 --go <mã>` → HR dừng khẩn **Gửi Zalo** → `g8-health.sh`.
+- [ ] `g8-owner-go.py approve c1` (xác nhận project OpenAI + pilot) → `activate-g8.sh c1 --go <mã>` → tài khoản pilot nhắn 1 tin →
+      bản nháp vào Chờ duyệt, Zalo 0 tin.
+- [ ] `g8-owner-go.py approve c2` → `activate-g8.sh c2 --go <mã>` → HR duyệt đúng 1 bản nháp → HR mở lại **Gửi Zalo** → đúng 1 tin
+      tới đúng tài khoản pilot.
+- [ ] Mở rộng pilot (C3, ≤ 5 ứng viên đã đồng ý) chỉ sau báo cáo ngày đầu và quyết định riêng của Owner.

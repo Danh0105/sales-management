@@ -1,6 +1,6 @@
 # G8 — Phát hành lên 3010 + canary AI Recruiter (CHƯA THỰC HIỆN)
 
-Trạng thái: **G8 = NO-GO**. Tài liệu này chuẩn bị; mỗi bước production cần duyệt riêng, lệnh do người vận hành chạy.
+Trạng thái: **G8 = NO-GO** cho tới khi SYSTEM OWNER cấp GO từng cổng (`production/g8-owner-go.py`, mục 6). Lệnh do Owner / vận hành chạy.
 Không bước nào ở đây tự bật AI, worker, outbound hay gửi Zalo.
 
 ## 1. Định danh
@@ -65,7 +65,44 @@ KHÔNG quay về `dist-wip-before-g8-*` (đó là build WIP, không phải bản
 4. Dừng khi API lỗi: `docker compose -f production/docker-compose.yml … stop openclaw-gateway` (cắt đường AI), rồi đặt lại
    cờ env `false` cho 3010 qua wrapper + restart.
 
-## 6. Kế hoạch canary (sau khi đủ điều kiện mục 7 và 3 chữ ký GO)
+## 6. Owner Approval + kích hoạt C0 → C1 → C2
+
+Từ 16/10/2026 quyết định GO thuộc **một người: SYSTEM OWNER** (thay cho 3 chữ ký HR / vận hành / privacy). Cổng duyệt tin
+của Nhân sự **không đổi**: mọi tin AI gửi Zalo vẫn phải được HR duyệt trong kido-app.
+
+- GO cấp bằng `python3 -I production/g8-owner-go.py approve c0|c1|c2` — chỉ chạy khi Owner gõ trực tiếp trong terminal
+  (agent / pipe không cấp được), Owner gõ họ tên + câu `TOI PHE DUYET <CỔNG>`. Mỗi GO: mã riêng `G8-C<n>-<thời điểm>-<4 hex>`,
+  đúng 1 cổng, hiệu lực 12 giờ, dùng 1 lần. Bản ghi `/opt/kido-recruiter-prod/go/<mã>.json` (600 root: người duyệt, thời gian,
+  phạm vi, trần, pilot, OpenAI) + `ledger.jsonl` (approve / consume / revoke, sha256 bản ghi). `list` xem, `revoke <mã>` thu hồi.
+- C1 và C2: lúc duyệt, Owner đối chiếu khoá OpenAI rút gọn với dashboard và nhập hạn mức USD + gõ `DUNG PROJECT`; xác nhận
+  tài khoản Zalo pilot (fingerprint, số tin đã nhắn OA) và gõ 4 ký tự cuối fingerprint.
+- `activate-g8.sh <cổng> --go <mã>` từ chối nếu GO không hợp lệ / sai cổng / hết hạn / đã dùng / đã thu hồi; mở cổng xong mới
+  đánh dấu GO đã dùng. `activate-g8.sh off` (tắt cứng) không cần GO.
+
+**P0 — một lần, trước C0** (Owner chạy; không in bí mật; agent bị chặn ghi bí mật nên không tự làm bước này):
+
+```bash
+# APP_SECRET của app OA tuyển dụng (cần cho refresh token) → cấu hình 3010 chưa nạp
+umask 077; C=/opt/kido-recruiter-prod/3010-g8.env; cp -p $C $C.bak-$(date +%Y%m%d-%H%M%S)
+grep -q '^RECRUITMENT_ZALO_APP_SECRET=' $C || grep -m1 '^RECRUITMENT_ZALO_APP_SECRET=' /root/recruitment-oa.env >> $C
+grep -c '^RECRUITMENT_ZALO_APP_SECRET=' $C                                     # = 1
+# credential OA ICHI SKILL (bản mã P3-7.1, giải mã được bằng RECRUITMENT_ZALO_TOKEN_KEY của 3010) → DB
+node -e 'const c=require("/root/recruitment-oa.credential.json");const q=v=>"\x27"+String(v).replace(/\x27/g,"\x27\x27")+"\x27";process.stdout.write("INSERT INTO recruitment_zalo_credentials (oa_id, access_token_enc, refresh_token_enc, access_expires_at) VALUES ("+[c.oa_id,c.access_token_enc,c.refresh_token_enc].map(q).join(", ")+", "+q(c.access_expires_at)+"::timestamptz) ON CONFLICT (oa_id) DO NOTHING;\n")' | runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d sales_db
+runuser -u postgres -- psql -XAt -d sales_db -c "select count(*) from recruitment_zalo_credentials"   # = 1
+```
+
+**Kích hoạt** (`cd /opt/kido-recruiter/worktrees/release-g8-p32/integrations/openclaw/production`):
+
+| Cổng | Owner cấp GO | Lệnh | Sau đó |
+|---|---|---|---|
+| C0 | `python3 -I g8-owner-go.py approve c0` | `./activate-g8.sh c0 --go <mã C0>` | HR: Vận hành → Dừng khẩn **Gửi Zalo**; `./g8-health.sh` |
+| C1 | `python3 -I g8-owner-go.py approve c1` (OpenAI + pilot) | `./activate-g8.sh c1 --go <mã C1>` | tài khoản pilot nhắn 1 tin → HR thấy 1 bản nháp ở **Duyệt tin AI**, Zalo 0 tin |
+| C2 | `python3 -I g8-owner-go.py approve c2` (OpenAI + pilot) | `./activate-g8.sh c2 --go <mã C2>` | HR duyệt đúng 1 bản nháp → Mở lại **Gửi Zalo** → đúng 1 tin tới tài khoản pilot |
+
+C2 bật OUTBOUND env **trước** khi HR duyệt (Gửi Zalo vẫn đang dừng khẩn nên chưa gửi) để hạn 30 phút của bản duyệt không trôi
+trong lúc restart. Chưa `pm2 save` tới khi ổn định (reboot ⇒ 3010 về cấu hình tắt AI).
+
+### Kế hoạch canary
 
 | Giai đoạn | Thao tác | Điều kiện qua |
 |---|---|---|
@@ -81,9 +118,8 @@ HR `runtime-controls/stop` 3 phạm vi → xác nhận audit + 0 request mới �
 
 ## 7. Điều kiện còn thiếu trước canary (không chặn deploy mục 3)
 
-1. ~~Màn duyệt tin cho HR~~ — đã lên production 16/10 14:39; còn HR #158 xác minh bằng tài khoản thật: `python3 -I production/hr-verify-3010.py` (chỉ GET, mật khẩu ẩn, không in token).
-   hình (hoặc công cụ dòng lệnh có đăng nhập HR) trước C1.
-2. Xác nhận trần chi phí cứng của project OpenAI production (khoá đã ở `/opt/kido-recruiter-prod/.env`).
+1. ~~Màn duyệt tin cho HR~~ — production 16/10 14:39; HR verify `production/hr-verify-3010.py` 6/6 PASS (Owner xác nhận).
+2. Hạn mức OpenAI: Owner báo 100 USD/chu kỳ, hard limit — xác nhận lại đúng project trong `approve c1` / `approve c2`.
 3. Cập nhật 4 bộ nghiệm thu cũ (control / outbound / worker / g8-safety) thêm bước HR duyệt; hội thoại model thật trên staging `344befd`.
 4. P1 Postgres (an toàn production) — phiếu `/root/pg-p1-change-request-20261016.md`.
-5. Danh sách ứng viên pilot đã đồng ý + 3 chữ ký GO (HR, vận hành, privacy).
+5. GO của SYSTEM OWNER cho từng cổng (mục 6). Pilot giai đoạn đầu: chỉ tài khoản nội bộ `86e5620e525bfe1a`; C3 cần quyết định riêng.
