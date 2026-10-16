@@ -1,4 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -6,6 +12,8 @@ import { RecruitmentAuditService } from '../recruitment-audit.service';
 import { RecruitmentActorType } from '../recruitment.enums';
 import type { RecruitmentActor } from '../recruitment.roles';
 import { returnedRows } from './recruitment-channel-event.queue';
+import { isRecruitmentWorkerEnabled } from './recruitment-channel-worker.config';
+import { isZaloOutboundEnabled } from './zalo-outbound.config';
 
 const SYSTEM_ACTOR: RecruitmentActor = {
   type: RecruitmentActorType.SYSTEM,
@@ -14,14 +22,81 @@ const SYSTEM_ACTOR: RecruitmentActor = {
   roles: [],
 };
 
+export const APPROVAL_EXPIRY_EVERY_MS = 30_000;
+export const DEFAULT_PENDING_APPROVAL_TTL_MINUTES = 60;
+
+/** TTL bản nháp AI chờ duyệt (phút) — `RECRUITMENT_APPROVAL_PENDING_TTL_MINUTES`, 15–10080; sai ⇒ mặc định. */
+export function readPendingApprovalTtl(
+  get: (key: string) => string | undefined,
+): number {
+  const raw = get('RECRUITMENT_APPROVAL_PENDING_TTL_MINUTES')?.trim();
+  const value = raw ? Number(raw) : DEFAULT_PENDING_APPROVAL_TTL_MINUTES;
+  return Number.isSafeInteger(value) && value >= 15 && value <= 10080
+    ? value
+    : DEFAULT_PENDING_APPROVAL_TTL_MINUTES;
+}
+
+/**
+ * Dọn bản duyệt hết hạn: bản đã duyệt quá `expires_at` và bản nháp chờ quá TTL →
+ * `SUPPRESSED` + approval `EXPIRED` + audit. Sender vốn đã từ chối gửi bản hết hạn;
+ * việc dọn giải phóng đầu hàng của người nhận để tin sau không bị chặn. Chạy định kỳ
+ * khi worker HOẶC outbound bật (C1 có worker mà chưa có sender).
+ */
 @Injectable()
-export class RecruitmentOutboxApprovalExpiryService {
+export class RecruitmentOutboxApprovalExpiryService
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
+  private readonly logger = new Logger('RecruitmentApprovalExpiry');
+  private readonly scheduled: boolean;
+  private readonly pendingTtlMinutes: number;
+  private timer: NodeJS.Timeout | null = null;
+  private sweeping = false;
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly audit: RecruitmentAuditService,
-  ) {}
+    configService?: ConfigService,
+  ) {
+    const get = (key: string) => configService?.get<string>(key);
+    this.scheduled =
+      isRecruitmentWorkerEnabled(get) || isZaloOutboundEnabled(get);
+    this.pendingTtlMinutes = readPendingApprovalTtl(get);
+  }
 
-  // Chưa có Cron: chỉ gọi chủ động trong integration test.
+  onApplicationBootstrap(): void {
+    if (!this.scheduled) return;
+    this.logger.log(
+      `approval expiry start every=${APPROVAL_EXPIRY_EVERY_MS}ms pendingTtl=${this.pendingTtlMinutes}m`,
+    );
+    void this.sweep();
+    this.timer = setInterval(() => void this.sweep(), APPROVAL_EXPIRY_EVERY_MS);
+    this.timer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  /** Một lượt dọn; không chạy chồng, không ném lỗi ra ngoài (chỉ log mã lỗi). */
+  async sweep(): Promise<void> {
+    if (this.sweeping) return;
+    this.sweeping = true;
+    try {
+      const result = await this.expireBatch(this.pendingTtlMinutes);
+      if (result.expired > 0) {
+        this.logger.log(
+          `approval expiry expired=${result.expired} examined=${result.examined}`,
+        );
+      }
+    } catch (error) {
+      const code =
+        error instanceof Error ? error.message.split('\n')[0] : 'UNKNOWN';
+      this.logger.error(`approval expiry error=${code.slice(0, 120)}`);
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
   async expireBatch(pendingTtlMinutes: number, limit = 20) {
     if (
       !Number.isSafeInteger(pendingTtlMinutes) ||
