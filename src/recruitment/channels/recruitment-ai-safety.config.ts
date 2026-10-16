@@ -39,13 +39,17 @@ export interface AiSafetyConfig {
 
 export const AI_SAFETY_CONFIG_ERROR = 'RECRUITMENT_AI_SAFETY_CONFIG_INVALID';
 
+/**
+ * Mặc định = trần canary G8 đã duyệt (thiếu biến môi trường vẫn bị giới hạn chặt): 6 lượt/giờ và
+ * 15 lượt/ngày mỗi người, 25 lượt/ngày toàn hệ thống; ~90k–190k token/lượt ⇒ 5 triệu token/ngày,
+ * 20 triệu/tháng. Nâng trần chỉ bằng biến môi trường, sau khi được duyệt.
+ */
 export const DEFAULT_AI_LIMITS: AiLimits = Object.freeze({
-  maxTurnsPerSenderHour: 10,
-  maxTurnsPerSenderDay: 40,
-  maxTurnsPerDay: 300,
-  // ~90k token / lượt (phần lớn là cache ngữ cảnh) × 300 lượt.
-  dailyTokenBudget: 30_000_000,
-  monthlyTokenBudget: 500_000_000,
+  maxTurnsPerSenderHour: 6,
+  maxTurnsPerSenderDay: 15,
+  maxTurnsPerDay: 25,
+  dailyTokenBudget: 5_000_000,
+  monthlyTokenBudget: 20_000_000,
   tokenReservationPerTurn: 200_000,
 });
 

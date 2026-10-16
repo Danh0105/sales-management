@@ -403,9 +403,28 @@ describe('RecruitmentAiLimitsService.evaluate', () => {
       limits,
     );
 
-  it('dưới mọi trần → ok', async () => {
-    await expect(evaluate(usage({ sender_hour: 9 }))).resolves.toEqual({
-      ok: true,
+  it('dưới mọi trần → ok (sát trần canary mặc định)', async () => {
+    await expect(
+      evaluate(
+        usage({
+          sender_hour: 5,
+          sender_day: 14,
+          day_turns: 24,
+          day_tokens: 4_999_999,
+          month_tokens: 19_999_999,
+        }),
+      ),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it('trần canary mặc định: 6 lượt/giờ, 15 lượt/ngày mỗi người, 25 lượt/ngày, 5 triệu / 20 triệu token', () => {
+    expect(DEFAULT_AI_LIMITS).toEqual({
+      maxTurnsPerSenderHour: 6,
+      maxTurnsPerSenderDay: 15,
+      maxTurnsPerDay: 25,
+      dailyTokenBudget: 5_000_000,
+      monthlyTokenBudget: 20_000_000,
+      tokenReservationPerTurn: 200_000,
     });
   });
 

@@ -21,6 +21,7 @@ import { RecruitmentAiLimitsService } from '../channels/recruitment-ai-limits.se
 import { RecruitmentChannelEventOperationsService } from '../channels/recruitment-channel-event-operations.service';
 import { RecruitmentConversationControlService } from '../channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from '../channels/recruitment-hr-alert.service';
+import { RecruitmentHrConsoleService } from '../channels/recruitment-hr-console.service';
 import { RecruitmentRuntimeControlService } from '../channels/recruitment-runtime-control.service';
 import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outbox-operations.service';
 import { RecruitmentOutboxApprovalService } from '../channels/recruitment-outbox-approval.service';
@@ -47,6 +48,11 @@ import {
   EditAndApproveOutboxDto,
   RejectOutboxDto,
 } from '../dto/outbox-approval.dto';
+import {
+  ApprovalListQueryDto,
+  ConversationListQueryDto,
+  ConversationMessagesQueryDto,
+} from '../dto/hr-console.dto';
 import { recruitmentValidationPipe } from './validation';
 
 /**
@@ -63,7 +69,23 @@ import { recruitmentValidationPipe } from './validation';
 export class RecruitmentConversationsController {
   constructor(
     private readonly control: RecruitmentConversationControlService,
+    private readonly hrConsole: RecruitmentHrConsoleService,
   ) {}
+
+  /** Danh sách hội thoại kênh cho màn HR (tìm theo tên/SĐT ứng viên, lọc chế độ, tin chờ duyệt). */
+  @Get()
+  list(@Query() query: ConversationListQueryDto) {
+    return this.hrConsole.listConversations(query);
+  }
+
+  /** Lịch sử tin (ứng viên / AI / HR) kèm trạng thái gửi và duyệt của từng tin. */
+  @Get(':id/messages')
+  messages(
+    @Param('id', ParseIntPipe) id: number,
+    @Query() query: ConversationMessagesQueryDto,
+  ) {
+    return this.hrConsole.conversationMessages(id, query.limit);
+  }
 
   @Get(':id/control')
   getControl(@Param('id', ParseIntPipe) id: number) {
@@ -128,7 +150,26 @@ export class RecruitmentOperationsController {
     private readonly events: RecruitmentChannelEventOperationsService,
     private readonly runtime: RecruitmentRuntimeControlService,
     private readonly aiLimits: RecruitmentAiLimitsService,
+    private readonly hrConsole: RecruitmentHrConsoleService,
   ) {}
+
+  /** Số liệu tổng quan cho dashboard HR + hoạt động tuyển dụng gần đây (không nội dung). */
+  @Get('overview')
+  overview() {
+    return this.hrConsole.overview();
+  }
+
+  /** P3.2 — hàng đợi tin AI theo nhóm (chờ duyệt / đã duyệt / đã gửi / từ chối / lỗi). */
+  @Get('approvals')
+  listApprovals(@Query() query: ApprovalListQueryDto) {
+    return this.hrConsole.listApprovals(query);
+  }
+
+  /** P3.2 — chi tiết một tin AI: bản nháp, lịch sử duyệt, ngữ cảnh hội thoại. */
+  @Get('approvals/:id')
+  approvalDetail(@Param('id', ParseIntPipe) id: number) {
+    return this.hrConsole.approvalDetail(id);
+  }
 
   /** P3-7.3 / G8 — trạng thái dừng khẩn AI / worker / outbound. */
   @Get('runtime-controls')
