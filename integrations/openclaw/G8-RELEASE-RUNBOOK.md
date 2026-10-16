@@ -7,8 +7,10 @@ Không bước nào ở đây tự bật AI, worker, outbound hay gửi Zalo.
 
 | Mục | Giá trị |
 |---|---|
-| Nhánh / commit mã | `release/g8-p32` — mã runtime `344befd` (= `6f5f62a` p32 + merge master `6e79e1b`); các commit sau chỉ đổi `integrations/` |
-| Artifact | `/opt/kido-recruiter/releases/g8-p32-344befd/dist` — hash dist `6e9ed78cc906fa76` (sha256 danh sách file, bỏ `*.tsbuildinfo`) |
+| Nhánh / commit mã | `release/g8-p32` — mã runtime **`fdaa3ed`** (= `344befd` [p32 + master `6e79e1b`] + API màn HR + trần canary mặc định); commit sau chỉ đổi `integrations/` |
+| Artifact backend | `/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed/dist` — hash dist `a782a48a1cac837a` (sha256 danh sách file, bỏ `*.tsbuildinfo`); unit 1536/1537 (lỗi duy nhất có sẵn trên master) |
+| Artifact frontend | `/var/www/kido-app/dist-g8-hrconsole` — hash `e75dbbc70cc53ce4`, bundle `index-B4AHmFFk.js`; kido-app commit `ab4e9a1` + `9c154a6` (khác bản live 16/10 09:37 đúng phần tuyển dụng) |
+| Script | `production/deploy-3010.sh` · `rollback-3010.sh` · `deploy-fe.sh` · `activate-g8.sh c0|c1|c2|off` · `g8-health.sh`; vận hành: `G8-OPERATIONS.md` |
 | Đang chạy 3010 | `6e79e1b` trong RAM (pid khởi động 14/10 13:22). **`/var/www/sales-management/dist` trên đĩa là build WIP 15/10 09:09 — không phải bản đang chạy** |
 | Rollback | `/opt/kido-recruiter/releases/rollback-6e79e1b/dist` — hash `d35c4525df905174` = đúng artifact Codex đã deploy 14/10 |
 | Phụ thuộc | `package.json` + `package-lock.json` của release = rollback = repo live ⇒ dùng `node_modules` hiện có |
@@ -24,7 +26,7 @@ Không bước nào ở đây tự bật AI, worker, outbound hay gửi Zalo.
 - Gateway production: chạy rỗi, cách ly 20/20, chỉ `127.0.0.1:18790`, token bắt buộc (`production/README.md`).
 - R1 xong: hộp đến 0 tin chờ (POST-EXCLUDE-VERIFICATION 33/33).
 
-## 3. Deploy 3010 (bước riêng, người vận hành chạy)
+## 3. Deploy 3010 (bước riêng — đã đóng gói thành `production/deploy-3010.sh`, mô tả thủ công bên dưới để đối chiếu)
 
 ```bash
 TS=$(date +%Y%m%d-%H%M%S); B=/root/backups/g8-release-$TS; mkdir -m 700 -p $B; umask 077
