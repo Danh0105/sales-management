@@ -3,10 +3,16 @@
 # Chạy bằng root khi có duyệt triển khai. Màn mới tự ẩn khi backend chưa có API HR console,
 # nên deploy được trước hoặc sau backend.
 #
-#   integrations/openclaw/production/deploy-fe.sh [--check]
+#   SRC=<artifact> EXPECT=<hash16> integrations/openclaw/production/deploy-fe.sh [--check]
+#
+# Artifact phải build từ commit (worktree sạch + npm ci). Không có giá trị mặc định: bản
+# dist-g8-hrconsole (e75dbbc70cc53ce4) build từ working tree — KHÔNG deploy. Bản tái tạo được
+# dist-g8-4dd3cc9 (44d5487b4d16765d, kido-app release/g8-fe 4dd3cc9) bị chặn 16/10: live đang
+# chạy WIP chưa commit của màn khác, deploy sẽ gỡ các thay đổi đó (xem G8-RELEASE-RUNBOOK.md).
 set -Eeuo pipefail
-SRC="${SRC:-/var/www/kido-app/dist-g8-hrconsole}"
-EXPECT="${EXPECT:-e75dbbc70cc53ce4}"
+SRC="${SRC:?đặt SRC=<thư mục artifact build từ commit>}"
+EXPECT="${EXPECT:?đặt EXPECT=<hash 16 ký tự của artifact>}"
+[ "$EXPECT" != e75dbbc70cc53ce4 ] || { echo "DỪNG: artifact e75dbbc70cc53ce4 không tái tạo được" >&2; exit 1; }
 ROOT=/var/www/kido-app
 TS=$(date +%Y%m%d-%H%M%S)
 BK=/root/kido-app-dist-backups/dist-$TS

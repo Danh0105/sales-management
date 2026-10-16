@@ -9,9 +9,9 @@ Không bước nào ở đây tự bật AI, worker, outbound hay gửi Zalo.
 |---|---|
 | Nhánh / commit mã | `release/g8-p32` — mã runtime **`fdaa3ed`** (= `344befd` [p32 + master `6e79e1b`] + API màn HR + trần canary mặc định); commit sau chỉ đổi `integrations/` |
 | Artifact backend | `/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed/dist` — hash dist `a782a48a1cac837a` (sha256 danh sách file, bỏ `*.tsbuildinfo`); unit 1536/1537 (lỗi duy nhất có sẵn trên master) |
-| Artifact frontend | `/var/www/kido-app/dist-g8-hrconsole` — hash `e75dbbc70cc53ce4`, bundle `index-B4AHmFFk.js`; kido-app commit `ab4e9a1` + `9c154a6` (khác bản live 16/10 09:37 đúng phần tuyển dụng) |
+| Artifact frontend | `/var/www/kido-app/dist-g8-4dd3cc9` — hash `44d5487b4d16765d`, bundle `index-H-XitS5S.js`; kido-app nhánh `release/g8-fe` `4dd3cc9` (= `ab4e9a1` + `9c154a6` + route/menu G8), build worktree sạch + `npm ci`. **Chặn 16/10**: live (`index-D2fn2Z-L.js`, build 16/10 09:37 từ working tree) chứa WIP chưa commit của màn khác (BBCS, mã ĐVQHNS, đề nghị chi tháng, check-out & báo giảng…) ⇒ deploy sẽ gỡ các thay đổi đó. Bản cũ `dist-g8-hrconsole` (`e75dbbc70cc53ce4`) build từ working tree — không deploy |
 | Script | `production/deploy-3010.sh` · `rollback-3010.sh` · `deploy-fe.sh` · `activate-g8.sh c0|c1|c2|off` · `g8-health.sh`; vận hành: `G8-OPERATIONS.md` |
-| Đang chạy 3010 | `6e79e1b` trong RAM (pid khởi động 14/10 13:22). **`/var/www/sales-management/dist` trên đĩa là build WIP 15/10 09:09 — không phải bản đang chạy** |
+| Đang chạy 3010 | **`fdaa3ed`** từ 16/10 14:09 (`deploy-3010.sh`, dist `a782a48a1cac837a`, backup `/root/backups/g8-release-20261016-140920`); AI / worker / outbound tắt. Bản WIP trên đĩa trước đó chuyển sang `dist-before-g8-20261016-140920` — không dùng để rollback |
 | Rollback | `/opt/kido-recruiter/releases/rollback-6e79e1b/dist` — hash `d35c4525df905174` = đúng artifact Codex đã deploy 14/10 |
 | Phụ thuộc | `package.json` + `package-lock.json` của release = rollback = repo live ⇒ dùng `node_modules` hiện có |
 | Schema | đã đủ: `recruitment_runtime_controls` (+ failsafe), cột `ai_*` của events, enum `DISCARDED_RUNTIME_HALTED`, `AWAITING_APPROVAL`, bảng duyệt — **không cần migration** |
