@@ -23,7 +23,10 @@ const OA = '1705071610099849262';
 const PILOT = '8812000000000000001';
 const OTHER = '8812000000000000002';
 const TEXT = 'Chào bạn, mình là trợ lý tuyển dụng của ICHI SKILL.';
-const GO = 'G8-C2-20261018-090000-ab12';
+/** Mỗi grant một mã GO C2S riêng (UQ_dispatch_grant_go; trigger chỉ nhận G8-C2S-…). */
+let goSeq = 0;
+const nextGo = () =>
+  `G8-C2S-20261018-090000-${(goSeq++ % 0xffff).toString(16).padStart(4, '0')}`;
 const LEASE = 60_000;
 const guard: DispatchGuard = { oaId: OA };
 const pilots = [pilotFingerprint(OA, PILOT)];
@@ -169,7 +172,7 @@ suite('single dispatch guard — PostgreSQL thật (G8 C2)', () => {
          recipient_fingerprint, approved_text_sha256, approved_control_version, created_by, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, 'SYSTEM OWNER test', now() + $7::int * interval '1 minute') RETURNING id`,
       [
-        GO,
+        nextGo(),
         outboxId,
         patch.oa ?? OA,
         pilotFingerprint(patch.oa ?? OA, patch.recipient ?? PILOT),
@@ -466,7 +469,7 @@ suite('single dispatch guard — PostgreSQL thật (G8 C2)', () => {
       `INSERT INTO "recruitment_outbound_dispatch_grants" (go_code, outbox_id, channel_account_id, recipient_fingerprint,
          approved_text_sha256, approved_control_version, created_by, created_at, expires_at)
        VALUES ($1, $2, $3, $4, $5, 3, 'SYSTEM OWNER test', now() - interval '40 minutes', now() - interval '10 minutes')`,
-      [GO, id2, OA, pilotFingerprint(OA, PILOT), sha(TEXT)],
+      [nextGo(), id2, OA, pilotFingerprint(OA, PILOT), sha(TEXT)],
     );
     expect(await attempt(q, 'l2')).toMatchObject({ claimed: null });
     const forced2 = await forceClaim(id2, 'force2');
@@ -584,7 +587,7 @@ suite('single dispatch guard — PostgreSQL thật (G8 C2)', () => {
         `INSERT INTO "recruitment_outbound_dispatch_grants" (go_code, outbox_id, channel_account_id, recipient_fingerprint,
            approved_text_sha256, approved_control_version, created_by, expires_at)
          VALUES ($1, $2, $3, $4, $5, 3, 'app', now() + interval '10 minutes')`,
-        [GO, id, OA, pilotFingerprint(OA, PILOT), sha(TEXT)],
+        [nextGo(), id, OA, pilotFingerprint(OA, PILOT), sha(TEXT)],
       ),
     ).rejects.toThrow(/permission denied/);
     await expect(
