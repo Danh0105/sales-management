@@ -97,7 +97,7 @@ runuser -u postgres -- psql -XAt -d sales_db -c "select count(*) from recruitmen
 |---|---|---|---|
 | C0 | `python3 -I g8-owner-go.py approve c0` | `./activate-g8.sh c0 --go <mã C0>` | HR: Vận hành → Dừng khẩn **Gửi Zalo**; `./g8-health.sh` |
 | C1 | `python3 -I g8-owner-go.py approve c1` (OpenAI + pilot) | `./activate-g8.sh c1 --go <mã C1>` | tài khoản pilot nhắn 1 tin → HR thấy 1 bản nháp ở **Duyệt tin AI**, Zalo 0 tin |
-| C2 | `python3 -I g8-owner-go.py approve c2` (OpenAI + pilot) | `./activate-g8.sh c2 --go <mã C2>` | HR duyệt đúng 1 bản nháp → Owner `python3 -I g8-owner-go.py grant-dispatch <mã C2> <outbox_id>` → HR mở lại **Gửi Zalo** → đúng 1 dispatch tới tài khoản pilot |
+| C2 | `python3 -I g8-owner-go.py approve c2` (OpenAI + pilot) — GO C2 **chỉ kích hoạt**, không cấp quyền gửi | `./activate-g8.sh c2 --go <mã C2>` | HR duyệt đúng 1 bản nháp → Owner `python3 -I g8-owner-go.py approve c2s <outbox_id>` (GO C2S gắn đúng tin đó) → `python3 -I g8-owner-go.py grant-dispatch <mã C2S> <outbox_id>` → HR mở lại **Gửi Zalo** → đúng 1 dispatch tới tài khoản pilot |
 
 C2 bật OUTBOUND env **trước** khi HR duyệt (Gửi Zalo vẫn đang dừng khẩn nên chưa gửi) để hạn 30 phút của bản duyệt không trôi
 trong lúc restart. Chưa `pm2 save` tới khi ổn định (reboot ⇒ 3010 về cấu hình tắt AI).
@@ -125,7 +125,25 @@ Không dựa vào việc HR bấm dừng khẩn sau khi gửi. Pilot mode bật 
   AI_REPLY, chưa dispatch); bản duyệt APPROVED còn ≥ 2 phút, khớp hash/OA/người nhận/version; hội thoại `AI_ACTIVE`; người nhận
   thuộc pilot; **Gửi Zalo đang dừng khẩn**; chưa có grant ACTIVE còn hạn. INSERT kiểm lại toàn bộ trong cùng transaction.
 
-**Triển khai (cần duyệt riêng):** (1) `runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db -f production/sql/g8-dispatch-guard-up.sql`
+**Hai GO tách biệt (C2S, migration `1793100000000`):**
+
+- **GO C2** (`approve c2`): CHỈ cho `activate-g8.sh c2`, một lần (VALID → USED). Không cấp được grant.
+- **GO C2S** (`approve c2s <outbox_id>`, tạo SAU khi HR duyệt): gắn đúng outbox + OA + fingerprint pilot + sha256 nội dung
+  + version điều khiển + version bản duyệt HR; hạn = min(hạn bản duyệt, 30 phút); chỉ tạo khi điều kiện grant đã đạt (hàng
+  đợi đúng 1 dòng là tin đó, Gửi Zalo đang dừng khẩn, bản duyệt còn ≥ 2 phút…). `grant-dispatch` CHỈ nhận GO C2S VALID,
+  đúng outbox đã gắn, so lại mọi trường đã gắn (đổi nội dung / người nhận / OA / version / bản duyệt bị sửa, thu hồi, hết hạn
+  ⇒ từ chối) và INSERT bằng chính các giá trị đã gắn, cùng transaction với audit.
+- Một GO C2S → tối đa một grant: DB `UQ_dispatch_grant_go` + trigger `TRG_dispatch_grant_c2s_only` (grant MỚI chỉ nhận mã
+  `G8-C2S-…`; grant cũ mã `G8-C2-…` giữ nguyên) + khoá file `go/.dispatch.lock`. Trạng thái GO C2S tính theo DB (đã có grant
+  mang mã ⇒ USED) nên crash giữa chừng không làm GO trở lại VALID.
+- Audit: `ledger.jsonl` + `activity_log` (`OWNER_GO_C2S_APPROVE`, `OWNER_DISPATCH_GRANT_CREATE`/`_REVOKE`,
+  `OWNER_GO_C2S_REVOKE`, `OWNER_DISPATCH_REJECT` kèm lý do) — chỉ ghi sha256 của mã GO, không ghi mã; nhật ký
+  `activate-g8.sh` ghi `go_fp` thay mã.
+- Triển khai C2S (cần duyệt riêng, không deploy backend — cổng gửi không đọc `go_code`): (1) `runuser -u postgres -- psql -X
+  -v ON_ERROR_STOP=1 -d sales_db -f production/sql/g8-dispatch-guard-c2s-up.sql` → (2) đưa nhánh `feat/g8-c2s` vào worktree
+  công cụ (`release/g8-p32`). Rollback: worktree về commit cũ + `…-c2s-down.sql` (tự chặn khi đã có grant C2S).
+
+**Triển khai guard (đã làm 17/10):** (1) `runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db -f production/sql/g8-dispatch-guard-up.sql`
 (tạo bảng rỗng — mã đang chạy bỏ qua bảng) → (2) `REL=…/g8-guard-<sha> EXPECT=<hash> ROLLBACK=…/g8-expiry-9fb92e7
 ROLLBACK_EXPECT=c54dd7e78ef6cdc1 ALLOW_C1=1 production/deploy-3010.sh`. Rollback ứng dụng không cần gỡ bảng; gỡ bảng
 (`…-down.sql`) tự chặn khi đã có grant được tiêu.

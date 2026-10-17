@@ -6,7 +6,8 @@
     python3 -I g8-owner-go.py revoke <mã>           # thu hồi một GO chưa dùng (Owner gõ trực tiếp)
     python3 -I g8-owner-go.py check <mã> <cổng>     # activate-g8.sh gọi: GO hợp lệ cho cổng → exit 0
     python3 -I g8-owner-go.py consume <mã> <cổng> [nhật ký]   # activate-g8.sh gọi sau khi mở cổng thành công
-    python3 -I g8-owner-go.py grant-dispatch <mã GO C2> <outbox_id>   # cấp ĐÚNG 1 lần dispatch cho 1 tin AI đã duyệt
+    python3 -I g8-owner-go.py approve c2s <outbox_id>                  # GO C2S: cho phép gửi ĐÚNG tin AI đã được HR duyệt
+    python3 -I g8-owner-go.py grant-dispatch <mã GO C2S> <outbox_id>   # dùng GO C2S (1 lần) → grant đúng 1 lần dispatch
     python3 -I g8-owner-go.py revoke-dispatch <grant_id>              # thu hồi grant chưa dùng
     python3 -I g8-owner-go.py list-dispatch                           # các grant dispatch
 
@@ -20,10 +21,16 @@ Nguyên tắc
 - Không thay cổng duyệt tin của HR: mọi tin AI gửi Zalo vẫn phải được Nhân sự duyệt trong kido-app.
 - Không in khoá / token: khoá OpenAI chỉ hiện dạng rút gọn như dashboard OpenAI (đầu…4 ký tự cuối) để đối chiếu.
 - Single dispatch guard (C2): sender chỉ gửi tin AI có grant trong `recruitment_outbound_dispatch_grants`. Grant do
-  Owner cấp ở đây (superuser postgres — app `sales_app` không có quyền INSERT), mỗi GO C2 một grant, gắn đúng 1
-  outbox, tiêu đúng 1 lần trong transaction ghi dispatch; chỉ cấp khi hàng đợi có ĐÚNG một dòng chưa xong là tin đó.
+  Owner cấp ở đây (superuser postgres — app `sales_app` không có quyền INSERT), tiêu đúng 1 lần trong transaction ghi
+  dispatch; chỉ cấp khi hàng đợi có ĐÚNG một dòng chưa xong là tin đó.
+- Hai GO tách biệt: GO C2 CHỈ để `activate-g8.sh c2` (không cấp grant); GO C2S (`approve c2s <outbox_id>`, tạo sau khi
+  HR duyệt) gắn đúng 1 outbox + OA + fingerprint pilot + sha256 nội dung + version điều khiển + version bản duyệt, hạn =
+  min(hạn bản duyệt, 30 phút), dùng đúng 1 lần cho `grant-dispatch`. Một GO C2S → tối đa một grant (DB
+  `UQ_dispatch_grant_go`); trạng thái GO C2S tính theo DB nên crash giữa chừng không làm GO trở lại VALID.
+- Không ghi mã GO vào log: sự kiện ledger mới và audit DB (`activity_log`) chỉ ghi sha256 của mã.
 """
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -39,7 +46,8 @@ CONF = "/opt/kido-recruiter-prod/3010-g8.env"
 GATEWAY_ENV = "/opt/kido-recruiter-prod/.env"
 VALID_HOURS = 12
 VN = dt.timezone(dt.timedelta(hours=7))
-CODE_RE = re.compile(r"^G8-C[012]-\d{8}-\d{6}-[0-9a-f]{4}$")
+CODE_RE = re.compile(r"^G8-(C[012]|C2S)-\d{8}-\d{6}-[0-9a-f]{4}$")
+C2S_MAX_MINUTES = 30
 LIMIT_KEYS = (
     "RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR", "RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY",
     "RECRUITMENT_AI_MAX_TURNS_PER_DAY", "RECRUITMENT_AI_DAILY_TOKEN_BUDGET",
@@ -51,8 +59,10 @@ SCOPE = {
           "trong DB). AI / WORKER / OUTBOUND vẫn false. Restart 3010 (gián đoạn ~10–20 giây).",
     "c1": "Bật AI + WORKER cho tài khoản pilot. Tin AI chỉ thành bản nháp chờ HR duyệt; OUTBOUND vẫn false. "
           "Bắt đầu phát sinh chi phí OpenAI. Restart 3010 (~10–20 giây).",
-    "c2": "Bật OUTBOUND + single dispatch guard: chỉ tin AI HR đã duyệt VÀ Owner cấp grant (grant-dispatch) mới "
-          "được gửi, đúng 1 lần, chỉ tới tài khoản pilot; tin HR / tin khác giữ chờ. Restart 3010 (~10–20 giây).",
+    "c2": "Bật OUTBOUND + single dispatch guard (KHÔNG cấp quyền gửi): chỉ tin AI HR đã duyệt và có grant từ một "
+          "GO C2S riêng mới được gửi, đúng 1 lần, chỉ tới pilot; tin HR / tin khác giữ chờ. Restart 3010 (~10–20 giây).",
+    "c2s": "Cho phép gửi ĐÚNG MỘT tin AI đã được HR duyệt (outbox cố định, nội dung/người nhận/OA/version cố định); "
+           "chỉ dùng 1 lần cho grant-dispatch, hết hạn cùng bản duyệt (tối đa 30 phút).",
 }
 
 
@@ -87,6 +97,16 @@ def ledger_events():
         return [json.loads(line) for line in f if line.strip()]
 
 
+def code_fp(code):
+    return hashlib.sha256((code or "").encode()).hexdigest()
+
+
+def events_for(code):
+    """Sự kiện của một GO: sự kiện cũ ghi mã thô, sự kiện mới chỉ ghi sha256 của mã."""
+    fp = code_fp(code)
+    return [e for e in ledger_events() if e.get("code") == code or e.get("code_fp") == fp]
+
+
 def append_ledger(event):
     fd = os.open(LEDGER, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf8") as f:
@@ -109,7 +129,7 @@ def status(code):
     record, err = load(code)
     if err:
         return None, "INVALID", err
-    events = [e for e in ledger_events() if e.get("code") == code]
+    events = events_for(code)
     approve = [e for e in events if e.get("event") == "approve"]
     if not approve or approve[0].get("sha256") != canonical(record):
         return record, "INVALID", "bản ghi không khớp ledger (bị sửa hoặc thiếu sự kiện approve)"
@@ -117,6 +137,9 @@ def status(code):
         return record, "REVOKED", "GO đã bị thu hồi"
     if any(e.get("event") == "consume" for e in events):
         return record, "USED", "GO đã dùng (mỗi GO chỉ dùng 1 lần)"
+    # GO C2S: DB là nguồn sự thật — đã có grant mang mã này thì GO đã dùng (kể cả khi chưa kịp ghi ledger).
+    if record.get("stage") == "c2s" and grant_count_for_go(code) > 0:
+        return record, "USED", "GO C2S đã dùng để cấp grant"
     if now() > dt.datetime.fromisoformat(record["expires_at"]):
         return record, "EXPIRED", f"GO hết hạn lúc {record['expires_at']}"
     return record, "VALID", ""
@@ -221,7 +244,7 @@ def approve(stage):
     fd = os.open(os.path.join(GO_DIR, code + ".json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf8") as f:
         json.dump(record, f, ensure_ascii=False, indent=2)
-    append_ledger({"event": "approve", "code": code, "stage": stage, "approver": owner,
+    append_ledger({"event": "approve", "code_fp": code_fp(code), "stage": stage, "approver": owner,
                    "at": at.isoformat(), "sha256": canonical(record)})
     print(f"\nĐÃ CẤP GO: {code}  (cổng {stage.upper()}, hết hạn {record['expires_at']}, dùng 1 lần)")
     print(f"Bản ghi: {GO_DIR}/{code}.json · ledger: {LEDGER}")
@@ -232,6 +255,7 @@ GRANT_TABLE = "recruitment_outbound_dispatch_grants"
 OA_ENV = "/root/recruitment-oa.env"
 UNFINISHED = "('AWAITING_APPROVAL', 'PENDING', 'SENDING', 'RETRY', 'UNKNOWN')"
 FP_SQL = "left(encode(sha256(convert_to(o.channel_account_id || ':' || o.external_recipient_id, 'UTF8')), 'hex'), 16)"
+LOCK_FILE = ".dispatch.lock"
 
 
 def psql(sql, **variables):
@@ -245,7 +269,51 @@ def psql(sql, **variables):
     return out.stdout.strip()
 
 
-def grant_preflight(outbox_id):
+def grant_count_for_go(code):
+    """Số grant mang mã GO này (DB là nguồn sự thật cho GO C2S)."""
+    out = psql(f"SELECT count(*) FROM {GRANT_TABLE} WHERE go_code = :'go'", go=code)
+    return int(out or "0")
+
+
+def dispatch_lock():
+    """Khoá loại trừ cho mọi thao tác cấp / dùng / thu hồi quyền gửi (hai tiến trình không chạy chồng)."""
+    os.makedirs(GO_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(GO_DIR, LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        die("đang có một thao tác cấp/dùng quyền gửi khác — thử lại sau")
+    return fd
+
+
+def db_audit(method, actor, context, success=True, sql_only=False):
+    """Audit vào activity_log (actorId -1, actor = Owner). Không ghi mã GO — chỉ sha256 trong context."""
+    sql = ('INSERT INTO activity_log ("actorId", "actorName", method, path, resource, "statusCode", success, context) '
+           "VALUES (-1, :'audit_actor', :'audit_method', '/recruitment-owner-go', 'recruitment-owner-go', "
+           ":audit_status, :audit_ok, :'audit_ctx'::jsonb);")
+    params = {"audit_actor": f"SYSTEM OWNER {actor} (g8-owner-go)", "audit_method": method,
+              "audit_status": 200 if success else 409, "audit_ok": "true" if success else "false",
+              "audit_ctx": json.dumps(context, ensure_ascii=False)}
+    if sql_only:
+        return sql, params
+    psql(sql, **params)
+
+
+def refuse(action, actor, outbox_id, problems, code=None):
+    """Từ chối có audit (ledger + activity_log) rồi dừng."""
+    ctx = {"action": action, "outboxId": outbox_id, "problems": problems[:12]}
+    if code:
+        ctx["goFp"] = code_fp(code)[:16]
+    append_ledger({"event": "reject", "action": action, "outbox_id": outbox_id, "problems": problems[:12],
+                   "code_fp": code_fp(code) if code else None, "by": actor, "at": now().isoformat()})
+    try:
+        db_audit("OWNER_DISPATCH_REJECT", actor, ctx, success=False)
+    finally:
+        die(f"không {action}:\n  - " + "\n  - ".join(problems))
+
+
+def dispatch_preflight(outbox_id):
     raw = psql(f"""
 SELECT json_build_object(
   'outbox', (SELECT json_build_object('id', o.id, 'source', o.source_type, 'status', o.status,
@@ -258,10 +326,12 @@ SELECT json_build_object(
      JOIN recruitment_messages m ON m.id = o.recruitment_message_id
      JOIN recruitment_conversations c ON c.id = m.conversation_id
      WHERE o.id = :outbox),
-  'approval', (SELECT json_build_object('state', a.state, 'sha', a.approved_text_sha256, 'oa', a.approved_oa_id,
-       'cv', a.approved_control_version, 'msg_ok', a.approved_message_id = o.recruitment_message_id,
+  'approval', (SELECT json_build_object('state', a.state, 'version', a.version, 'sha', a.approved_text_sha256,
+       'oa', a.approved_oa_id, 'cv', a.approved_control_version,
+       'msg_ok', a.approved_message_id = o.recruitment_message_id,
        'recipient_ok', a.approved_recipient_id = o.external_recipient_id,
        'expires', to_char(a.expires_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'HH24:MI:SS'),
+       'expires_iso', to_char(a.expires_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS"+07:00"'),
        'seconds_left', extract(epoch FROM a.expires_at - now())::int)
      FROM recruitment_outbox_approvals a JOIN recruitment_channel_outbox o ON o.id = a.outbox_id
      WHERE a.outbox_id = :outbox),
@@ -272,42 +342,28 @@ SELECT json_build_object(
   'prior_grants', (SELECT count(*) FROM {GRANT_TABLE} WHERE outbox_id = :outbox),
   'runtime', (SELECT json_build_object('outbound_halted', outbound_halted, 'failsafe', failsafe_halted)
      FROM recruitment_runtime_controls WHERE id = 1),
-  'guard_trigger', EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'TRG_dispatch_grant_guard' AND NOT tgisinternal)
+  'guard_trigger', EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'TRG_dispatch_grant_guard' AND NOT tgisinternal),
+  'c2s_trigger', EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'TRG_dispatch_grant_c2s_only' AND NOT tgisinternal)
 )""", outbox=outbox_id)
     return json.loads(raw)
 
 
-def grant_dispatch(code, outbox_arg):
-    require_owner_terminal()
-    if not re.fullmatch(r"[1-9]\d{0,9}", outbox_arg or ""):
-        die("outbox_id phải là số nguyên dương")
-    outbox_id = int(outbox_arg)
-    record, state, why = status(code)
-    if record is None or record.get("stage") != "c2":
-        die(f"cần mã GO C2 hợp lệ ({why or 'không phải cổng c2'})")
-    if state not in ("VALID", "USED") or now() > dt.datetime.fromisoformat(record["expires_at"]):
-        die(f"GO {code} không còn hiệu lực ({why or state})")
-    if any(e.get("event") == "grant" and e.get("code") == code for e in ledger_events()):
-        die(f"GO {code} đã dùng để cấp một grant — mỗi GO C2 chỉ cho đúng một lần dispatch")
-
-    conf = read_env(CONF)
-    pilots = [x.strip() for x in conf.get("RECRUITMENT_PILOT_SENDER_FINGERPRINTS", "").split(",") if x.strip()]
-    oa = read_env(OA_ENV).get("RECRUITMENT_ZALO_OA_ID", "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", oa):
-        die(f"không đọc được RECRUITMENT_ZALO_OA_ID trong {OA_ENV}")
-    pf = grant_preflight(outbox_id)
+def target_problems(pf, outbox_id, oa, pilots):
+    """Điều kiện chung cho cả `approve c2s` và `grant-dispatch` (đọc DB, chưa ghi gì)."""
     o, a = pf.get("outbox"), pf.get("approval")
     problems = []
     if not pf.get("guard_trigger"):
-        problems.append("chưa có migration single dispatch guard (trigger TRG_dispatch_grant_guard)")
+        problems.append("chưa có migration single dispatch guard (TRG_dispatch_grant_guard)")
+    if not pf.get("c2s_trigger"):
+        problems.append("chưa có migration GO C2S (TRG_dispatch_grant_c2s_only)")
     if not o:
         problems.append(f"không có outbox #{outbox_id} gắn với tin canonical")
     else:
-        if o["source"] != "AI_REPLY": problems.append(f"outbox là {o['source']}, chỉ cấp cho AI_REPLY")
+        if o["source"] != "AI_REPLY": problems.append(f"outbox là {o['source']}, chỉ cho AI_REPLY")
         if o["status"] != "PENDING": problems.append(f"outbox đang {o['status']} (cần PENDING sau khi HR duyệt)")
         if o["dispatched"]: problems.append("outbox đã có dispatched_at")
         if o["oa"] != oa: problems.append("OA của tin khác OA tuyển dụng đang cấu hình")
-        if o["fp"] not in pilots: problems.append(f"người nhận {o['fp']} không thuộc pilot {pilots}")
+        if o["fp"] not in pilots: problems.append(f"người nhận {o['fp']} không thuộc pilot")
         if not (o["text_sha"] == o["msg_sha"] == (a or {}).get("sha")): problems.append("nội dung / hash không khớp bản đã duyệt")
         if o["conv_mode"] != "AI_ACTIVE": problems.append(f"hội thoại đang {o['conv_mode']}")
         if not (o["cv"] == o["conv_cv"] == (a or {}).get("cv")): problems.append("version điều khiển hội thoại đã đổi")
@@ -322,20 +378,139 @@ def grant_dispatch(code, outbox_arg):
     live = [g for g in pf["active_grants"] if g["live"]]
     if live: problems.append(f"đang có grant ACTIVE còn hạn: {live}")
     if not (pf.get("runtime") or {}).get("outbound_halted"):
-        problems.append("Gửi Zalo đang MỞ — cấp grant khi còn dừng khẩn, rồi HR mới mở lại")
+        problems.append("Gửi Zalo đang MỞ — chỉ cấp quyền gửi khi còn dừng khẩn, rồi HR mới mở lại")
+    return problems
 
-    print(f"\n=== GRANT DISPATCH — outbox #{outbox_id} · GO {code} ===")
+
+def dispatch_context():
+    conf = read_env(CONF)
+    pilots = [x.strip() for x in conf.get("RECRUITMENT_PILOT_SENDER_FINGERPRINTS", "").split(",") if x.strip()]
+    oa = read_env(OA_ENV).get("RECRUITMENT_ZALO_OA_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", oa):
+        die(f"không đọc được RECRUITMENT_ZALO_OA_ID trong {OA_ENV}")
+    if conf.get("RECRUITMENT_PILOT_MODE") != "true" or not pilots:
+        die(f"{CONF}: pilot chưa bật hoặc chưa có fingerprint")
+    return oa, pilots
+
+
+def parse_id(arg, label):
+    if not re.fullmatch(r"[1-9]\d{0,9}", arg or ""):
+        die(f"{label} phải là số nguyên dương")
+    return int(arg)
+
+
+def print_target(pf, outbox_id):
+    o, a = pf.get("outbox"), pf.get("approval")
     if o:
-        print(f"Tin: {o['source']} · {o['status']} · {o['text_len']} ký tự · sha {o['text_sha'][:12]}… · người nhận fp {o['fp']} · version {o['cv']}")
+        print(f"Tin: {o['source']} · {o['status']} · {o['text_len']} ký tự · sha {o['text_sha'][:12]}… · "
+              f"người nhận fp {o['fp']} · version {o['cv']}")
     if a:
-        print(f"Bản duyệt HR: {a['state']} · hết hạn {a['expires']} (còn {a['seconds_left']} giây)")
+        print(f"Bản duyệt HR: {a['state']} v{a['version']} · hết hạn {a['expires']} (còn {a['seconds_left']} giây)")
     print(f"Hàng đợi chưa xong: {pf['unfinished']} · grant ACTIVE: {pf['active_grants']} · runtime: {pf.get('runtime')}")
-    if problems:
-        die("không cấp grant:\n  - " + "\n  - ".join(problems))
 
-    owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên đầy đủ")
-    ask(f"Gõ CHO PHEP GUI {outbox_id} để cấp đúng 1 lần dispatch cho tin này: ",
-        lambda v: v == f"CHO PHEP GUI {outbox_id}", f"phải gõ đúng: CHO PHEP GUI {outbox_id}")
+
+def approve_c2s(outbox_arg):
+    """GO C2S: Owner cho phép gửi đúng một tin AI đã được HR duyệt — gắn cố định outbox / nội dung / người nhận."""
+    require_owner_terminal()
+    outbox_id = parse_id(outbox_arg, "outbox_id")
+    oa, pilots = dispatch_context()
+    lock = dispatch_lock()
+    try:
+        pf = dispatch_preflight(outbox_id)
+        print(f"\n=== G8 OWNER APPROVAL — GO C2S (gửi 1 tin) · outbox #{outbox_id} ===")
+        print(f"Phạm vi: {SCOPE['c2s']}")
+        print_target(pf, outbox_id)
+        owner = ask("\nHọ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên đầy đủ")
+        problems = target_problems(pf, outbox_id, oa, pilots)
+        if problems:
+            refuse("approve-c2s", owner, outbox_id, problems)
+        o, a = pf["outbox"], pf["approval"]
+        ask(f"  Gõ 4 ký tự cuối fingerprint người nhận ({o['fp']}) để xác nhận đúng tài khoản pilot: ",
+            lambda v: v == o["fp"][-4:], "không khớp fingerprint")
+        ask(f"Gõ TOI PHE DUYET GUI {outbox_id} để cấp GO C2S: ", lambda v: v == f"TOI PHE DUYET GUI {outbox_id}",
+            f"phải gõ đúng: TOI PHE DUYET GUI {outbox_id}")
+        at = now()
+        approval_expires = dt.datetime.fromisoformat(a["expires_iso"])
+        expires = min(approval_expires, at + dt.timedelta(minutes=C2S_MAX_MINUTES))
+        code = f"G8-C2S-{at:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+        record = {
+            "code": code, "stage": "c2s", "scope": SCOPE["c2s"],
+            "approver_role": "SYSTEM_OWNER", "approver_name": owner,
+            "approved_at": at.isoformat(), "expires_at": expires.isoformat(),
+            "single_use": True, "max_real_messages": 1,
+            "dispatch": {"outbox_id": outbox_id, "oa": o["oa"], "recipient_fingerprint": o["fp"],
+                         "approved_text_sha256": o["text_sha"], "control_version": o["cv"],
+                         "approval_version": a["version"], "approval_expires_at": a["expires_iso"]},
+            "host": socket.gethostname(), "tty": os.ttyname(0),
+            "login": os.environ.get("SUDO_USER") or os.environ.get("LOGNAME") or "root",
+        }
+        fd = os.open(os.path.join(GO_DIR, code + ".json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        append_ledger({"event": "approve", "code_fp": code_fp(code), "stage": "c2s", "approver": owner,
+                       "outbox_id": outbox_id, "at": at.isoformat(), "sha256": canonical(record)})
+        db_audit("OWNER_GO_C2S_APPROVE", owner, {"goFp": code_fp(code)[:16], "outboxId": outbox_id,
+                                                  "expiresAt": expires.isoformat(), "approvalVersion": a["version"]})
+    finally:
+        os.close(lock)
+    print(f"\nĐÃ CẤP GO C2S: {code}  (outbox #{outbox_id}, hết hạn {expires.isoformat()}, dùng 1 lần)")
+    print(f"Cấp grant: python3 -I g8-owner-go.py grant-dispatch {code} {outbox_id}")
+
+
+def grant_dispatch(code, outbox_arg):
+    """Dùng GO C2S (VALID, đúng 1 lần) để cấp grant đúng 1 lần dispatch cho đúng outbox đã gắn."""
+    require_owner_terminal()
+    outbox_id = parse_id(outbox_arg, "outbox_id")
+    oa, pilots = dispatch_context()
+    lock = dispatch_lock()
+    try:
+        record, state, why = status(code)
+        owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên đầy đủ")
+        if record is None or record.get("stage") != "c2s":
+            refuse("grant-dispatch", owner, outbox_id,
+                   [f"chỉ GO C2S cấp được grant (mã này: {(record or {}).get('stage') or why})"], code)
+        if state != "VALID":
+            refuse("grant-dispatch", owner, outbox_id, [f"GO C2S không còn hiệu lực ({why or state})"], code)
+        bound = record["dispatch"]
+        problems = []
+        if bound["outbox_id"] != outbox_id:
+            problems.append(f"GO C2S gắn với outbox #{bound['outbox_id']}, không phải #{outbox_id}")
+        pf = dispatch_preflight(outbox_id)
+        print(f"\n=== GRANT DISPATCH — outbox #{outbox_id} · GO C2S fp {code_fp(code)[:12]} ===")
+        print_target(pf, outbox_id)
+        problems += target_problems(pf, outbox_id, oa, pilots)
+        o, a = pf.get("outbox") or {}, pf.get("approval") or {}
+        for label, current, expected in (("OA", o.get("oa"), bound["oa"]),
+                                         ("người nhận", o.get("fp"), bound["recipient_fingerprint"]),
+                                         ("nội dung (sha256)", o.get("text_sha"), bound["approved_text_sha256"]),
+                                         ("version điều khiển", o.get("cv"), bound["control_version"]),
+                                         ("version bản duyệt", a.get("version"), bound["approval_version"])):
+            if current != expected:
+                problems.append(f"{label} đã đổi so với lúc Owner cấp GO C2S")
+        if problems:
+            refuse("grant-dispatch", owner, outbox_id, problems, code)
+        ask(f"Gõ CHO PHEP GUI {outbox_id} để dùng GO C2S cấp đúng 1 lần dispatch: ",
+            lambda v: v == f"CHO PHEP GUI {outbox_id}", f"phải gõ đúng: CHO PHEP GUI {outbox_id}")
+        grant_id, expires = insert_grant(code, record, owner)
+        if grant_id is None:
+            refuse("grant-dispatch", owner, outbox_id,
+                   ["điều kiện đổi trong lúc xác nhận hoặc GO đã được dùng — đã rollback, không tạo grant"], code)
+        # DB đã commit grant (nguồn sự thật cho trạng thái GO C2S); ledger ghi sau.
+        append_ledger({"event": "consume", "code_fp": code_fp(code), "stage": "c2s", "at": now().isoformat(),
+                       "grant_id": grant_id})
+        append_ledger({"event": "grant", "code_fp": code_fp(code), "outbox_id": outbox_id, "grant_id": grant_id,
+                       "by": owner, "at": now().isoformat(), "expires": expires})
+    finally:
+        os.close(lock)
+    print(f"\nĐÃ CẤP GRANT #{grant_id} cho outbox #{outbox_id} — đúng 1 lần dispatch, hết hạn {expires}. GO C2S đã dùng.")
+    print("Bước tiếp: HR mở lại \"Gửi Zalo\" → sender gửi đúng tin này; mọi tin khác giữ chờ.")
+
+
+def insert_grant(code, record, owner):
+    """Một transaction: kiểm lại MỌI trường đã gắn trong GO C2S + bản duyệt còn hạn → grant + audit, hoặc rollback."""
+    b = record["dispatch"]
+    audit_sql, audit_params = db_audit("OWNER_DISPATCH_GRANT_CREATE", owner,
+                                       {"goFp": code_fp(code)[:16], "outboxId": b["outbox_id"]}, sql_only=True)
     out = psql(f"""
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('{GRANT_TABLE}'));
@@ -349,51 +524,68 @@ WITH target AS (
   JOIN recruitment_messages m ON m.id = o.recruitment_message_id
   JOIN recruitment_conversations c ON c.id = m.conversation_id
   WHERE o.id = :outbox AND o.source_type = 'AI_REPLY' AND o.status = 'PENDING' AND o.dispatched_at IS NULL
-    AND o.channel_account_id = :'oa' AND {FP_SQL} = :'fp'
-    AND a.state = 'APPROVED' AND a.expires_at > now() + interval '2 minutes'
+    AND o.channel_account_id = :'oa' AND {FP_SQL} = :'fp' AND o.control_version = :cv
+    AND a.state = 'APPROVED' AND a.version = :av AND a.expires_at > now() + interval '2 minutes'
     AND a.approved_oa_id = o.channel_account_id AND a.approved_recipient_id = o.external_recipient_id
     AND a.approved_message_id = o.recruitment_message_id AND a.approved_control_version = o.control_version
+    AND a.approved_text_sha256 = :'sha'
     AND c.control_mode = 'AI_ACTIVE' AND c.control_version = o.control_version
     AND m.content = o.message_text
-    AND a.approved_text_sha256 = encode(sha256(convert_to(m.content, 'UTF8')), 'hex')
+    AND encode(sha256(convert_to(m.content, 'UTF8')), 'hex') = :'sha'
     AND NOT EXISTS (SELECT 1 FROM recruitment_channel_outbox x WHERE x.id <> o.id AND x.status IN {UNFINISHED})
+    AND NOT EXISTS (SELECT 1 FROM {GRANT_TABLE} g WHERE g.go_code = :'go')
   FOR UPDATE OF o, a
 )
 INSERT INTO {GRANT_TABLE} (go_code, outbox_id, channel_account_id, recipient_fingerprint, approved_text_sha256,
                            approved_control_version, created_by, expires_at, reason)
-SELECT :'go', id, channel_account_id, fp, sha, cv, :'owner', least(expires_at, now() + interval '30 minutes'), 'G8 C2 owner grant'
+SELECT :'go', id, channel_account_id, fp, sha, cv, :'owner',
+       least(expires_at, :'go_expires'::timestamptz, now() + interval '{C2S_MAX_MINUTES} minutes'), 'G8 C2S owner grant'
 FROM target
 RETURNING id || '|' || to_char(expires_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'HH24:MI:SS');
-SELECT (count(*) = 1) AS ok FROM {GRANT_TABLE} WHERE outbox_id = :outbox AND status = 'ACTIVE' \\gset
+SELECT (count(*) = 1) AS ok FROM {GRANT_TABLE} WHERE go_code = :'go' AND outbox_id = :outbox AND status = 'ACTIVE' \\gset
 \\if :ok
+{audit_sql}
 COMMIT;
 \\else
 ROLLBACK;
 \\endif
-""", outbox=outbox_id, oa=oa, fp=(o or {}).get("fp", ""), go=code, owner=owner)
+""", outbox=b["outbox_id"], oa=b["oa"], fp=b["recipient_fingerprint"], cv=b["control_version"],
+         av=b["approval_version"], sha=b["approved_text_sha256"], go=code, owner=owner,
+         go_expires=record["expires_at"], **audit_params)
     rows = [line for line in out.splitlines() if "|" in line]
-    if len(rows) != 1:
-        die("không cấp được grant (điều kiện đổi trong lúc xác nhận) — đã rollback")
+    if len(rows) != 1 or grant_count_for_go(code) != 1:
+        return None, None
     grant_id, expires = rows[0].split("|", 1)
-    append_ledger({"event": "grant", "code": code, "outbox_id": outbox_id, "grant_id": int(grant_id),
-                   "by": owner, "at": now().isoformat(), "expires": expires})
-    print(f"\nĐÃ CẤP GRANT #{grant_id} cho outbox #{outbox_id} — đúng 1 lần dispatch, hết hạn {expires}.")
-    print("Bước tiếp: HR mở lại \"Gửi Zalo\" → sender gửi đúng tin này; mọi tin khác giữ chờ.")
+    return int(grant_id), expires
 
 
 def revoke_dispatch(grant_arg):
     require_owner_terminal()
-    if not re.fullmatch(r"[1-9]\d{0,9}", grant_arg or ""):
-        die("grant_id phải là số nguyên dương")
-    owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên")
-    ask(f"Gõ THU HOI GRANT {grant_arg} để xác nhận: ", lambda v: v == f"THU HOI GRANT {grant_arg}",
-        f"phải gõ đúng: THU HOI GRANT {grant_arg}")
-    out = psql(f"""UPDATE {GRANT_TABLE} SET status = 'REVOKED', revoked_at = now(), revoked_by = :'owner', reason = 'OWNER_REVOKED'
- WHERE id = :gid AND status = 'ACTIVE' RETURNING id""", gid=int(grant_arg), owner=owner)
-    if not out:
-        die(f"grant #{grant_arg} không ở ACTIVE — không thu hồi")
-    append_ledger({"event": "revoke-dispatch", "grant_id": int(grant_arg), "by": owner, "at": now().isoformat()})
-    print(f"Đã thu hồi grant #{grant_arg}")
+    grant_id = parse_id(grant_arg, "grant_id")
+    lock = dispatch_lock()
+    try:
+        owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên")
+        ask(f"Gõ THU HOI GRANT {grant_id} để xác nhận: ", lambda v: v == f"THU HOI GRANT {grant_id}",
+            f"phải gõ đúng: THU HOI GRANT {grant_id}")
+        audit_sql, audit_params = db_audit("OWNER_DISPATCH_GRANT_REVOKE", owner, {"grantId": grant_id}, sql_only=True)
+        out = psql(f"""
+BEGIN;
+UPDATE {GRANT_TABLE} SET status = 'REVOKED', revoked_at = now(), revoked_by = :'owner', reason = 'OWNER_REVOKED'
+ WHERE id = :gid AND status = 'ACTIVE' RETURNING id;
+SELECT (count(*) = 1) AS ok FROM {GRANT_TABLE} WHERE id = :gid AND status = 'REVOKED' AND reason = 'OWNER_REVOKED' \\gset
+\\if :ok
+{audit_sql}
+COMMIT;
+\\else
+ROLLBACK;
+\\endif
+""", gid=grant_id, owner=owner, **audit_params)
+        if not out:
+            refuse("revoke-dispatch", owner, None, [f"grant #{grant_id} không ở ACTIVE — không thu hồi"])
+        append_ledger({"event": "revoke-dispatch", "grant_id": grant_id, "by": owner, "at": now().isoformat()})
+    finally:
+        os.close(lock)
+    print(f"Đã thu hồi grant #{grant_id}")
 
 
 def list_dispatch():
@@ -402,7 +594,7 @@ def list_dispatch():
   || ' · hết hạn ' || to_char(expires_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI')
   || coalesce(' · tiêu ' || to_char(consumed_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI:SS'), '')
   || coalesce(' · thu hồi ' || to_char(revoked_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI'), '')
-  || ' · GO ' || go_code
+  || ' · GO fp ' || left(encode(sha256(convert_to(go_code, 'UTF8')), 'hex'), 12)
 FROM {GRANT_TABLE} ORDER BY id""")
     print(out or "Chưa có grant dispatch nào.")
 
@@ -414,30 +606,36 @@ def revoke(code):
         die(f"không thu hồi được: {why or state}")
     owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên")
     ask("Gõ THU HOI để xác nhận: ", lambda v: v == "THU HOI", "phải gõ đúng: THU HOI")
-    append_ledger({"event": "revoke", "code": code, "stage": record["stage"], "by": owner, "at": now().isoformat()})
-    print(f"Đã thu hồi {code}")
+    append_ledger({"event": "revoke", "code_fp": code_fp(code), "stage": record["stage"], "by": owner,
+                   "at": now().isoformat()})
+    if record["stage"] == "c2s":
+        db_audit("OWNER_GO_C2S_REVOKE", owner, {"goFp": code_fp(code)[:16],
+                                                 "outboxId": record["dispatch"]["outbox_id"]})
+    print(f"Đã thu hồi GO fp {code_fp(code)[:12]}")
 
 
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else ""
-    if cmd == "approve" and len(args) == 2 and args[1] in SCOPE:
+    if cmd == "approve" and len(args) == 2 and args[1] in ("c0", "c1", "c2"):
         approve(args[1])
+    elif cmd == "approve" and len(args) == 3 and args[1] == "c2s":
+        approve_c2s(args[2])
     elif cmd == "check" and len(args) == 3:
         record, state, why = status(args[1])
         if state != "VALID":
             die(f"GO {args[1]}: {why}")
         if record["stage"] != args[2]:
             die(f"GO {args[1]} cấp cho cổng {record['stage']}, không phải {args[2]}")
-        print(f"  GO hợp lệ: {args[1]} · cổng {record['stage']} · Owner {record['approver_name']} · "
+        print(f"  GO hợp lệ: fp {code_fp(args[1])[:12]} · cổng {record['stage']} · Owner {record['approver_name']} · "
               f"duyệt {record['approved_at']} · hết hạn {record['expires_at']}")
     elif cmd == "consume" and len(args) in (3, 4):
         record, state, why = status(args[1])
-        if state != "VALID" or record["stage"] != args[2]:
-            die(f"không đánh dấu được GO {args[1]}: {why or 'sai cổng'}")
-        append_ledger({"event": "consume", "code": args[1], "stage": args[2], "at": now().isoformat(),
+        if state != "VALID" or record["stage"] != args[2] or args[2] == "c2s":
+            die(f"không đánh dấu được GO fp {code_fp(args[1])[:12]}: {why or 'sai cổng'}")
+        append_ledger({"event": "consume", "code_fp": code_fp(args[1]), "stage": args[2], "at": now().isoformat(),
                        "log": args[3] if len(args) == 4 else None})
-        print(f"  GO {args[1]} đã ghi nhận là đã dùng")
+        print(f"  GO fp {code_fp(args[1])[:12]} đã ghi nhận là đã dùng")
     elif cmd == "revoke" and len(args) == 2:
         revoke(args[1])
     elif cmd == "grant-dispatch" and len(args) == 3:
@@ -447,7 +645,8 @@ def main():
     elif cmd == "list-dispatch" and len(args) == 1:
         list_dispatch()
     elif cmd == "list" and len(args) == 1:
-        codes = sorted({e["code"] for e in ledger_events() if e.get("event") == "approve"})
+        codes = sorted(f[:-5] for f in os.listdir(GO_DIR) if CODE_RE.match(f[:-5]) and f.endswith(".json")) \
+            if os.path.isdir(GO_DIR) else []
         if not codes:
             print("Chưa có GO nào.")
         for code in codes:

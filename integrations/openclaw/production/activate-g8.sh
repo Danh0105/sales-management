@@ -35,6 +35,8 @@ oa_credentials() { runuser -u postgres -- psql -XAt -d sales_db -c "select count
 
 case "$STAGE" in c0|c1|c2|off) ;; *) die "cổng phải là c0 | c1 | c2 | off";; esac
 [ -n "$GO" ] || die "thiếu --go (mã GO của Owner, hoặc lý do khi tắt)"
+# Không ghi mã GO vào nhật ký: chỉ fingerprint sha256 (lý do tắt của `off` không phải mã GO, ghi nguyên).
+if [ "$STAGE" = off ]; then GO_LOG="reason=$GO"; else GO_LOG="go_fp=$(printf %s "$GO" | sha256sum | cut -c1-12)"; fi
 [ "$(id -u)" = 0 ] || die "cần root"
 [ "$(stat -c '%a %U' "$CONF")" = "600 root" ] || die "$CONF phải 600 root"
 
@@ -64,7 +66,7 @@ esac
 echo "  3010 release G8 · gateway OK · cờ hiện tại: AI=$(envflag RECRUITMENT_AI_ENABLED) WORKER=$(envflag RECRUITMENT_WORKER_ENABLED) OUTBOUND=$(envflag RECRUITMENT_ZALO_OUTBOUND_ENABLED)"
 
 if [ -z "$DRY" ]; then
-  read -r -p "GO '$GO' — gõ KICH HOAT $STAGE để tiếp tục: " ans
+  read -r -p "GO ($GO_LOG) — gõ KICH HOAT $STAGE để tiếp tục: " ans
   [ "$ans" = "KICH HOAT $STAGE" ] || die "đã huỷ"
 fi
 
@@ -77,7 +79,7 @@ case "$STAGE" in
   off) ARGS=(--set RECRUITMENT_AI_ENABLED=false --set RECRUITMENT_WORKER_ENABLED=false --set RECRUITMENT_ZALO_OUTBOUND_ENABLED=false) ;;
 esac
 umask 077
-{ echo "stage=$STAGE go=$GO at=$(date -Is) dry=${DRY:-no}"; node "$WRAP" --app "$APP" "${ARGS[@]}" $DRY; } 2>&1 | tee "$LOG"
+{ echo "stage=$STAGE $GO_LOG at=$(date -Is) dry=${DRY:-no}"; node "$WRAP" --app "$APP" "${ARGS[@]}" $DRY; } 2>&1 | tee "$LOG"
 [ -n "$DRY" ] && exit 0
 
 for _ in $(seq 1 30); do [ "$(code http://127.0.0.1:3010/recruitment/jobs)" = 401 ] && break; sleep 2; done
