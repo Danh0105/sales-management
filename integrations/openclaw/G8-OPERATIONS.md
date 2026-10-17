@@ -109,6 +109,8 @@ Gateway: `/opt/kido-recruiter-prod/.env` (`OPENAI_API_KEY` project riêng, `OPEN
 - [ ] `g8-owner-go.py approve c0` → `activate-g8.sh c0 --go <mã>` → HR dừng khẩn **Gửi Zalo** → `g8-health.sh`.
 - [ ] `g8-owner-go.py approve c1` (xác nhận project OpenAI + pilot) → `activate-g8.sh c1 --go <mã>` → tài khoản pilot nhắn 1 tin →
       bản nháp vào Chờ duyệt, Zalo 0 tin.
-- [ ] `g8-owner-go.py approve c2` → `activate-g8.sh c2 --go <mã>` → HR duyệt đúng 1 bản nháp → HR mở lại **Gửi Zalo** → đúng 1 tin
-      tới đúng tài khoản pilot.
+- [ ] Single dispatch guard: migration `production/sql/g8-dispatch-guard-up.sql` + deploy bản có guard (runbook §6).
+- [ ] `g8-owner-go.py approve c2` → `activate-g8.sh c2 --go <mã>` → HR duyệt đúng 1 bản nháp → Owner
+      `g8-owner-go.py grant-dispatch <mã C2> <outbox_id>` → HR mở lại **Gửi Zalo** → đúng 1 dispatch tới đúng tài khoản pilot
+      (grant `CONSUMED`; mọi tin khác, kể cả tin HR viết tay, giữ chờ) → HR dừng khẩn lại **Gửi Zalo**.
 - [ ] Mở rộng pilot (C3, ≤ 5 ứng viên đã đồng ý) chỉ sau báo cáo ngày đầu và quyết định riêng của Owner.

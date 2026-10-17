@@ -4,7 +4,8 @@
 #
 #   activate-g8.sh c0  --go <mã GO C0> [--dry-run]   # nạp cấu hình gateway + pilot + trần + APP_SECRET; AI/WORKER/OUTBOUND = false
 #   activate-g8.sh c1  --go <mã GO C1> [--dry-run]   # AI + WORKER = true (tin AI chỉ tạo bản nháp chờ HR duyệt)
-#   activate-g8.sh c2  --go <mã GO C2> [--dry-run]   # OUTBOUND = true (chỉ tin HR đã duyệt mới được gửi)
+#   activate-g8.sh c2  --go <mã GO C2> [--dry-run]   # OUTBOUND = true + single dispatch guard: CHỈ tin có grant của Owner
+#                                                    # (g8-owner-go.py grant-dispatch) mới được gửi, đúng 1 lần
 #   activate-g8.sh off --go "<lý do>" [--dry-run]    # AI/WORKER/OUTBOUND = false bằng env + restart — KHÔNG cần GO
 #
 # Dừng khẩn thường ngày dùng giao diện (Vận hành → Dừng khẩn) hoặc API runtime-controls — có hiệu lực
@@ -53,6 +54,10 @@ case "$STAGE" in
   c1) [ "$(envflag RECRUITMENT_OPENCLAW_URL)" = "http://127.0.0.1:18790" ] || die "chưa qua c0"
       [ "$(envflag RECRUITMENT_PILOT_MODE)" = true ] || die "pilot chưa bật" ;;
   c2) [ "$(envflag RECRUITMENT_AI_ENABLED)" = true ] || die "chưa qua c1"
+      [ "$(runuser -u postgres -- psql -XAt -d sales_db -c "select count(*) from pg_trigger where tgname = 'TRG_dispatch_grant_guard' and not tgisinternal")" = 1 ] \
+        || die "chưa áp migration single dispatch guard (production/sql/g8-dispatch-guard-up.sql)"
+      grep -q recruitment_outbound_dispatch_grants /var/www/sales-management/dist/recruitment/channels/recruitment-channel-outbox.queue.js \
+        || die "3010 chưa chạy bản có single dispatch guard"
       [ "$(envhas RECRUITMENT_ZALO_APP_SECRET)" = yes ] || die "3010 chưa có RECRUITMENT_ZALO_APP_SECRET (chạy lại c0)"
       [ "$(oa_credentials)" -ge 1 ] || die "chưa có credential OA trong DB" ;;
 esac
@@ -68,7 +73,7 @@ case "$STAGE" in
   c0) KEYS=$(grep -oE '^[A-Z_]+=' "$CONF" | tr -d = | paste -sd,)
       ARGS=(--env-file "$CONF" --keys "$KEYS") ;;
   c1) ARGS=(--set RECRUITMENT_AI_ENABLED=true --set RECRUITMENT_WORKER_ENABLED=true) ;;
-  c2) ARGS=(--set RECRUITMENT_ZALO_OUTBOUND_ENABLED=true) ;;
+  c2) ARGS=(--set RECRUITMENT_ZALO_OUTBOUND_ENABLED=true --set RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true) ;;
   off) ARGS=(--set RECRUITMENT_AI_ENABLED=false --set RECRUITMENT_WORKER_ENABLED=false --set RECRUITMENT_ZALO_OUTBOUND_ENABLED=false) ;;
 esac
 umask 077
@@ -84,5 +89,12 @@ case "$STAGE" in
 esac
 [ "$FLAGS" = "$WANT" ] || die "cờ sau $STAGE là $FLAGS, mong đợi $WANT — xem $LOG (GO chưa bị đánh dấu đã dùng)"
 [ "$(code http://127.0.0.1:3010/recruitment/jobs)" = 401 ] || die "3010 chưa lên lại — xem pm2 logs (GO chưa bị đánh dấu đã dùng)"
+if [ "$STAGE" = c2 ]; then
+  SENDER=$(pm2 logs "$APP" --nostream --lines 400 2>/dev/null | grep -E "sender start|sender KHÔNG chạy" | tail -1)
+  case "$SENDER" in
+    *"dispatchGuard=on"*) echo "  sender: single dispatch guard BẬT" | tee -a "$LOG" ;;
+    *) die "sender không báo dispatchGuard=on (${SENDER:-không thấy dòng sender start}) — đặt lại OUTBOUND=false: ./activate-g8.sh off --go \"guard\"" ;;
+  esac
+fi
 [ "$STAGE" = off ] || $OWNER_GO consume "$GO" "$STAGE" "$LOG" | tee -a "$LOG"
 echo "Nhật ký: $LOG — nhớ 'pm2 save' (dump.pm2 phải 600) nếu muốn giữ qua reboot."

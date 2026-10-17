@@ -97,10 +97,38 @@ runuser -u postgres -- psql -XAt -d sales_db -c "select count(*) from recruitmen
 |---|---|---|---|
 | C0 | `python3 -I g8-owner-go.py approve c0` | `./activate-g8.sh c0 --go <mã C0>` | HR: Vận hành → Dừng khẩn **Gửi Zalo**; `./g8-health.sh` |
 | C1 | `python3 -I g8-owner-go.py approve c1` (OpenAI + pilot) | `./activate-g8.sh c1 --go <mã C1>` | tài khoản pilot nhắn 1 tin → HR thấy 1 bản nháp ở **Duyệt tin AI**, Zalo 0 tin |
-| C2 | `python3 -I g8-owner-go.py approve c2` (OpenAI + pilot) | `./activate-g8.sh c2 --go <mã C2>` | HR duyệt đúng 1 bản nháp → Mở lại **Gửi Zalo** → đúng 1 tin tới tài khoản pilot |
+| C2 | `python3 -I g8-owner-go.py approve c2` (OpenAI + pilot) | `./activate-g8.sh c2 --go <mã C2>` | HR duyệt đúng 1 bản nháp → Owner `python3 -I g8-owner-go.py grant-dispatch <mã C2> <outbox_id>` → HR mở lại **Gửi Zalo** → đúng 1 dispatch tới tài khoản pilot |
 
 C2 bật OUTBOUND env **trước** khi HR duyệt (Gửi Zalo vẫn đang dừng khẩn nên chưa gửi) để hạn 30 phút của bản duyệt không trôi
 trong lúc restart. Chưa `pm2 save` tới khi ổn định (reboot ⇒ 3010 về cấu hình tắt AI).
+
+### Single dispatch guard (bắt buộc trước C2)
+
+Không dựa vào việc HR bấm dừng khẩn sau khi gửi. Pilot mode bật ⇒ sender chỉ gửi tin có **grant dispatch** của Owner:
+
+- Bảng `recruitment_outbound_dispatch_grants` (migration `1793000000000`, production: `production/sql/g8-dispatch-guard-up.sql`,
+  rollback `…-down.sql`). Mỗi grant gắn **1 outbox AI**, ghi OA, fingerprint người nhận, sha256 nội dung đã duyệt, version điều
+  khiển, `max_dispatches = 1`, hạn ≤ 2 giờ (công cụ cấp ≤ 30 phút, không quá hạn bản duyệt). Unique theo outbox (không bao giờ cấp
+  lại), unique index chỉ 1 grant `ACTIVE` toàn hệ thống. Trigger một chiều: chỉ grant `ACTIVE` đổi được, không giảm số lần đã
+  dùng ("hoàn" hạn mức), phạm vi bất biến, không xoá grant đã tiêu — áp cả superuser. `sales_app` chỉ SELECT + UPDATE 4 cột tiêu
+  hạn mức, **không INSERT/DELETE** ⇒ ứng dụng không tự tạo / bổ sung hạn mức; chỉ Owner (postgres) qua `grant-dispatch`.
+- Claim: chỉ tin `AI_REPLY` có grant `ACTIVE` còn hạn. Cửa kiểm cuối: khoá advisory toàn cục + grant `FOR UPDATE`, kiểm khớp đầy
+  đủ (outbox, OA cấu hình, người nhận pilot, hash nội dung, version, hạn) cùng các kiểm sẵn có (dừng khẩn/failsafe, HR tiếp quản,
+  bản duyệt còn hạn + hash + người nhận), rồi ghi `dispatched_at` và tiêu grant **trong cùng transaction** — commit xong mới gọi
+  Zalo; tiêu không được ⇒ rollback cả hai. Không khớp ⇒ giữ chờ (`HELD`, `DISPATCH_GRANT_*`), không gọi mạng.
+- Sau khi tiêu: RETRY, gửi lại của vận hành (UNKNOWN → PENDING), restart, crash, redeploy đều không có grant ⇒ không dispatch.
+  Crash sau dispatch ⇒ `UNKNOWN` (không tự gửi lại). Ngoại lệ duy nhất: gửi lại MỘT lần trong cùng lease khi Zalo từ chối
+  token (lần đầu chắc chắn chưa tới) — grant ghi `consumed_lease_owner`, lease khác bị từ chối.
+- Guard bật mà thiếu bảng ⇒ sender không chạy (fail-closed). `activate-g8.sh c2` kiểm migration + bản build + log
+  `dispatchGuard=on`.
+- `grant-dispatch` chỉ cấp khi: GO C2 hợp lệ và chưa dùng để cấp grant; hàng đợi có ĐÚNG 1 dòng chưa xong là tin đó (PENDING,
+  AI_REPLY, chưa dispatch); bản duyệt APPROVED còn ≥ 2 phút, khớp hash/OA/người nhận/version; hội thoại `AI_ACTIVE`; người nhận
+  thuộc pilot; **Gửi Zalo đang dừng khẩn**; chưa có grant ACTIVE còn hạn. INSERT kiểm lại toàn bộ trong cùng transaction.
+
+**Triển khai (cần duyệt riêng):** (1) `runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db -f production/sql/g8-dispatch-guard-up.sql`
+(tạo bảng rỗng — mã đang chạy bỏ qua bảng) → (2) `REL=…/g8-guard-<sha> EXPECT=<hash> ROLLBACK=…/g8-expiry-9fb92e7
+ROLLBACK_EXPECT=c54dd7e78ef6cdc1 ALLOW_C1=1 production/deploy-3010.sh`. Rollback ứng dụng không cần gỡ bảng; gỡ bảng
+(`…-down.sql`) tự chặn khi đã có grant được tiêu.
 
 ### Kế hoạch canary
 
@@ -108,7 +136,7 @@ trong lúc restart. Chưa `pm2 save` tới khi ổn định (reboot ⇒ 3010 v�
 |---|---|---|
 | C0 cấu hình (AI vẫn tắt) | 3010 qua `p372b-pm2-env.js --keys`: `RECRUITMENT_OPENCLAW_URL=http://127.0.0.1:18790`, `RECRUITMENT_OPENCLAW_TOKEN`, `RECRUITMENT_CHANNEL_API_KEY` (từ `/opt/kido-recruiter-prod/.env`), `RECRUITMENT_AI_REQUIRE_SUBJECT=true`, `RECRUITMENT_PILOT_MODE=true`, `RECRUITMENT_PILOT_SENDER_FINGERPRINTS=86e5620e525bfe1a` (tài khoản nội bộ), trần: `…_MAX_TURNS_PER_SENDER_HOUR=6`, `…_PER_SENDER_DAY=15`, `…_MAX_TURNS_PER_DAY=25`, `…_TOKEN_RESERVATION_PER_TURN=200000`, `…_DAILY_TOKEN_BUDGET=5000000`, `…_MONTHLY_TOKEN_BUDGET=20000000`; HR dừng OUTBOUND (runtime) | boot sạch, `ai-usage` đúng trần, pilot 1 người |
 | C1 shadow | `RECRUITMENT_AI_ENABLED=true`, `RECRUITMENT_WORKER_ENABLED=true` (OUTBOUND env vẫn `false`); tài khoản nội bộ nhắn 1 tin | tin AI `AWAITING_APPROVAL`, không kết nối Zalo; usage/audit đúng; nội dung không lộ log |
-| C2 gửi 1 tin | HR duyệt bản nháp; `RECRUITMENT_ZALO_OUTBOUND_ENABLED=true`; HR mở OUTBOUND | đúng 1 tin tới đúng tài khoản nội bộ; audit duyệt + gửi |
+| C2 gửi 1 tin | HR duyệt bản nháp; `RECRUITMENT_ZALO_OUTBOUND_ENABLED=true` + single dispatch guard; Owner `grant-dispatch`; HR mở OUTBOUND | đúng 1 dispatch tới đúng tài khoản nội bộ; grant `CONSUMED`; audit duyệt + gửi |
 | C3 pilot | thêm ≤ 5 ứng viên đã đồng ý (fingerprint), khung giờ có HR trực | mỗi tin qua duyệt; báo cáo cuối ngày |
 
 Giới hạn gửi: mọi tin AI phải được HR duyệt (TTL 30 phút); tối đa 25 lượt AI/ngày toàn hệ thống, 6/giờ & 15/ngày mỗi người;
