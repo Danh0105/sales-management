@@ -239,3 +239,130 @@ describe('RecruitmentChannelOutboxQueue.dispatch — dừng khẩn + pilot (P3-7
     ).resolves.toEqual({ outcome: 'DISPATCHED' });
   });
 });
+
+describe('RecruitmentChannelOutboxQueue — single dispatch guard (G8 C2)', () => {
+  const guard = { oaId: 'oa-recruit' };
+  const sha = (t: string) =>
+    require('crypto').createHash('sha256').update(t, 'utf8').digest('hex');
+  const okGrant = {
+    id: 7,
+    status: 'ACTIVE',
+    dispatches_used: 0,
+    max_dispatches: 1,
+    channel_account_id: 'oa-recruit',
+    recipient_fingerprint: pilotFingerprint('oa-recruit', '8812345'),
+    approved_text_sha256: sha('Chào bạn'),
+    approved_control_version: 3,
+    consumed_lease_owner: null,
+    live: true,
+  };
+
+  function guardDb(grant: Record<string, unknown> | null, consumed = true) {
+    const calls: string[] = [];
+    const em = {
+      query: jest.fn((sql: string) => {
+        calls.push(sql);
+        if (/pg_try_advisory_xact_lock/.test(sql))
+          return Promise.resolve([{ locked: true }]);
+        if (/FROM "recruitment_runtime_controls"/.test(sql))
+          return Promise.resolve([
+            { outbound_halted: false, failsafe_halted: false },
+          ]);
+        if (/FROM "recruitment_conversations" c/.test(sql))
+          return Promise.resolve([
+            { id: 9, control_mode: 'AI_ACTIVE', control_version: 3 },
+          ]);
+        if (
+          /FROM "recruitment_outbound_dispatch_grants" WHERE outbox_id/.test(
+            sql,
+          )
+        )
+          return Promise.resolve(grant ? [grant] : []);
+        if (/UPDATE "recruitment_outbound_dispatch_grants"/.test(sql))
+          return Promise.resolve(consumed ? [[{ id: 7 }], 1] : [[], 0]);
+        if (/UPDATE "recruitment_channel_outbox"/.test(sql))
+          return Promise.resolve([[{ id: 21 }], 1]);
+        return Promise.resolve([[{ outbox_id: 21 }], 1]);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((fn: (e: typeof em) => unknown) => fn(em)),
+      query: jest.fn((sql: string) => {
+        calls.push(sql);
+        return Promise.resolve([]);
+      }),
+    };
+    const pilots = [pilotFingerprint('oa-recruit', '8812345')];
+    return {
+      queue: new RecruitmentChannelOutboxQueue(dataSource as any),
+      calls,
+      pilots,
+      index: (re: RegExp) => calls.findIndex((c) => re.test(c)),
+    };
+  }
+
+  it('claim: chỉ khi guard bật mới lọc theo grant ACTIVE + chỉ tin AI', async () => {
+    const off = guardDb(okGrant);
+    await off.queue.claimNext('oa-recruit', 'o1', 60_000, null);
+    expect(off.calls.join('\n')).not.toContain(
+      'recruitment_outbound_dispatch_grants',
+    );
+    const on = guardDb(okGrant);
+    on.queue['dataSource'].query = jest
+      .fn()
+      .mockResolvedValue([{ id: 21, recipient: '8812345' }]);
+    await on.queue.claimNext('oa-recruit', 'o1', 60_000, guard);
+    const claim = on.calls.find((c) =>
+      /UPDATE "recruitment_channel_outbox" t/.test(c),
+    )!;
+    expect(claim).toContain(`t.source_type = 'AI_REPLY' AND EXISTS`);
+    expect(claim).toMatch(
+      /g\.status = 'ACTIVE'\s+AND g\.dispatches_used < g\.max_dispatches AND g\.expires_at > now\(\)/,
+    );
+  });
+
+  it('dispatch: khoá advisory + grant FOR UPDATE TRƯỚC khi ghi dispatched_at, tiêu grant SAU, cùng transaction', async () => {
+    const db = guardDb(okGrant);
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, db.pilots, guard),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+    const lock = db.index(
+      /pg_advisory_xact_lock\(hashtext\('recruitment_outbound_dispatch_grants'\)\)/,
+    );
+    const select = db.index(
+      /FROM "recruitment_outbound_dispatch_grants" WHERE outbox_id = \$1 FOR UPDATE/,
+    );
+    const dispatched = db.index(/SET dispatched_at = now\(\)/);
+    const consume = db.index(/UPDATE "recruitment_outbound_dispatch_grants"/);
+    expect(lock).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(select);
+    expect(select).toBeLessThan(dispatched);
+    expect(dispatched).toBeLessThan(consume);
+  });
+
+  it('không có grant → HELD, không ghi dispatched_at, không tiêu', async () => {
+    const db = guardDb(null);
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, db.pilots, guard),
+    ).resolves.toEqual({ outcome: 'HELD', code: 'DISPATCH_GRANT_MISSING' });
+    expect(db.index(/SET dispatched_at = now\(\)/)).toBe(-1);
+    expect(db.index(/UPDATE "recruitment_outbound_dispatch_grants"/)).toBe(-1);
+  });
+
+  it('tiêu grant không thành → ném lỗi (rollback cả dispatched_at), không trả DISPATCHED', async () => {
+    const db = guardDb(okGrant, false);
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, db.pilots, guard),
+    ).rejects.toThrow('DISPATCH_GRANT_CONSUME_FAILED');
+  });
+
+  it('guard tắt → không đụng bảng grant (hành vi cũ)', async () => {
+    const db = guardDb(null);
+    await expect(
+      db.queue.dispatch(row(), 'o1', false, db.pilots, null),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+    expect(db.calls.join('\n')).not.toContain(
+      'recruitment_outbound_dispatch_grants',
+    );
+  });
+});

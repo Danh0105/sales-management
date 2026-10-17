@@ -115,3 +115,22 @@ describe('mã hoá token trong DB (AES-256-GCM)', () => {
     expect(() => read(stored)).toThrow();
   });
 });
+
+describe('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED (single dispatch guard)', () => {
+  const flag = (value: string | undefined) => {
+    const result = readZaloOutboundConfig(
+      get({ ...BASE, RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED: value }),
+    );
+    return 'config' in result
+      ? result.config.dispatchGrantRequired
+      : result.invalid;
+  };
+  it('mặc định tắt; "true" bật; "false" tắt', () => {
+    expect(flag(undefined)).toBe(false);
+    expect(flag('true')).toBe(true);
+    expect(flag('false')).toBe(false);
+  });
+  it('giá trị khác true/false → cấu hình không hợp lệ', () => {
+    expect(flag('yes')).toEqual(['RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED']);
+  });
+});

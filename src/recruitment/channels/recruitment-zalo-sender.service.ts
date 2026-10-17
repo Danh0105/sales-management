@@ -16,6 +16,7 @@ import {
   RecruitmentChannelOutboxQueue,
   type ClaimedOutbox,
   type DispatchGate,
+  type DispatchGuard,
 } from './recruitment-channel-outbox.queue';
 import { readAiSafetyConfig } from './recruitment-ai-safety.config';
 import { retryDelayMs } from './recruitment-channel-worker.config';
@@ -61,6 +62,10 @@ type Outcome =
  * - token hỏng → refresh (có khoá, một lần cho mọi sender) rồi gửi lại một lần;
  * - Zalo từ chối hẳn / dữ liệu sai → DEAD_LETTER;
  * - có thể đã tới Zalo (mất kết nối, hết giờ sau khi gửi) → UNKNOWN, không gửi lại.
+ *
+ * Single dispatch guard (G8 C2): bật khi pilot mode bật (không tắt được) hoặc
+ * `RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true` — chỉ tin AI có grant của SYSTEM OWNER
+ * mới được gửi, mỗi grant đúng một lần dispatch; thiếu bảng grant → sender không chạy.
  */
 @Injectable()
 export class RecruitmentZaloSender
@@ -71,6 +76,8 @@ export class RecruitmentZaloSender
   private readonly config: ZaloOutboundConfig | null;
   /** Fingerprint người nhận được phép khi pilot (`null` = không pilot). */
   private readonly pilotSenders: string[] | null;
+  /** Single dispatch guard — `null` = tắt (không pilot, không yêu cầu). */
+  private readonly guard: DispatchGuard | null;
   private lastHalted = false;
   private readonly senderId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
@@ -91,17 +98,43 @@ export class RecruitmentZaloSender
     this.config = 'config' in read ? read.config : null;
     const safety = readAiSafetyConfig(get);
     this.pilotSenders = 'config' in safety ? safety.config.pilotSenders : null;
+    this.guard =
+      this.config &&
+      (this.pilotSenders !== null || this.config.dispatchGrantRequired)
+        ? { oaId: this.config.oaId }
+        : null;
   }
 
   onApplicationBootstrap(): void {
     if (!this.enabled || !this.config) return;
     this.running = true;
-    this.logger.log(
-      `sender start id=${this.senderId} oa=${this.config.oaId} slots=${this.config.concurrency}`,
-    );
-    for (let slot = 0; slot < this.config.concurrency; slot++) {
-      this.loops.push(this.loop(slot, this.config));
+    this.loops.push(this.start(this.config));
+  }
+
+  private async start(config: ZaloOutboundConfig): Promise<void> {
+    if (this.guard) {
+      let ready = false;
+      try {
+        ready = await this.queue.dispatchGuardReady();
+      } catch (error) {
+        this.logger.error(`sender guard check error=${errorCode(error)}`);
+      }
+      if (!ready) {
+        this.running = false;
+        this.logger.error(
+          'sender KHÔNG chạy: single dispatch guard bật nhưng thiếu bảng recruitment_outbound_dispatch_grants',
+        );
+        return;
+      }
     }
+    this.logger.log(
+      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} dispatchGuard=${this.guard ? 'on' : 'off'}`,
+    );
+    const loops: Promise<void>[] = [];
+    for (let slot = 0; slot < config.concurrency; slot++) {
+      loops.push(this.loop(slot, config));
+    }
+    await Promise.allSettled(loops);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -126,6 +159,7 @@ export class RecruitmentZaloSender
           config.oaId,
           owner,
           config.leaseMs,
+          this.guard,
         );
         if (!row) {
           await sleep(config.pollMs + Math.floor(Math.random() * 200));
@@ -176,6 +210,7 @@ export class RecruitmentZaloSender
       owner,
       false,
       this.pilotSenders,
+      this.guard,
     );
     if (gate.outcome !== 'DISPATCHED') {
       return this.notDispatched(row, owner, config, gate, started);
@@ -208,6 +243,7 @@ export class RecruitmentZaloSender
           owner,
           true,
           this.pilotSenders,
+          this.guard,
         );
         if (again.outcome !== 'DISPATCHED') {
           return this.notDispatched(row, owner, config, again, started);
@@ -393,7 +429,9 @@ export class RecruitmentZaloSender
     switch (gate.outcome) {
       case 'HELD':
         this.logger.warn(
-          `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
+          gate.code
+            ? `sender outbox=${row.id} result=HELD code=${gate.code} (single dispatch guard) — giữ chờ, không mở kết nối`
+            : `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
         );
         return;
       case 'LOST':

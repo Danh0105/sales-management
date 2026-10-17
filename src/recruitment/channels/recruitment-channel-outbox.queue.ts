@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { createHash } from 'crypto';
+import { DataSource, type EntityManager } from 'typeorm';
 
 import { pilotFingerprint } from './recruitment-ai-safety.config';
 import { returnedRows } from './recruitment-channel-event.queue';
@@ -19,6 +20,20 @@ export interface ClaimedOutbox {
   controlVersion: number | null;
 }
 
+/** Bảng grant dispatch của SYSTEM OWNER (single dispatch guard, G8 C2). */
+export const DISPATCH_GRANT_TABLE = 'recruitment_outbound_dispatch_grants';
+
+/**
+ * Single dispatch guard (G8 C2): bật thì CHỈ tin AI có grant `ACTIVE` khớp (đúng outbox,
+ * OA, người nhận pilot, hash nội dung đã duyệt, version điều khiển) mới được claim và
+ * dispatch; grant tiêu đúng một lần trong CÙNG transaction ghi `dispatched_at`, trước
+ * khi mở kết nối. Tin HR, tin khác, retry sau khi đã tiêu grant → giữ chờ, không gửi.
+ */
+export interface DispatchGuard {
+  /** OA tuyển dụng đang cấu hình — grant và tin phải cùng OA này. */
+  oaId: string;
+}
+
 /** Kết quả cửa kiểm cuối trước khi mở kết nối. */
 export type DispatchGate =
   | { outcome: 'DISPATCHED' }
@@ -34,8 +49,11 @@ export type DispatchGate =
   | { outcome: 'INVALID'; code: string }
   /** Mất lease (sender khác đã lấy dòng) — không ghi gì. */
   | { outcome: 'LOST' }
-  /** Outbound đang dừng khẩn (hoặc không đọc được trạng thái) — trả về chờ, không mở kết nối. */
-  | { outcome: 'HELD' };
+  /**
+   * Trả về chờ, không mở kết nối: outbound đang dừng khẩn / không đọc được trạng thái
+   * (`code` trống), hoặc single dispatch guard không cho (`code` = `DISPATCH_GRANT_*`).
+   */
+  | { outcome: 'HELD'; code?: string };
 
 interface ClaimRow {
   id: number | string;
@@ -72,6 +90,7 @@ export class RecruitmentChannelOutboxQueue {
     oaId: string,
     owner: string,
     leaseMs: number,
+    guard: DispatchGuard | null = null,
   ): Promise<ClaimedOutbox | null> {
     const heads: Array<{ id: number; recipient: string }> =
       await this.dataSource.query(
@@ -91,7 +110,7 @@ export class RecruitmentChannelOutboxQueue {
         [oaId],
       );
     for (const head of heads) {
-      const claimed = await this.tryClaim(oaId, head, owner, leaseMs);
+      const claimed = await this.tryClaim(oaId, head, owner, leaseMs, guard);
       if (claimed) return claimed;
     }
     return null;
@@ -102,7 +121,16 @@ export class RecruitmentChannelOutboxQueue {
     head: { id: number; recipient: string },
     owner: string,
     leaseMs: number,
+    guard: DispatchGuard | null,
   ): Promise<ClaimedOutbox | null> {
+    // Guard bật: chỉ tin AI có grant ACTIVE còn hạn mới được claim (tin HR / tin không có
+    // grant đứng nguyên PENDING, không bị claim lặp). Cửa kiểm cuối vẫn kiểm lại đầy đủ.
+    const grantClause = guard
+      ? `AND t.source_type = 'AI_REPLY' AND EXISTS (
+               SELECT 1 FROM "${DISPATCH_GRANT_TABLE}" g
+               WHERE g.outbox_id = t.id AND g.status = 'ACTIVE'
+                 AND g.dispatches_used < g.max_dispatches AND g.expires_at > now())`
+      : '';
     return this.dataSource.transaction(async (em) => {
       const [lock]: Array<{ locked: boolean }> = await em.query(
         `SELECT pg_try_advisory_xact_lock(hashtext('recruitment_channel_outbox'), hashtext($1)) AS locked`,
@@ -138,6 +166,7 @@ export class RecruitmentChannelOutboxQueue {
               AND (t.status = 'PENDING'
                   OR (t.status = 'RETRY' AND t.next_attempt_at <= now())
                   OR (t.status = 'SENDING' AND t.lease_until < now() AND t.dispatched_at IS NULL))
+             ${grantClause}
              AND NOT EXISTS (
                SELECT 1 FROM "recruitment_channel_outbox" o
                WHERE o.channel = t.channel AND o.channel_account_id = t.channel_account_id
@@ -184,12 +213,18 @@ export class RecruitmentChannelOutboxQueue {
    * HR tiếp quản SAU khi transaction này commit → tin đã đi, không thu hồi được (thao
    * tác tiếp quản ghi lại các tin đó). `redispatch`: gửi lại ngay sau khi Zalo từ chối
    * token (lần trước chắc chắn chưa tới) — vẫn kiểm lại, vẫn chặn được.
+   *
+   * `guard` (single dispatch guard): grant được khoá `FOR UPDATE` dưới khoá advisory toàn
+   * cục, kiểm khớp, rồi tiêu trong cùng transaction với `dispatched_at` — commit xong mới
+   * mở kết nối; không tiêu được thì rollback cả hai. `redispatch` chỉ hợp lệ với grant
+   * vừa tiêu bởi đúng lease này (lần gửi đầu bị Zalo từ chối token, chắc chắn chưa tới).
    */
   async dispatch(
     row: ClaimedOutbox,
     owner: string,
     redispatch = false,
     pilotSenders: string[] | null = null,
+    guard: DispatchGuard | null = null,
   ): Promise<DispatchGate> {
     return this.dataSource.transaction(async (em) => {
       // Dừng khẩn outbound (P3-7.3 / G8): khoá chia sẻ dòng điều khiển — thao tác dừng
@@ -204,18 +239,7 @@ export class RecruitmentChannelOutboxQueue {
         runtime?.outbound_halted !== false ||
         runtime?.failsafe_halted !== false
       ) {
-        const held = returnedRows(
-          await em.query(
-            `UPDATE "recruitment_channel_outbox"
-             SET status = 'PENDING', attempt_count = greatest(attempt_count - 1, 0),
-                 dispatched_at = NULL, lease_until = NULL, lease_owner = NULL, updated_at = now()
-             WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
-               AND (dispatched_at IS NULL OR $3::boolean)
-             RETURNING id`,
-            [row.id, owner, redispatch],
-          ),
-        );
-        return held.length ? { outcome: 'HELD' } : { outcome: 'LOST' };
+        return this.hold(em, row, owner, redispatch);
       }
 
       const [control]: Array<{
@@ -292,6 +316,19 @@ export class RecruitmentChannelOutboxQueue {
             (approvalValid ? null : 'APPROVAL_INVALID'))
           : null;
       if (!code) {
+        const grant = guard
+          ? await this.checkGrant(
+              em,
+              row,
+              owner,
+              redispatch,
+              pilotSenders,
+              guard,
+            )
+          : null;
+        if (grant && 'denied' in grant) {
+          return this.hold(em, row, owner, redispatch, grant.denied);
+        }
         const dispatched = returnedRows(
           await em.query(
             `UPDATE "recruitment_channel_outbox" SET dispatched_at = now(), updated_at = now()
@@ -299,9 +336,26 @@ export class RecruitmentChannelOutboxQueue {
             [row.id, owner],
           ),
         );
-        return dispatched.length
-          ? { outcome: 'DISPATCHED' }
-          : { outcome: 'LOST' };
+        if (!dispatched.length) return { outcome: 'LOST' };
+        if (grant && 'consume' in grant) {
+          const used = returnedRows(
+            await em.query(
+              `UPDATE "${DISPATCH_GRANT_TABLE}"
+               SET dispatches_used = dispatches_used + 1,
+                   status = CASE WHEN dispatches_used + 1 >= max_dispatches THEN 'CONSUMED' ELSE status END,
+                   consumed_at = clock_timestamp(), consumed_lease_owner = $2
+               WHERE id = $1 AND status = 'ACTIVE' AND dispatches_used < max_dispatches
+                 AND expires_at > clock_timestamp()
+               RETURNING id`,
+              [grant.consume, owner],
+            ),
+          );
+          // Đã khoá FOR UPDATE và kiểm ở trên — không tiêu được là bất thường: ném lỗi để
+          // rollback cả `dispatched_at`, không mở kết nối.
+          if (used.length !== 1)
+            throw new Error('DISPATCH_GRANT_CONSUME_FAILED');
+        }
+        return { outcome: 'DISPATCHED' };
       }
 
       const suppressed = returnedRows(
@@ -338,6 +392,116 @@ export class RecruitmentChannelOutboxQueue {
         version: Number(control.control_version),
       };
     });
+  }
+
+  /** Trả dòng về PENDING (không tính lần thử), không mở kết nối. */
+  private async hold(
+    em: EntityManager,
+    row: ClaimedOutbox,
+    owner: string,
+    redispatch: boolean,
+    code?: string,
+  ): Promise<DispatchGate> {
+    const held = returnedRows(
+      await em.query(
+        `UPDATE "recruitment_channel_outbox"
+         SET status = 'PENDING', attempt_count = greatest(attempt_count - 1, 0),
+             dispatched_at = NULL, lease_until = NULL, lease_owner = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
+           AND (dispatched_at IS NULL OR $3::boolean)
+         RETURNING id`,
+        [row.id, owner, redispatch],
+      ),
+    );
+    if (!held.length) return { outcome: 'LOST' };
+    return code ? { outcome: 'HELD', code } : { outcome: 'HELD' };
+  }
+
+  /**
+   * Grant của đúng outbox này (khoá advisory toàn cục + `FOR UPDATE` — hai sender không
+   * cùng dùng một grant, không cùng dùng grant cuối). Trả `consume` (id grant sẽ tiêu),
+   * `redispatch` (grant đã tiêu bởi đúng lease này) hoặc `denied` (mã lý do).
+   */
+  private async checkGrant(
+    em: EntityManager,
+    row: ClaimedOutbox,
+    owner: string,
+    redispatch: boolean,
+    pilotSenders: string[] | null,
+    guard: DispatchGuard,
+  ): Promise<{ consume: number } | { redispatch: true } | { denied: string }> {
+    await em.query(
+      `SELECT pg_advisory_xact_lock(hashtext('${DISPATCH_GRANT_TABLE}'))`,
+    );
+    if (row.sourceType !== 'AI_REPLY')
+      return { denied: 'DISPATCH_GRANT_SOURCE' };
+    const [grant]: Array<{
+      id: number | string;
+      status: string;
+      dispatches_used: number | string;
+      max_dispatches: number | string;
+      channel_account_id: string;
+      recipient_fingerprint: string;
+      approved_text_sha256: string;
+      approved_control_version: number | string;
+      consumed_lease_owner: string | null;
+      live: boolean;
+    }> = await em.query(
+      `SELECT id, status, dispatches_used, max_dispatches, channel_account_id,
+              recipient_fingerprint, approved_text_sha256, approved_control_version,
+              consumed_lease_owner, expires_at > clock_timestamp() AS live
+       FROM "${DISPATCH_GRANT_TABLE}" WHERE outbox_id = $1 FOR UPDATE`,
+      [row.id],
+    );
+    if (!grant) return { denied: 'DISPATCH_GRANT_MISSING' };
+    const fingerprint = pilotFingerprint(
+      row.channelAccountId,
+      row.externalRecipientId,
+    );
+    if (
+      grant.channel_account_id !== row.channelAccountId ||
+      row.channelAccountId !== guard.oaId
+    ) {
+      return { denied: 'DISPATCH_GRANT_OA_MISMATCH' };
+    }
+    if (
+      grant.recipient_fingerprint !== fingerprint ||
+      (pilotSenders !== null && !pilotSenders.includes(fingerprint))
+    ) {
+      return { denied: 'DISPATCH_GRANT_RECIPIENT_MISMATCH' };
+    }
+    const textSha = createHash('sha256')
+      .update(row.messageText ?? '', 'utf8')
+      .digest('hex');
+    if (grant.approved_text_sha256 !== textSha) {
+      return { denied: 'DISPATCH_GRANT_TEXT_MISMATCH' };
+    }
+    if (
+      row.controlVersion === null ||
+      Number(grant.approved_control_version) !== row.controlVersion
+    ) {
+      return { denied: 'DISPATCH_GRANT_CONTROL_MISMATCH' };
+    }
+    if (redispatch) {
+      return grant.status === 'CONSUMED' && grant.consumed_lease_owner === owner
+        ? { redispatch: true }
+        : { denied: 'DISPATCH_GRANT_REDISPATCH_DENIED' };
+    }
+    if (grant.status !== 'ACTIVE')
+      return { denied: 'DISPATCH_GRANT_NOT_ACTIVE' };
+    if (grant.live !== true) return { denied: 'DISPATCH_GRANT_EXPIRED' };
+    if (Number(grant.dispatches_used) >= Number(grant.max_dispatches)) {
+      return { denied: 'DISPATCH_GRANT_EXHAUSTED' };
+    }
+    return { consume: Number(grant.id) };
+  }
+
+  /** Bảng grant đã có (guard bật mà thiếu bảng → sender không chạy, fail-closed). */
+  async dispatchGuardReady(): Promise<boolean> {
+    const [row]: Array<{ ready: boolean }> = await this.dataSource.query(
+      `SELECT to_regclass('public.${DISPATCH_GRANT_TABLE}') IS NOT NULL AS ready`,
+    );
+    return row?.ready === true;
   }
 
   async heartbeat(id: number, owner: string, leaseMs: number) {

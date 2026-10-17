@@ -82,6 +82,7 @@ function config(
     permanentErrors: new Set([-213]),
     tokenErrors: new Set([-216]),
     maxRejectAttempts: 3,
+    dispatchGrantRequired: false,
     ...patch,
   };
 }
@@ -101,7 +102,12 @@ function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
 }
 
 function setup(
-  opts: { enabled?: boolean; canonical?: Record<string, unknown> | null } = {},
+  opts: {
+    enabled?: boolean;
+    canonical?: Record<string, unknown> | null;
+    /** Env đầy đủ (ghi đè cách đọc mặc định chỉ có công tắc outbound). */
+    env?: Record<string, string>;
+  } = {},
 ) {
   const queue = {
     dispatch: jest
@@ -112,6 +118,10 @@ function setup(
     markRetry: jest.fn().mockResolvedValue(true),
     markUnknown: jest.fn().mockResolvedValue(true),
     markDeadLetter: jest.fn().mockResolvedValue(true),
+    claimNext: jest.fn().mockResolvedValue(null),
+    dispatchGuardReady: jest.fn().mockResolvedValue(true),
+    recoverDispatched: jest.fn().mockResolvedValue([]),
+    expireRetention: jest.fn().mockResolvedValue([]),
   };
   const credentials = {
     accessToken: jest.fn().mockResolvedValue({
@@ -145,9 +155,11 @@ function setup(
   const sender = new RecruitmentZaloSender(
     {
       get: (key: string) =>
-        key === 'RECRUITMENT_ZALO_OUTBOUND_ENABLED'
-          ? String(opts.enabled ?? true)
-          : undefined,
+        opts.env
+          ? opts.env[key]
+          : key === 'RECRUITMENT_ZALO_OUTBOUND_ENABLED'
+            ? String(opts.enabled ?? true)
+            : undefined,
     } as any,
     queue as any,
     credentials as any,
@@ -199,6 +211,7 @@ describe('RecruitmentZaloSender.process', () => {
       expect.objectContaining({ id: 21, controlVersion: 3 }),
       'o1',
       false,
+      null,
       null,
     );
     expect(queue.markSent).toHaveBeenCalledWith(21, 'o1', 'z-1');
@@ -662,5 +675,151 @@ describe('RecruitmentZaloCredentialStore.refresh', () => {
       ),
     ).toBeNull();
     expect(parseTokens(200, 'nope')).toBeNull();
+  });
+});
+
+describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
+  const OUTBOUND_ENV = {
+    RECRUITMENT_ZALO_OUTBOUND_ENABLED: 'true',
+    RECRUITMENT_ZALO_OA_ID: 'oa-recruit',
+    RECRUITMENT_ZALO_APP_ID: 'app123',
+    RECRUITMENT_ZALO_APP_SECRET: 'app-secret-0123456789abcdef',
+    RECRUITMENT_ZALO_TOKEN_KEY: KEY.toString('base64'),
+    RECRUITMENT_ZALO_SENDER_CONCURRENCY: '1',
+    RECRUITMENT_ZALO_SENDER_POLL_MS: '100',
+  };
+  const PILOT_ENV = {
+    ...OUTBOUND_ENV,
+    RECRUITMENT_PILOT_MODE: 'true',
+    RECRUITMENT_PILOT_SENDER_FINGERPRINTS: '86e5620e525bfe1a',
+  };
+  let logs: string[];
+
+  beforeEach(() => {
+    logs = [];
+    for (const level of ['log', 'warn', 'error'] as const) {
+      jest.spyOn(Logger.prototype, level).mockImplementation((m: unknown) => {
+        logs.push(String(m));
+      });
+    }
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  /** Chạy vòng sender một nhịp rồi tắt. */
+  async function boot(sender: RecruitmentZaloSender) {
+    sender.onApplicationBootstrap();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await sender.onModuleDestroy();
+  }
+
+  it('pilot mode bật → guard bật, kể cả khi RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=false; truyền guard vào claim', async () => {
+    const { sender, queue } = setup({
+      env: { ...PILOT_ENV, RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED: 'false' },
+    });
+    await boot(sender);
+    expect(queue.dispatchGuardReady).toHaveBeenCalled();
+    expect(queue.claimNext).toHaveBeenCalledWith(
+      'oa-recruit',
+      expect.any(String),
+      60_000,
+      { oaId: 'oa-recruit' },
+    );
+    expect(logs.join('\n')).toContain('dispatchGuard=on');
+  });
+
+  it('guard bật nhưng thiếu bảng grant → sender KHÔNG chạy (không claim, không gửi)', async () => {
+    const { sender, queue } = setup({ env: PILOT_ENV });
+    queue.dispatchGuardReady.mockResolvedValue(false);
+    await boot(sender);
+    expect(queue.claimNext).not.toHaveBeenCalled();
+    expect(logs.join('\n')).toContain('sender KHÔNG chạy');
+  });
+
+  it('không pilot, không yêu cầu → guard tắt (không kiểm bảng grant, claim không có guard)', async () => {
+    const { sender, queue } = setup({ env: OUTBOUND_ENV });
+    await boot(sender);
+    expect(queue.dispatchGuardReady).not.toHaveBeenCalled();
+    expect(queue.claimNext).toHaveBeenCalledWith(
+      'oa-recruit',
+      expect.any(String),
+      60_000,
+      null,
+    );
+  });
+
+  it('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true bật guard khi không pilot', async () => {
+    const { sender, queue } = setup({
+      env: {
+        ...OUTBOUND_ENV,
+        RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED: 'true',
+      },
+    });
+    await boot(sender);
+    expect(queue.claimNext).toHaveBeenCalledWith(
+      'oa-recruit',
+      expect.any(String),
+      60_000,
+      { oaId: 'oa-recruit' },
+    );
+  });
+
+  it('guard truyền vào cả hai lần dispatch (gửi lần đầu + gửi lại sau khi Zalo từ chối token)', async () => {
+    const zalo = await fakeZalo([
+      json({ error: -216, message: 'Access token is invalid' }),
+      json({ error: 0, message: 'Success', data: { message_id: 'z-2' } }),
+    ]);
+    try {
+      const { sender, queue } = setup({
+        env: { ...PILOT_ENV, RECRUITMENT_ZALO_API_URL: zalo.url },
+      });
+      await sender.process(row(), 'o1', config(zalo.url));
+      expect(queue.dispatch).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        'o1',
+        false,
+        expect.any(Array),
+        { oaId: 'oa-recruit' },
+      );
+      expect(queue.dispatch).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        'o1',
+        true,
+        expect.any(Array),
+        { oaId: 'oa-recruit' },
+      );
+      expect(zalo.requests).toHaveLength(2);
+    } finally {
+      await zalo.close();
+    }
+  });
+
+  it('cửa kiểm cuối giữ lại vì guard → không mở kết nối, không ghi kết quả, log có mã lý do', async () => {
+    const zalo = await fakeZalo([
+      json({ error: 0, data: { message_id: 'never' } }),
+    ]);
+    try {
+      const { sender, queue } = setup({ env: PILOT_ENV });
+      queue.dispatch.mockResolvedValue({
+        outcome: 'HELD',
+        code: 'DISPATCH_GRANT_MISSING',
+      });
+      await sender.process(row(), 'o1', config(zalo.url));
+      expect(zalo.requests).toHaveLength(0);
+      for (const m of [
+        'markSent',
+        'markRetry',
+        'markUnknown',
+        'markDeadLetter',
+      ] as const) {
+        expect(queue[m]).not.toHaveBeenCalled();
+      }
+      expect(logs.join('\n')).toContain(
+        'result=HELD code=DISPATCH_GRANT_MISSING',
+      );
+    } finally {
+      await zalo.close();
+    }
   });
 });

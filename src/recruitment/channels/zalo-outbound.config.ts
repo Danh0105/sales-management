@@ -33,6 +33,12 @@ export interface ZaloOutboundConfig {
   tokenErrors: ReadonlySet<number>;
   /** Zalo từ chối với mã chưa phân loại: thử lại tối đa chừng này lần rồi DEAD_LETTER. */
   maxRejectAttempts: number;
+  /**
+   * `RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true`: chỉ gửi tin có grant dispatch của
+   * SYSTEM OWNER (`recruitment_outbound_dispatch_grants`). Sender luôn bật khi pilot mode
+   * bật, kể cả khi biến này `false` — xem `RecruitmentZaloSender`.
+   */
+  dispatchGrantRequired: boolean;
 }
 
 export const ZALO_OUTBOUND_CONFIG_ERROR =
@@ -62,6 +68,11 @@ export function readZaloOutboundConfig(
       return fallback;
     }
     return value;
+  };
+  const flag = (key: string) => {
+    const raw = text(key);
+    if (raw && raw !== 'true' && raw !== 'false') invalid.push(key);
+    return raw === 'true';
   };
   const codes = (key: string, fallback: string) => {
     const raw = text(key, fallback);
@@ -127,6 +138,7 @@ export function readZaloOutboundConfig(
     permanentErrors: codes('RECRUITMENT_ZALO_PERMANENT_ERRORS', ''),
     tokenErrors: codes('RECRUITMENT_ZALO_TOKEN_ERRORS', '-216'),
     maxRejectAttempts: int('RECRUITMENT_ZALO_MAX_REJECT_ATTEMPTS', 3, 1, 20),
+    dispatchGrantRequired: flag('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED'),
   };
   if (config.retryMaxMs < config.retryBaseMs) {
     invalid.push('RECRUITMENT_ZALO_SENDER_RETRY_MAX_MS');
