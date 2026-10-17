@@ -18,5 +18,7 @@
   {"path": "tools.elevated.enabled", "value": false},
   {"path": "browser.enabled", "value": false},
   {"path": "plugins.entries.kido-recruitment.enabled", "value": true},
-  {"path": "plugins.entries.kido-recruitment.config", "value": {"baseUrl": "http://172.31.250.1:3010"}}
+  {"path": "plugins.entries.kido-recruitment.config", "value": {"baseUrl": "http://172.31.250.1:3010"}},
+  {"path": "agents.defaults.heartbeat.every", "value": "0m"},
+  {"path": "plugins.entries.memory-core.config.dreaming.enabled", "value": false}
 ]
