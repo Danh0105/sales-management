@@ -62,8 +62,6 @@ export type RecruitmentAuditAction =
   | 'CHANNEL_OUTBOX_UNKNOWN'
   /** Tin AI bị chặn trước khi gửi vì HR đã đổi điều khiển hội thoại (P3-6.5). */
   | 'CHANNEL_OUTBOX_SUPPRESSED'
-  /** Request outbound bị hoãn bởi quota/ngân sách production, chưa mở mạng. */
-  | 'CHANNEL_OUTBOX_DEFERRED'
   /** Tin HR chờ gửi quá TTL → không gửi nữa (DEAD_LETTER), HR được cảnh báo. */
   | 'CHANNEL_OUTBOX_HR_MESSAGE_EXPIRED'
   /** P3-7.2A — xác minh hồi tố request webhook đã cách ly (chỉ số lượng). */

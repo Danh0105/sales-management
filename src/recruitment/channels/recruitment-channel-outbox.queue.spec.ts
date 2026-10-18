@@ -512,22 +512,23 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     );
   });
 
-  it('chạm quota ứng viên/ngày → RETRY tới ngày sau, 0 request mạng', async () => {
-    const db = productionDb({ recipientDay: 5 });
-    await expect(
-      db.queue.dispatch(hr, 'owner-1', false, null, null, production),
-    ).resolves.toEqual({
-      outcome: 'DEFERRED',
-      code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
-      retryAt: new Date('2026-10-18T17:00:00.000Z'),
-    });
-    const [defer] = db.ran(/SET status = 'RETRY'/);
-    expect(defer.params[3]).toBe('OUTBOUND_RECIPIENT_DAILY_LIMIT');
-    expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
-    expect(db.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
-      0,
-    );
-  });
+  it.each([
+    ['ứng viên/ngày', { recipientDay: 5 }, 'OUTBOUND_RECIPIENT_DAILY_LIMIT'],
+    ['toàn hệ thống/ngày', { totalDay: 100 }, 'OUTBOUND_DAILY_LIMIT'],
+  ])(
+    'chạm quota %s → INVALID (kết thúc + cảnh báo), không hoãn sang ngày sau, 0 request mạng',
+    async (_n, patch, code) => {
+      const db = productionDb(patch);
+      await expect(
+        db.queue.dispatch(hr, 'owner-1', false, null, null, production),
+      ).resolves.toEqual({ outcome: 'INVALID', code });
+      expect(db.ran(/SET status = 'RETRY'/)).toHaveLength(0);
+      expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+      expect(
+        db.ran(/INSERT INTO "recruitment_outbound_attempts"/),
+      ).toHaveLength(0);
+    },
+  );
 
   it('tin ngoài cửa sổ miễn phí giữ chi phí ước tính và chặn khi hết ngân sách', async () => {
     const allowed = productionDb({ ageSeconds: 49 * 3600 });
@@ -542,10 +543,26 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     });
     await expect(
       blocked.queue.dispatch(hr, 'owner-1', false, null, null, production),
-    ).resolves.toMatchObject({
-      outcome: 'DEFERRED',
+    ).resolves.toEqual({
+      outcome: 'INVALID',
       code: 'OUTBOUND_DAILY_COST_LIMIT',
     });
+
+    // Ngân sách tin tính phí = 0 (ngày đầu) → mọi tin ngoài 48 giờ bị chặn ngay.
+    const zeroBudget = productionDb({ ageSeconds: 49 * 3600 });
+    await expect(
+      zeroBudget.queue.dispatch(hr, 'owner-1', false, null, null, {
+        ...production,
+        dailyCostBudgetVnd: 0,
+        monthlyCostBudgetVnd: 0,
+      }),
+    ).resolves.toEqual({
+      outcome: 'INVALID',
+      code: 'OUTBOUND_MONTHLY_COST_LIMIT',
+    });
+    expect(
+      zeroBudget.ran(/INSERT INTO "recruitment_outbound_attempts"/),
+    ).toHaveLength(0);
   });
 });
 

@@ -50,8 +50,6 @@ export type DispatchGate =
   | { outcome: 'INVALID'; code: string }
   /** Mất lease (sender khác đã lấy dòng) — không ghi gì. */
   | { outcome: 'LOST' }
-  /** Hạn mức production đã chạm: giữ nguyên nội dung, tự thử lại ở kỳ sau. */
-  | { outcome: 'DEFERRED'; code: string; retryAt: Date }
   /**
    * Trả về chờ, không mở kết nối: outbound đang dừng khẩn / không đọc được trạng thái
    * (`code` trống), hoặc single dispatch guard không cho (`code` = `DISPATCH_GRANT_*`).
@@ -350,7 +348,6 @@ export class RecruitmentChannelOutboxQueue {
         let productionAdmission:
           | { interactionAt: Date; estimatedCostVnd: number }
           | { denied: string }
-          | { deferred: string; retryAt: Date }
           | null = null;
         if (production) {
           productionAdmission = await this.checkProductionAdmission(
@@ -358,18 +355,10 @@ export class RecruitmentChannelOutboxQueue {
             row,
             production,
           );
+          // Chặn ở cửa production (kể cả chạm quota/ngân sách) là KẾT THÚC: DEAD_LETTER
+          // + cảnh báo HR, không giữ tin sang ngày/tháng sau rồi gửi muộn.
           if ('denied' in productionAdmission) {
             return { outcome: 'INVALID', code: productionAdmission.denied };
-          }
-          if ('deferred' in productionAdmission) {
-            return this.defer(
-              em,
-              row,
-              owner,
-              redispatch,
-              productionAdmission.deferred,
-              productionAdmission.retryAt,
-            );
           }
         }
         const dispatched = returnedRows(
@@ -483,32 +472,6 @@ export class RecruitmentChannelOutboxQueue {
     return code ? { outcome: 'HELD', code } : { outcome: 'HELD' };
   }
 
-  /** Quota hết: RETRY ở đầu kỳ kế tiếp, không tăng attempt_count và không mở mạng. */
-  private async defer(
-    em: EntityManager,
-    row: ClaimedOutbox,
-    owner: string,
-    redispatch: boolean,
-    code: string,
-    retryAt: Date,
-  ): Promise<DispatchGate> {
-    const deferred = returnedRows(
-      await em.query(
-        `UPDATE "recruitment_channel_outbox"
-         SET status = 'RETRY', attempt_count = greatest(attempt_count - 1, 0),
-             last_error_code = $4, next_attempt_at = $5, dispatched_at = NULL,
-             lease_until = NULL, lease_owner = NULL, updated_at = now()
-         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
-           AND (dispatched_at IS NULL OR $3::boolean)
-         RETURNING id`,
-        [row.id, owner, redispatch, code, retryAt],
-      ),
-    );
-    return deferred.length
-      ? { outcome: 'DEFERRED', code, retryAt }
-      : { outcome: 'LOST' };
-  }
-
   /**
    * Production admission dưới transaction/khoá toàn cục: chỉ ứng viên vừa tương tác
    * thật với đúng OA; nếu hồ sơ đã gắn vị trí thì vị trí vẫn phải ACTIVE; quota và
@@ -519,9 +482,7 @@ export class RecruitmentChannelOutboxQueue {
     row: ClaimedOutbox,
     limits: RecruitmentOutboundSafetyConfig,
   ): Promise<
-    | { interactionAt: Date; estimatedCostVnd: number }
-    | { denied: string }
-    | { deferred: string; retryAt: Date }
+    { interactionAt: Date; estimatedCostVnd: number } | { denied: string }
   > {
     await em.query(
       `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_quota'))`,
@@ -635,28 +596,19 @@ export class RecruitmentChannelOutboxQueue {
       ],
     );
     if (Number(usage.recipient_day) >= limits.maxRequestsPerRecipientDay) {
-      return {
-        deferred: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
-        retryAt: clock.next_day,
-      };
+      return { denied: 'OUTBOUND_RECIPIENT_DAILY_LIMIT' };
     }
     if (Number(usage.total_day) >= limits.maxRequestsPerDay) {
-      return { deferred: 'OUTBOUND_DAILY_LIMIT', retryAt: clock.next_day };
+      return { denied: 'OUTBOUND_DAILY_LIMIT' };
     }
     if (
       Number(usage.cost_month) + estimatedCostVnd >
       limits.monthlyCostBudgetVnd
     ) {
-      return {
-        deferred: 'OUTBOUND_MONTHLY_COST_LIMIT',
-        retryAt: clock.next_month,
-      };
+      return { denied: 'OUTBOUND_MONTHLY_COST_LIMIT' };
     }
     if (Number(usage.cost_day) + estimatedCostVnd > limits.dailyCostBudgetVnd) {
-      return {
-        deferred: 'OUTBOUND_DAILY_COST_LIMIT',
-        retryAt: clock.next_day,
-      };
+      return { denied: 'OUTBOUND_DAILY_COST_LIMIT' };
     }
     return { interactionAt: eligibility.interaction_at, estimatedCostVnd };
   }

@@ -477,24 +477,6 @@ export class RecruitmentZaloSender
             : `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
         );
         return;
-      case 'DEFERRED':
-        this.logger.warn(
-          `sender outbox=${row.id} result=RETRY code=${gate.code} (production limit) retryAt=${gate.retryAt.toISOString()} — không mở kết nối`,
-        );
-        await this.audit.record({
-          actor: SYSTEM_ACTOR,
-          action: 'CHANNEL_OUTBOX_DEFERRED',
-          entity: 'channel-outbox',
-          entityId: row.id,
-          context: {
-            code: gate.code,
-            status: 'RETRY',
-            retryAt: gate.retryAt.toISOString(),
-            sourceType: row.sourceType,
-            network: false,
-          },
-        });
-        return;
       case 'LOST':
         this.logger.warn(
           `sender outbox=${row.id} lease lost trước khi gửi — bỏ`,
