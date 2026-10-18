@@ -67,7 +67,45 @@ export class RecruitmentOutboxOperationsService {
     const read = this.config
       ? readOutboundSafetyConfig((key) => this.config!.get<string>(key))
       : null;
-    const limits = read && 'config' in read ? read.config : null;
+    const env = read && 'config' in read ? read.config : null;
+    // Hạn mức hiệu lực = min(env, uỷ quyền GO PROD ACTIVE) — đúng như cửa dispatch áp.
+    const [authorization]: Array<Record<string, number | string>> = (
+      (await this.dataSource.query(
+        `SELECT to_regclass('public.recruitment_production_authorizations') IS NOT NULL AS ready`,
+      )) as Array<{ ready: boolean }>
+    )[0]?.ready
+      ? await this.dataSource.query(
+          `SELECT id, max_requests_per_recipient_day, max_requests_per_day, daily_cost_budget_vnd,
+                  monthly_cost_budget_vnd, interaction_window_hours, free_window_hours
+           FROM "recruitment_production_authorizations" WHERE status = 'ACTIVE'
+           ORDER BY id DESC LIMIT 1`,
+        )
+      : [];
+    const cap = (value: number, column: string) =>
+      authorization ? Math.min(value, Number(authorization[column])) : value;
+    const limits = env
+      ? {
+          ...env,
+          maxRequestsPerRecipientDay: cap(
+            env.maxRequestsPerRecipientDay,
+            'max_requests_per_recipient_day',
+          ),
+          maxRequestsPerDay: cap(env.maxRequestsPerDay, 'max_requests_per_day'),
+          dailyCostBudgetVnd: cap(
+            env.dailyCostBudgetVnd,
+            'daily_cost_budget_vnd',
+          ),
+          monthlyCostBudgetVnd: cap(
+            env.monthlyCostBudgetVnd,
+            'monthly_cost_budget_vnd',
+          ),
+          interactionWindowHours: cap(
+            env.interactionWindowHours,
+            'interaction_window_hours',
+          ),
+          freeWindowHours: cap(env.freeWindowHours, 'free_window_hours'),
+        }
+      : null;
     const [row]: Array<{
       day_requests: number | string;
       month_requests: number | string;
@@ -100,6 +138,7 @@ export class RecruitmentOutboxOperationsService {
     );
     return {
       productionMode: limits?.productionMode ?? false,
+      authorizationId: authorization ? Number(authorization.id) : null,
       today: {
         requests: Number(row?.day_requests ?? 0),
         estimatedCostVnd: Number(row?.day_estimated_cost ?? 0),
