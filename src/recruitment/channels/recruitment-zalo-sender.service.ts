@@ -24,6 +24,7 @@ import {
   type RecruitmentOutboundSafetyConfig,
 } from './recruitment-outbound-safety.config';
 import { retryDelayMs } from './recruitment-channel-worker.config';
+import { readHrMessageTtl } from './recruitment-outbox-approval-expiry.service';
 import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
@@ -84,6 +85,8 @@ export class RecruitmentZaloSender
   private readonly guard: DispatchGuard | null;
   /** Production admission/quota. `null` trong pilot hoặc khi chưa go-live. */
   private readonly production: RecruitmentOutboundSafetyConfig | null;
+  /** Tin HR chờ quá TTL (phút) không bao giờ được gửi muộn. */
+  private readonly hrMessageTtlMinutes: number;
   private lastHalted = false;
   private readonly senderId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
@@ -114,6 +117,7 @@ export class RecruitmentZaloSender
       'config' in outboundSafety && outboundSafety.config.productionMode
         ? outboundSafety.config
         : null;
+    this.hrMessageTtlMinutes = readHrMessageTtl(get);
   }
 
   onApplicationBootstrap(): void {
@@ -238,6 +242,7 @@ export class RecruitmentZaloSender
       this.pilotSenders,
       this.guard,
       this.production,
+      this.hrMessageTtlMinutes,
     );
     if (gate.outcome !== 'DISPATCHED') {
       return this.notDispatched(row, owner, config, gate, started);
@@ -276,6 +281,7 @@ export class RecruitmentZaloSender
           this.pilotSenders,
           this.guard,
           this.production,
+          this.hrMessageTtlMinutes,
         );
         if (again.outcome !== 'DISPATCHED') {
           return this.notDispatched(row, owner, config, again, started);

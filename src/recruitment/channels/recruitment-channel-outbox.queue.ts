@@ -229,6 +229,7 @@ export class RecruitmentChannelOutboxQueue {
     pilotSenders: string[] | null = null,
     guard: DispatchGuard | null = null,
     production: RecruitmentOutboundSafetyConfig | null = null,
+    hrMessageTtlMinutes: number | null = null,
   ): Promise<DispatchGate> {
     return this.dataSource.transaction(async (em) => {
       // Dừng khẩn outbound (P3-7.3 / G8): khoá chia sẻ dòng điều khiển — thao tác dừng
@@ -261,6 +262,18 @@ export class RecruitmentChannelOutboxQueue {
           )
         : [];
       if (!control) return { outcome: 'INVALID', code: 'CANONICAL_MISSING' };
+
+      // Tin HR quá TTL không bao giờ gửi muộn (kể cả khi lượt dọn định kỳ chưa kịp chạy).
+      if (row.sourceType === 'HR_MESSAGE' && hrMessageTtlMinutes) {
+        const [age]: Array<{ expired: boolean }> = await em.query(
+          `SELECT created_at <= clock_timestamp() - $2::int * interval '1 minute' AS expired
+           FROM "recruitment_channel_outbox" WHERE id = $1`,
+          [row.id, hrMessageTtlMinutes],
+        );
+        if (age?.expired !== false) {
+          return { outcome: 'INVALID', code: 'HR_MESSAGE_EXPIRED' };
+        }
+      }
 
       // P3.2: final approval check. Fail closed on missing or changed data.
       // Locks prevent approval/canonical/outbox edits until dispatch commits.

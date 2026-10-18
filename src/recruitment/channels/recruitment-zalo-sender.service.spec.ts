@@ -222,6 +222,7 @@ describe('RecruitmentZaloSender.process', () => {
       null,
       null,
       null,
+      60,
     );
     expect(queue.markSent).toHaveBeenCalledWith(21, 'o1', 'z-1');
   });
@@ -815,6 +816,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
         expect.any(Array),
         { oaId: 'oa-recruit' },
         null,
+        60,
       );
       expect(queue.dispatch).toHaveBeenNthCalledWith(
         2,
@@ -824,6 +826,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
         expect.any(Array),
         { oaId: 'oa-recruit' },
         null,
+        60,
       );
       expect(zalo.requests).toHaveLength(2);
     } finally {

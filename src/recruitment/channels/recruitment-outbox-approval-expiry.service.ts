@@ -9,10 +9,15 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
 import { RecruitmentAuditService } from '../recruitment-audit.service';
-import { RecruitmentActorType } from '../recruitment.enums';
+import {
+  HrAlertSeverity,
+  HrAlertType,
+  RecruitmentActorType,
+} from '../recruitment.enums';
 import type { RecruitmentActor } from '../recruitment.roles';
 import { returnedRows } from './recruitment-channel-event.queue';
 import { isRecruitmentWorkerEnabled } from './recruitment-channel-worker.config';
+import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import { isZaloOutboundEnabled } from './zalo-outbound.config';
 
 const SYSTEM_ACTOR: RecruitmentActor = {
@@ -36,11 +41,28 @@ export function readPendingApprovalTtl(
     : DEFAULT_PENDING_APPROVAL_TTL_MINUTES;
 }
 
+export const DEFAULT_HR_MESSAGE_TTL_MINUTES = 60;
+
+/** TTL tin HR chờ gửi (phút) — `RECRUITMENT_HR_MESSAGE_TTL_MINUTES`, 5–1440; sai ⇒ mặc định. */
+export function readHrMessageTtl(
+  get: (key: string) => string | undefined,
+): number {
+  const raw = get('RECRUITMENT_HR_MESSAGE_TTL_MINUTES')?.trim();
+  const value = raw ? Number(raw) : DEFAULT_HR_MESSAGE_TTL_MINUTES;
+  return Number.isSafeInteger(value) && value >= 5 && value <= 1440
+    ? value
+    : DEFAULT_HR_MESSAGE_TTL_MINUTES;
+}
+
 /**
  * Dọn bản duyệt hết hạn: bản đã duyệt quá `expires_at` và bản nháp chờ quá TTL →
  * `SUPPRESSED` + approval `EXPIRED` + audit. Sender vốn đã từ chối gửi bản hết hạn;
  * việc dọn giải phóng đầu hàng của người nhận để tin sau không bị chặn. Chạy định kỳ
  * khi worker HOẶC outbound bật (C1 có worker mà chưa có sender).
+ *
+ * Tin HR (`HR_MESSAGE`) chờ gửi quá TTL (mặc định 60 phút) → `DEAD_LETTER`
+ * (`HR_MESSAGE_EXPIRED`) + audit + cảnh báo HR trong cùng transaction: không bao giờ
+ * gửi muộn (sau dừng khẩn, quota, lỗi gói OA…); HR thấy nguyên nhân và soạn tin mới.
  */
 @Injectable()
 export class RecruitmentOutboxApprovalExpiryService
@@ -49,6 +71,7 @@ export class RecruitmentOutboxApprovalExpiryService
   private readonly logger = new Logger('RecruitmentApprovalExpiry');
   private readonly scheduled: boolean;
   private readonly pendingTtlMinutes: number;
+  private readonly hrMessageTtlMinutes: number;
   private timer: NodeJS.Timeout | null = null;
   private sweeping = false;
 
@@ -56,17 +79,19 @@ export class RecruitmentOutboxApprovalExpiryService
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly audit: RecruitmentAuditService,
     configService?: ConfigService,
+    private readonly alerts?: RecruitmentHrAlertService,
   ) {
     const get = (key: string) => configService?.get<string>(key);
     this.scheduled =
       isRecruitmentWorkerEnabled(get) || isZaloOutboundEnabled(get);
     this.pendingTtlMinutes = readPendingApprovalTtl(get);
+    this.hrMessageTtlMinutes = readHrMessageTtl(get);
   }
 
   onApplicationBootstrap(): void {
     if (!this.scheduled) return;
     this.logger.log(
-      `approval expiry start every=${APPROVAL_EXPIRY_EVERY_MS}ms pendingTtl=${this.pendingTtlMinutes}m`,
+      `approval expiry start every=${APPROVAL_EXPIRY_EVERY_MS}ms pendingTtl=${this.pendingTtlMinutes}m hrMessageTtl=${this.hrMessageTtlMinutes}m`,
     );
     void this.sweep();
     this.timer = setInterval(() => void this.sweep(), APPROVAL_EXPIRY_EVERY_MS);
@@ -82,19 +107,136 @@ export class RecruitmentOutboxApprovalExpiryService
     if (this.sweeping) return;
     this.sweeping = true;
     try {
-      const result = await this.expireBatch(this.pendingTtlMinutes);
-      if (result.expired > 0) {
-        this.logger.log(
-          `approval expiry expired=${result.expired} examined=${result.examined}`,
-        );
+      // Hai phần độc lập: lỗi bản duyệt AI không được chặn việc hết hạn tin HR.
+      try {
+        const result = await this.expireBatch(this.pendingTtlMinutes);
+        if (result.expired > 0) {
+          this.logger.log(
+            `approval expiry expired=${result.expired} examined=${result.examined}`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`approval expiry error=${errorText(error)}`);
       }
-    } catch (error) {
-      const code =
-        error instanceof Error ? error.message.split('\n')[0] : 'UNKNOWN';
-      this.logger.error(`approval expiry error=${code.slice(0, 120)}`);
+      try {
+        const hr = await this.expireHrMessages(this.hrMessageTtlMinutes);
+        if (hr.expired > 0) {
+          this.logger.warn(
+            `hr message expiry expired=${hr.expired} examined=${hr.examined} ttl=${this.hrMessageTtlMinutes}m`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`hr message expiry error=${errorText(error)}`);
+      }
     } finally {
       this.sweeping = false;
     }
+  }
+
+  /**
+   * Tin HR chờ gửi (`PENDING` / `RETRY` — chắc chắn chưa tới Zalo) quá TTL → `DEAD_LETTER`
+   * `HR_MESSAGE_EXPIRED`. Không đụng `SENDING` (đang ở tay sender) hay `UNKNOWN` (chờ đối soát).
+   */
+  async expireHrMessages(ttlMinutes: number, limit = 20) {
+    if (
+      !Number.isSafeInteger(ttlMinutes) ||
+      ttlMinutes < 5 ||
+      ttlMinutes > 1440 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 20
+    ) {
+      throw new Error('HR_MESSAGE_EXPIRY_CONFIG_INVALID');
+    }
+    const candidates: Array<{ id: number }> = await this.dataSource.query(
+      `SELECT id FROM "recruitment_channel_outbox"
+       WHERE source_type = 'HR_MESSAGE' AND status IN ('PENDING', 'RETRY')
+         AND created_at <= clock_timestamp() - $1::int * interval '1 minute'
+       ORDER BY created_at, id
+       LIMIT $2`,
+      [ttlMinutes, limit],
+    );
+    let expired = 0;
+    for (const row of candidates) {
+      if (await this.expireHrOne(Number(row.id), ttlMinutes)) expired++;
+    }
+    return { examined: candidates.length, expired };
+  }
+
+  private async expireHrOne(outboxId: number, ttlMinutes: number) {
+    return this.dataSource.transaction(async (em) => {
+      const [outbox]: Array<{
+        status: string;
+        last_error_code: string | null;
+        attempt_count: number | string;
+        recruitment_message_id: number | null;
+        due: boolean;
+      }> = await em.query(
+        `SELECT status, last_error_code, attempt_count, recruitment_message_id,
+                created_at <= clock_timestamp() - $2::int * interval '1 minute' AS due
+         FROM "recruitment_channel_outbox"
+         WHERE id = $1 AND source_type = 'HR_MESSAGE'
+         FOR UPDATE`,
+        [outboxId, ttlMinutes],
+      );
+      if (
+        !outbox ||
+        outbox.due !== true ||
+        !['PENDING', 'RETRY'].includes(outbox.status)
+      ) {
+        return false;
+      }
+      const changed = returnedRows(
+        await em.query(
+          `UPDATE "recruitment_channel_outbox"
+           SET status = 'DEAD_LETTER', last_error_code = 'HR_MESSAGE_EXPIRED',
+               next_attempt_at = NULL, lease_until = NULL, updated_at = now()
+           WHERE id = $1 AND source_type = 'HR_MESSAGE' AND status IN ('PENDING', 'RETRY')
+           RETURNING id`,
+          [outboxId],
+        ),
+      );
+      if (changed.length !== 1)
+        throw new Error('HR_MESSAGE_EXPIRY_UPDATE_FAILED');
+      if (outbox.recruitment_message_id) {
+        // Hội thoại HR thấy tin này KHÔNG được gửi và vì sao.
+        await em.query(
+          `UPDATE "recruitment_messages"
+           SET metadata = coalesce(metadata, '{}'::jsonb) ||
+             jsonb_build_object('delivery', 'DEAD_LETTER_HR_MESSAGE_EXPIRED')
+           WHERE id = $1`,
+          [outbox.recruitment_message_id],
+        );
+      }
+      await this.audit.recordMandatory(em, {
+        actor: SYSTEM_ACTOR,
+        action: 'CHANNEL_OUTBOX_HR_MESSAGE_EXPIRED',
+        entity: 'channel-outbox',
+        entityId: outboxId,
+        before: {
+          status: outbox.status,
+          lastErrorCode: outbox.last_error_code,
+        },
+        after: { status: 'DEAD_LETTER', lastErrorCode: 'HR_MESSAGE_EXPIRED' },
+        context: {
+          outboxId,
+          ttlMinutes,
+          attemptCount: Number(outbox.attempt_count),
+          network: false,
+        },
+      });
+      await this.alerts?.raise(
+        {
+          type: HrAlertType.OUTBOUND_DEAD_LETTER,
+          severity: HrAlertSeverity.HIGH,
+          sourceKey: `outbox:${outboxId}`,
+          outboxId,
+          details: { code: 'HR_MESSAGE_EXPIRED', sourceType: 'HR_MESSAGE' },
+        },
+        em,
+      );
+      return true;
+    });
   }
 
   async expireBatch(pendingTtlMinutes: number, limit = 20) {
@@ -333,4 +475,10 @@ export class RecruitmentOutboxApprovalExpiryService
       return true;
     });
   }
+}
+
+function errorText(error: unknown): string {
+  const code =
+    error instanceof Error ? error.message.split('\n')[0] : 'UNKNOWN';
+  return code.slice(0, 120);
 }

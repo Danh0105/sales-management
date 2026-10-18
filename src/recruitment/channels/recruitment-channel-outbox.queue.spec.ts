@@ -548,3 +548,63 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     });
   });
 });
+
+describe('RecruitmentChannelOutboxQueue.dispatch — TTL tin HR', () => {
+  function hrDb(expired: boolean | null) {
+    const calls: string[] = [];
+    const em = {
+      query: jest.fn((sql: string) => {
+        calls.push(sql);
+        if (/FROM "recruitment_runtime_controls"/.test(sql)) {
+          return Promise.resolve([
+            { outbound_halted: false, failsafe_halted: false },
+          ]);
+        }
+        if (/FROM "recruitment_conversations" c/.test(sql)) {
+          return Promise.resolve([
+            { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 4 },
+          ]);
+        }
+        if (/AS expired/.test(sql)) {
+          return Promise.resolve(expired === null ? [] : [{ expired }]);
+        }
+        if (/UPDATE "recruitment_channel_outbox"/.test(sql)) {
+          return Promise.resolve([[{ id: 21 }], 1]);
+        }
+        return Promise.resolve([[], 1]);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((fn: (e: typeof em) => unknown) => fn(em)),
+    };
+    return {
+      queue: new RecruitmentChannelOutboxQueue(dataSource as any),
+      dispatched: () =>
+        calls.filter((s) => /SET dispatched_at = now\(\)/.test(s)),
+    };
+  }
+  const hr = row({ sourceType: 'HR_MESSAGE', controlVersion: null });
+
+  it('tin HR quá TTL → INVALID HR_MESSAGE_EXPIRED, không ghi dispatched_at', async () => {
+    const db = hrDb(true);
+    await expect(
+      db.queue.dispatch(hr, 'o1', false, null, null, null, 60),
+    ).resolves.toEqual({ outcome: 'INVALID', code: 'HR_MESSAGE_EXPIRED' });
+    expect(db.dispatched()).toHaveLength(0);
+  });
+
+  it('không đọc được tuổi tin (dòng mất) → fail closed như quá hạn', async () => {
+    const db = hrDb(null);
+    await expect(
+      db.queue.dispatch(hr, 'o1', false, null, null, null, 60),
+    ).resolves.toEqual({ outcome: 'INVALID', code: 'HR_MESSAGE_EXPIRED' });
+  });
+
+  it('tin HR còn hạn → DISPATCHED; tin AI không bị kiểm TTL tin HR', async () => {
+    const db = hrDb(false);
+    await expect(
+      db.queue.dispatch(hr, 'o1', false, null, null, null, 60),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+    expect(db.dispatched()).toHaveLength(1);
+  });
+});

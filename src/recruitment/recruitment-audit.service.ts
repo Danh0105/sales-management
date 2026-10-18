@@ -64,6 +64,8 @@ export type RecruitmentAuditAction =
   | 'CHANNEL_OUTBOX_SUPPRESSED'
   /** Request outbound bị hoãn bởi quota/ngân sách production, chưa mở mạng. */
   | 'CHANNEL_OUTBOX_DEFERRED'
+  /** Tin HR chờ gửi quá TTL → không gửi nữa (DEAD_LETTER), HR được cảnh báo. */
+  | 'CHANNEL_OUTBOX_HR_MESSAGE_EXPIRED'
   /** P3-7.2A — xác minh hồi tố request webhook đã cách ly (chỉ số lượng). */
   | 'CHANNEL_QUARANTINE_VERIFY'
   /** P3-6 — HR điều khiển hội thoại kênh. */
