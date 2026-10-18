@@ -211,6 +211,128 @@ export class RecruitmentOutboxOperationsService {
     });
   }
 
+  /**
+   * HR huỷ một tin HR đang chờ gửi (`PENDING` / `RETRY` — chắc chắn chưa tới Zalo) →
+   * `DEAD_LETTER` `HR_CANCELLED`, không bao giờ gửi lại. Không huỷ được tin đang gửi
+   * (`SENDING`), có thể đã tới (`UNKNOWN`) hay đã gửi (`SENT`). Trạng thái, nguồn và
+   * ledger request được kiểm dưới khoá dòng; audit bắt buộc trong CÙNG transaction.
+   */
+  async cancelHrMessage(id: number, reason: string, actor: RecruitmentActor) {
+    const why = reason.trim();
+    if (why.length < 10 || why.length > 300) {
+      throw new BadRequestException({
+        code: 'CANCEL_REASON_REQUIRED',
+        message: 'Nhập lý do huỷ (10–300 ký tự)',
+      });
+    }
+    return this.dataSource.transaction(async (em) => {
+      const [row]: Array<{
+        status: ChannelOutboxStatus;
+        source_type: string;
+        dispatched_at: Date | null;
+        last_error_code: string | null;
+        recruitment_message_id: number | null;
+      }> = await em.query(
+        `SELECT status, source_type, dispatched_at, last_error_code, recruitment_message_id
+         FROM "recruitment_channel_outbox" WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (!row) {
+        throw new NotFoundException({
+          code: 'OUTBOX_NOT_FOUND',
+          message: `Không có dòng outbox #${id}`,
+        });
+      }
+      if (row.source_type !== 'HR_MESSAGE') {
+        throw new ConflictException({
+          code: 'OUTBOX_NOT_HR_MESSAGE',
+          message:
+            'Chỉ huỷ được tin HR viết; tin AI dùng từ chối/thu hồi bản duyệt',
+        });
+      }
+      if (
+        row.status === ChannelOutboxStatus.DEAD_LETTER &&
+        row.last_error_code === 'HR_CANCELLED'
+      ) {
+        return {
+          id,
+          status: row.status,
+          code: 'HR_CANCELLED',
+          idempotent: true,
+        };
+      }
+      if (
+        (row.status !== ChannelOutboxStatus.PENDING &&
+          row.status !== ChannelOutboxStatus.RETRY) ||
+        row.dispatched_at !== null
+      ) {
+        throw new ConflictException({
+          code: 'OUTBOX_NOT_CANCELLABLE',
+          message: `Tin đang ${row.status} — chỉ huỷ được tin chờ gửi (PENDING/RETRY), không huỷ tin đang gửi hoặc đã gửi`,
+          status: row.status,
+        });
+      }
+      // Ledger production (nếu có): request nào có thể đã tới Zalo → không huỷ.
+      const [ledger]: Array<{ ready: boolean }> = await em.query(
+        `SELECT to_regclass('public.recruitment_outbound_attempts') IS NOT NULL AS ready`,
+      );
+      if (ledger?.ready) {
+        const [risky]: Array<{ n: number | string }> = await em.query(
+          `SELECT count(*) AS n FROM "recruitment_outbound_attempts"
+           WHERE outbox_id = $1 AND outcome IN ('DISPATCHING', 'SENT', 'UNKNOWN')`,
+          [id],
+        );
+        if (Number(risky?.n ?? 0) > 0) {
+          throw new ConflictException({
+            code: 'OUTBOX_MAY_HAVE_BEEN_SENT',
+            message: 'Đã có request có thể tới Zalo — dùng đối soát, không huỷ',
+          });
+        }
+      }
+      const changed = returnedRows(
+        await em.query(
+          `UPDATE "recruitment_channel_outbox"
+           SET status = 'DEAD_LETTER', last_error_code = 'HR_CANCELLED',
+               next_attempt_at = NULL, lease_until = NULL,
+               resolution = 'DEAD_LETTER', resolved_by = $2, resolved_at = now(), updated_at = now()
+           WHERE id = $1 AND source_type = 'HR_MESSAGE' AND status IN ('PENDING', 'RETRY')
+             AND dispatched_at IS NULL
+           RETURNING id`,
+          [id, actor.employeeId],
+        ),
+      );
+      if (changed.length !== 1) throw new Error('HR_CANCEL_UPDATE_FAILED');
+      if (row.recruitment_message_id) {
+        await em.query(
+          `UPDATE "recruitment_messages"
+           SET metadata = coalesce(metadata, '{}'::jsonb) ||
+             jsonb_build_object('delivery', 'DEAD_LETTER_HR_CANCELLED')
+           WHERE id = $1`,
+          [row.recruitment_message_id],
+        );
+      }
+      await this.audit.recordMandatory(em, {
+        actor,
+        action: 'OUTBOX_HR_CANCEL',
+        entity: 'channel-outbox',
+        entityId: id,
+        before: { status: row.status, lastErrorCode: row.last_error_code },
+        after: {
+          status: ChannelOutboxStatus.DEAD_LETTER,
+          lastErrorCode: 'HR_CANCELLED',
+          resolution: OutboxResolution.DEAD_LETTER,
+        },
+        context: { outboxId: id, reason: why, network: false },
+      });
+      return {
+        id,
+        status: ChannelOutboxStatus.DEAD_LETTER,
+        code: 'HR_CANCELLED',
+        idempotent: false,
+      };
+    });
+  }
+
   private async resolve(
     id: number,
     resolution: OutboxResolution,

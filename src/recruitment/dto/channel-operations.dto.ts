@@ -89,6 +89,14 @@ export class RetryOutboxDto {
   confirmDuplicateRisk?: boolean;
 }
 
+/** HR huỷ tin HR đang chờ gửi — lý do bắt buộc (ghi audit). */
+export class CancelHrMessageDto {
+  @IsString()
+  @MinLength(10)
+  @MaxLength(300)
+  reason!: string;
+}
+
 export class OutboxQueryDto {
   @IsOptional()
   @IsEnum(ChannelOutboxStatus)

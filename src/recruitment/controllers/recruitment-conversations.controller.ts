@@ -27,6 +27,7 @@ import { RecruitmentOutboxOperationsService } from '../channels/recruitment-outb
 import { RecruitmentOutboxApprovalService } from '../channels/recruitment-outbox-approval.service';
 import { RecruitmentZaloQuarantineService } from '../channels/recruitment-zalo-quarantine.service';
 import {
+  CancelHrMessageDto,
   ExcludeChannelEventDto,
   HrAlertQueryDto,
   HrMessageDto,
@@ -322,6 +323,18 @@ export class RecruitmentOperationsController {
   @Roles(...RECRUITMENT_OPERATIONS_ROLES)
   deadLetter(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
     return this.outbox.deadLetter(id, hrActor(req.user!));
+  }
+
+  /** Huỷ tin HR đang chờ gửi (PENDING / RETRY) — không bao giờ gửi lại; có audit. */
+  @Post('outbox/:id/cancel')
+  @HttpCode(200)
+  @Roles(...RECRUITMENT_OPERATIONS_ROLES)
+  cancelHrMessage(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CancelHrMessageDto,
+    @Req() req: Request,
+  ) {
+    return this.outbox.cancelHrMessage(id, dto.reason, hrActor(req.user!));
   }
 
   @Get('handoffs')

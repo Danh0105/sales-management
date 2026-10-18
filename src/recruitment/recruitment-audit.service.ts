@@ -75,6 +75,8 @@ export type RecruitmentAuditAction =
   | 'OUTBOX_MARK_SENT'
   | 'OUTBOX_RETRY'
   | 'OUTBOX_DEAD_LETTER'
+  /** HR huỷ tin HR đang chờ gửi (PENDING/RETRY) — không bao giờ gửi lại. */
+  | 'OUTBOX_HR_CANCEL'
   | 'OUTBOX_APPROVE'
   | 'OUTBOX_EDIT_AND_APPROVE'
   | 'OUTBOX_REJECT'
