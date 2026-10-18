@@ -85,6 +85,9 @@ export class AddRecruitmentOutboundAttemptLedger1793200000000 implements Migrati
         BEFORE INSERT OR UPDATE OR DELETE ON "recruitment_outbound_attempts"
         FOR EACH ROW EXECUTE FUNCTION "recruitment_outbound_attempt_guard"()
     `);
+    await queryRunner.query(
+      `COMMENT ON TABLE "recruitment_outbound_attempts" IS 'G8 production: mỗi request Send API Zalo một dòng, ghi trước khi mở mạng. Nguồn quota/chi phí/đối soát. Không nội dung, token hay user id thô. App chỉ thêm + ghi kết quả một lần; không xoá.'`,
+    );
     // App: đọc, thêm, ghi kết quả. Không xoá, không sửa metadata.
     await queryRunner.query(`
       DO $$
