@@ -9,13 +9,19 @@
 # Hotfix khi đang ở C1 (AI + WORKER bật): ALLOW_C1=1 — chỉ chấp nhận khi OUTBOUND env khác `true` VÀ dừng khẩn
 # "Gửi Zalo" (outbound_halted) đang bật; smoke mong API AI 401 (bật, cần key) thay vì 503. Đặt ROLLBACK /
 # ROLLBACK_EXPECT về bản đang chạy (vd. g8-hrconsole-fdaa3ed / a782a48a1cac837a).
+#
+# Deploy khi đang ở C2 pilot (AI + WORKER + OUTBOUND bật, single dispatch guard): ALLOW_C2=1 — chỉ chấp nhận khi
+# dừng khẩn "Gửi Zalo" đang bật, PILOT=true + GRANT_REQUIRED=true, không có grant dispatch hay uỷ quyền production
+# ACTIVE, và migration production (1793200000000 + 1793300000000) đã áp. Sau restart phải thấy sender báo
+# dispatchGuard=on; cờ env + dừng khẩn giữ nguyên. Không mở được đường gửi nào: guard đòi grant, outbound dừng.
 set -Eeuo pipefail
 REL="${REL:-/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed}"
 EXPECT="${EXPECT:-a782a48a1cac837a}"
 ROLLBACK="${ROLLBACK:-/opt/kido-recruiter/releases/rollback-6e79e1b}"
 ROLLBACK_EXPECT="${ROLLBACK_EXPECT:-d35c4525df905174}"
 ALLOW_C1="${ALLOW_C1:-0}"
-AI_EXPECT=503; [ "$ALLOW_C1" = 1 ] && AI_EXPECT=401
+ALLOW_C2="${ALLOW_C2:-0}"
+AI_EXPECT=503; { [ "$ALLOW_C1" = 1 ] || [ "$ALLOW_C2" = 1 ]; } && AI_EXPECT=401
 APP=sales-management
 APP_DIR=/var/www/sales-management
 TS=$(date +%Y%m%d-%H%M%S)
@@ -37,7 +43,18 @@ FLAGS=$(pm2_field "' '.join(p['pm2_env'].get('env',{}).get(k, p['pm2_env'].get(k
 STATUS=$(pm2_field "p['pm2_env']['status']")
 [ "$STATUS" = online ] || die "3010 không online ($STATUS)"
 RUNTIME=$(runuser -u postgres -- psql -XAt -d sales_db -c "select ai_halted||'/'||worker_halted||'/'||outbound_halted from recruitment_runtime_controls")
-if [ "$ALLOW_C1" = 1 ]; then
+q1() { runuser -u postgres -- psql -XAt -d sales_db -c "$1"; }
+envflag() { pm2_field "p['pm2_env'].get('env',{}).get('$1', p['pm2_env'].get('$1','')) or '-'"; }
+if [ "$ALLOW_C2" = 1 ]; then
+  [ "$FLAGS" = "true true true" ] || die "ALLOW_C2 chỉ cho AI=true WORKER=true OUTBOUND=true (hiện $FLAGS)"
+  [ "${RUNTIME##*/}" = true ] || die "ALLOW_C2 cần dừng khẩn Gửi Zalo đang bật (outbound_halted=true, hiện $RUNTIME)"
+  [ "$(envflag RECRUITMENT_PILOT_MODE)/$(envflag RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED)" = "true/true" ] \
+    || die "ALLOW_C2 cần PILOT=true + GRANT_REQUIRED=true (single dispatch guard)"
+  [ "$(q1 "select count(*) from recruitment_outbound_dispatch_grants where status='ACTIVE'")" = 0 ] || die "còn grant dispatch ACTIVE"
+  [ "$(q1 "select count(*) from migrations where timestamp in (1793200000000, 1793300000000)")" = 2 ] \
+    || die "chưa áp migration production (g8-production-outbound-ledger-up.sql + g8-production-go-prod-up.sql)"
+  [ "$(q1 "select count(*) from recruitment_production_authorizations where status='ACTIVE'")" = 0 ] || die "đang có uỷ quyền production ACTIVE"
+elif [ "$ALLOW_C1" = 1 ]; then
   case "$FLAGS" in "true true -"|"true true false") ;; *) die "ALLOW_C1 chỉ cho AI=true WORKER=true OUTBOUND≠true (hiện $FLAGS)";; esac
   [ "${RUNTIME##*/}" = true ] || die "ALLOW_C1 cần dừng khẩn Gửi Zalo đang bật (outbound_halted=true, hiện $RUNTIME)"
 else
@@ -89,6 +106,10 @@ ERR=$(pm2 logs "$APP" --nostream --lines 300 2>&1 | grep -E "RECRUITMENT_AI_SAFE
 [ "$ERR" -eq 0 ] || echo "  CẢNH BÁO: $ERR dòng lỗi trong 300 dòng log gần nhất — xem pm2 logs $APP"
 [ "$(runuser -u postgres -- psql -XAt -d sales_db -c "select ai_halted||'/'||worker_halted||'/'||outbound_halted from recruitment_runtime_controls")" = "$RUNTIME" ] || rollback "cờ dừng khẩn bị đổi"
 [ "$(pm2_field "' '.join(p['pm2_env'].get('env',{}).get(k, p['pm2_env'].get(k,'')) or '-' for k in ('RECRUITMENT_AI_ENABLED','RECRUITMENT_WORKER_ENABLED','RECRUITMENT_ZALO_OUTBOUND_ENABLED'))")" = "$FLAGS" ] || rollback "cờ env 3010 bị đổi"
+if [ "$ALLOW_C2" = 1 ]; then
+  SENDER=$(pm2 logs "$APP" --nostream --lines 400 2>/dev/null | grep -E "sender start|sender KHÔNG chạy" | tail -1)
+  case "$SENDER" in *"dispatchGuard=on"*) ;; *) rollback "sender không báo dispatchGuard=on (${SENDER:-không thấy dòng sender start})" ;; esac
+fi
 echo "  OK: 3010 online, API AI $AI_EXPECT, HR console 401 (cần đăng nhập), nginx OK, cờ env giữ $FLAGS, cờ dừng khẩn giữ $RUNTIME"
 echo
 echo "XONG. Bản trước (WIP trên đĩa) giữ ở $APP_DIR/dist-before-g8-$TS. Rollback: production/rollback-3010.sh"

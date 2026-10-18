@@ -1,5 +1,7 @@
 #!/bin/bash
 # Rollback 3010 về bản backend đang chạy trước G8: 6e79e1b (artifact Codex 14/10, hash d35c4525df905174).
+# Sau G8 production: ROLLBACK=/opt/kido-recruiter/releases/g8-guard-591dd90 ROLLBACK_EXPECT=083001e9b044f070 —
+# CHỈ sau khi đã về pilot (activate-g8.sh pilot) hoặc tắt (activate-g8.sh off); script tự chặn nếu chưa.
 # KHÔNG quay về dist-before-g8-* (đó là build WIP trên đĩa, chưa từng chạy). Schema giữ nguyên.
 set -Eeuo pipefail
 ROLLBACK="${ROLLBACK:-/opt/kido-recruiter/releases/rollback-6e79e1b}"   # hotfix sau G8: ROLLBACK=…/g8-hrconsole-fdaa3ed
@@ -11,8 +13,17 @@ h() { (cd "$1" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | xar
 die() { echo "DỪNG: $*" >&2; exit 1; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
 
+envflag() { pm2 jlist | python3 -c "import json,sys;p=[x for x in json.load(sys.stdin) if x['name']=='$APP'][0];e=p['pm2_env'];print(e.get('env',{}).get('$1', e.get('$1','')) or '-')"; }
+
 [ "$(id -u)" = 0 ] || die "cần root"
 [ "$(h "$ROLLBACK/dist")" = "$ROLLBACK_EXPECT" ] || die "hash bản rollback sai"
+# Bản cũ (trước GO PROD) không biết RECRUITMENT_PRODUCTION_MODE: nếu env đang production (PILOT=false, không
+# grant) mà OUTBOUND bật, code cũ sẽ gửi KHÔNG có guard / quota. Phải về pilot hoặc tắt trước.
+if [ "$(envflag RECRUITMENT_ZALO_OUTBOUND_ENABLED)" = true ] && \
+   [ "$(envflag RECRUITMENT_PILOT_MODE)/$(envflag RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED)" != "true/true" ]; then
+  die "OUTBOUND bật mà không ở pilot + single dispatch guard — chạy trước: ./activate-g8.sh pilot --go \"rollback\" (hoặc ./activate-g8.sh off --go \"rollback\")"
+fi
+[ "$(envflag RECRUITMENT_PRODUCTION_MODE)" != true ] || die "RECRUITMENT_PRODUCTION_MODE=true — chạy ./activate-g8.sh pilot --go \"rollback\" trước"
 read -r -p "Rollback 3010 về $ROLLBACK ($ROLLBACK_EXPECT)? Gõ ROLLBACK: " ans
 [ "$ans" = ROLLBACK ] || die "đã huỷ"
 cp -a "$ROLLBACK/dist" "$APP_DIR/dist-rollback-$TS"
