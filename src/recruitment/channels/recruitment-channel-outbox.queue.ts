@@ -551,12 +551,15 @@ export class RecruitmentChannelOutboxQueue {
     await em.query(
       `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_quota'))`,
     );
-    // GO PROD: đọc uỷ quyền FOR SHARE — Owner thu hồi (UPDATE) phải chờ dispatch đang chạy
-    // commit; sau khi thu hồi commit, không request mới nào qua được cửa này.
+    // GO PROD: khoá CHIA SẺ cùng khoá mà trigger của bảng uỷ quyền lấy LOẠI TRỪ ở mọi UPDATE
+    // → thu hồi phải chờ dispatch đang chạy commit; sau khi thu hồi commit, câu SELECT dưới
+    // (snapshot mới, READ COMMITTED) thấy REVOKED. App chỉ có SELECT nên không FOR SHARE được.
+    await em.query(
+      `SELECT pg_advisory_xact_lock_shared(hashtext('${PRODUCTION_AUTHORIZATION_TABLE}'))`,
+    );
     const [authRow]: Array<Record<string, unknown>> = await em.query(
       `SELECT ${AUTHORIZATION_COLUMNS} FROM "${PRODUCTION_AUTHORIZATION_TABLE}"
-       WHERE status = 'ACTIVE' AND channel_account_id = $1
-       FOR SHARE`,
+       WHERE status = 'ACTIVE' AND channel_account_id = $1`,
       [row.channelAccountId],
     );
     if (!authRow) return { held: 'PRODUCTION_NOT_AUTHORIZED' };

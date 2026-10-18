@@ -722,11 +722,15 @@ describe('RecruitmentChannelOutboxQueue — GO PROD (uỷ quyền production c�
     expect(d.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
       0,
     );
-    // uỷ quyền đọc FOR SHARE, sau khoá quota toàn cục, trong cùng transaction
+    // uỷ quyền đọc sau khoá quota toàn cục + khoá CHIA SẺ của bảng uỷ quyền (app chỉ có SELECT)
+    expect(
+      d.ran(
+        /pg_advisory_xact_lock_shared\(hashtext\('recruitment_production_authorizations'\)\)/,
+      ),
+    ).toHaveLength(1);
     const [read] = d.ran(/FROM "recruitment_production_authorizations"/);
-    expect(read.sql).toMatch(
-      /status = 'ACTIVE' AND channel_account_id = \$1\s+FOR SHARE/,
-    );
+    expect(read.sql).toMatch(/status = 'ACTIVE' AND channel_account_id = \$1/);
+    expect(read.sql).not.toMatch(/FOR SHARE|FOR UPDATE/);
   });
 
   it('env cao hơn uỷ quyền → áp hạn mức uỷ quyền (3/ứng viên/ngày, 20/ngày, ngân sách 0, cửa sổ 48h)', async () => {

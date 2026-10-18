@@ -80,6 +80,10 @@ BEGIN
     NEW."activated_at" := clock_timestamp();
     RETURN NEW;
   END IF;
+  -- Khoá loại trừ với cửa dispatch (app giữ khoá chia sẻ cùng khoá này trong transaction ghi
+  -- dispatch): kết thúc uỷ quyền — kể cả bằng SQL tay — chờ mọi dispatch đang chạy commit;
+  -- sau khi commit, không request mới nào qua được cửa (app chỉ có SELECT, không FOR SHARE được).
+  PERFORM pg_advisory_xact_lock(hashtext('recruitment_production_authorizations'));
   IF OLD."status" <> 'ACTIVE' THEN
     RAISE EXCEPTION 'uỷ quyền production % đã %, không đổi được', OLD."id", OLD."status";
   END IF;
