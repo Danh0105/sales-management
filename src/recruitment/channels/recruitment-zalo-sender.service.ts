@@ -19,6 +19,10 @@ import {
   type DispatchGuard,
 } from './recruitment-channel-outbox.queue';
 import { readAiSafetyConfig } from './recruitment-ai-safety.config';
+import {
+  readOutboundSafetyConfig,
+  type RecruitmentOutboundSafetyConfig,
+} from './recruitment-outbound-safety.config';
 import { retryDelayMs } from './recruitment-channel-worker.config';
 import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
@@ -78,6 +82,8 @@ export class RecruitmentZaloSender
   private readonly pilotSenders: string[] | null;
   /** Single dispatch guard — `null` = tắt (không pilot, không yêu cầu). */
   private readonly guard: DispatchGuard | null;
+  /** Production admission/quota. `null` trong pilot hoặc khi chưa go-live. */
+  private readonly production: RecruitmentOutboundSafetyConfig | null;
   private lastHalted = false;
   private readonly senderId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
@@ -103,6 +109,11 @@ export class RecruitmentZaloSender
       (this.pilotSenders !== null || this.config.dispatchGrantRequired)
         ? { oaId: this.config.oaId }
         : null;
+    const outboundSafety = readOutboundSafetyConfig(get);
+    this.production =
+      'config' in outboundSafety && outboundSafety.config.productionMode
+        ? outboundSafety.config
+        : null;
   }
 
   onApplicationBootstrap(): void {
@@ -127,8 +138,23 @@ export class RecruitmentZaloSender
         return;
       }
     }
+    if (this.production) {
+      let ready = false;
+      try {
+        ready = await this.queue.productionSafetyReady();
+      } catch (error) {
+        this.logger.error(`sender production check error=${errorCode(error)}`);
+      }
+      if (!ready) {
+        this.running = false;
+        this.logger.error(
+          'sender KHÔNG chạy: production mode thiếu bảng recruitment_outbound_attempts',
+        );
+        return;
+      }
+    }
     this.logger.log(
-      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} dispatchGuard=${this.guard ? 'on' : 'off'}`,
+      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} mode=${this.production ? 'production' : 'pilot'} dispatchGuard=${this.guard ? 'on' : 'off'}`,
     );
     const loops: Promise<void>[] = [];
     for (let slot = 0; slot < config.concurrency; slot++) {
@@ -211,6 +237,7 @@ export class RecruitmentZaloSender
       false,
       this.pilotSenders,
       this.guard,
+      this.production,
     );
     if (gate.outcome !== 'DISPATCHED') {
       return this.notDispatched(row, owner, config, gate, started);
@@ -225,6 +252,10 @@ export class RecruitmentZaloSender
     try {
       let result = await this.send(row, token.accessToken, config);
       if (result.result === 'TOKEN_INVALID') {
+        // Kết thúc ledger request thứ nhất trước khi reserve/ghi request thứ hai.
+        if (this.production) {
+          await this.queue.markAttemptRejected(row.id, owner, result.code);
+        }
         try {
           token = await this.credentials.refresh(config, token.version);
         } catch (error) {
@@ -244,6 +275,7 @@ export class RecruitmentZaloSender
           true,
           this.pilotSenders,
           this.guard,
+          this.production,
         );
         if (again.outcome !== 'DISPATCHED') {
           return this.notDispatched(row, owner, config, again, started);
@@ -279,6 +311,11 @@ export class RecruitmentZaloSender
   ): Promise<SendClassification> {
     if (!this.enabled || row.channelAccountId !== config.oaId) {
       return { result: 'RETRY', code: 'OUTBOUND_DISABLED' };
+    }
+    // Thu hẹp cửa sổ race của dừng khẩn: kiểm lại ngay trước khi mở socket. Request
+    // đã bay thì không thể thu hồi, nhưng sau khi flag commit sẽ không mở request mới.
+    if (await this.outboundHalted()) {
+      return { result: 'RETRY', code: 'OUTBOUND_HALTED' };
     }
     const outcome = await postRequest(
       `${config.apiUrl.replace(/\/+$/, '')}/v3.0/oa/message/cs`,
@@ -433,6 +470,24 @@ export class RecruitmentZaloSender
             ? `sender outbox=${row.id} result=HELD code=${gate.code} (single dispatch guard) — giữ chờ, không mở kết nối`
             : `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
         );
+        return;
+      case 'DEFERRED':
+        this.logger.warn(
+          `sender outbox=${row.id} result=RETRY code=${gate.code} (production limit) retryAt=${gate.retryAt.toISOString()} — không mở kết nối`,
+        );
+        await this.audit.record({
+          actor: SYSTEM_ACTOR,
+          action: 'CHANNEL_OUTBOX_DEFERRED',
+          entity: 'channel-outbox',
+          entityId: row.id,
+          context: {
+            code: gate.code,
+            status: 'RETRY',
+            retryAt: gate.retryAt.toISOString(),
+            sourceType: row.sourceType,
+            network: false,
+          },
+        });
         return;
       case 'LOST':
         this.logger.warn(

@@ -198,6 +198,12 @@ export class RecruitmentOperationsController {
     return this.aiLimits.summary();
   }
 
+  /** Số request Send API + chi phí ước tính theo ledger bền (không PII). */
+  @Get('outbound-usage')
+  outboundUsage() {
+    return this.outbox.usage();
+  }
+
   /** P3-7.3 — số event inbox theo trạng thái + lý do, tin đang chờ (không nội dung). */
   @Get('events/stats')
   eventStats() {

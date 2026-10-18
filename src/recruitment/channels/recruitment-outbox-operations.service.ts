@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -16,6 +17,7 @@ import {
 import type { RecruitmentActor } from '../recruitment.roles';
 import { returnedRows } from './recruitment-channel-event.queue';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
+import { readOutboundSafetyConfig } from './recruitment-outbound-safety.config';
 
 interface OutboxRow {
   id: number;
@@ -57,7 +59,75 @@ export class RecruitmentOutboxOperationsService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly audit: RecruitmentAuditService,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly config?: ConfigService,
   ) {}
+
+  /** Request/cost ledger production, không trả user id, nội dung hay token. */
+  async usage() {
+    const read = this.config
+      ? readOutboundSafetyConfig((key) => this.config!.get<string>(key))
+      : null;
+    const limits = read && 'config' in read ? read.config : null;
+    const [row]: Array<{
+      day_requests: number | string;
+      month_requests: number | string;
+      day_estimated_cost: number | string;
+      month_estimated_cost: number | string;
+      dispatching: number | string;
+      sent: number | string;
+      retry: number | string;
+      unknown: number | string;
+      rejected: number | string;
+      dead_letter: number | string;
+    }> = await this.dataSource.query(
+      `WITH bounds AS (
+         SELECT
+           date_trunc('day', clock_timestamp() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS day_start,
+           date_trunc('month', clock_timestamp() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS month_start
+       ) SELECT
+         count(*) FILTER (WHERE a.started_at >= b.day_start) AS day_requests,
+         count(*) FILTER (WHERE a.started_at >= b.month_start) AS month_requests,
+         coalesce(sum(a.estimated_cost_vnd) FILTER (WHERE a.started_at >= b.day_start), 0) AS day_estimated_cost,
+         coalesce(sum(a.estimated_cost_vnd) FILTER (WHERE a.started_at >= b.month_start), 0) AS month_estimated_cost,
+         count(*) FILTER (WHERE a.outcome = 'DISPATCHING') AS dispatching,
+         count(*) FILTER (WHERE a.outcome = 'SENT') AS sent,
+         count(*) FILTER (WHERE a.outcome = 'RETRY') AS retry,
+         count(*) FILTER (WHERE a.outcome = 'UNKNOWN') AS unknown,
+         count(*) FILTER (WHERE a.outcome = 'REJECTED') AS rejected,
+         count(*) FILTER (WHERE a.outcome = 'DEAD_LETTER') AS dead_letter
+       FROM "recruitment_outbound_attempts" a CROSS JOIN bounds b
+       WHERE a.started_at >= b.month_start OR a.outcome = 'DISPATCHING'`,
+    );
+    return {
+      productionMode: limits?.productionMode ?? false,
+      today: {
+        requests: Number(row?.day_requests ?? 0),
+        estimatedCostVnd: Number(row?.day_estimated_cost ?? 0),
+      },
+      month: {
+        requests: Number(row?.month_requests ?? 0),
+        estimatedCostVnd: Number(row?.month_estimated_cost ?? 0),
+      },
+      outcomes: {
+        dispatching: Number(row?.dispatching ?? 0),
+        sent: Number(row?.sent ?? 0),
+        retry: Number(row?.retry ?? 0),
+        unknown: Number(row?.unknown ?? 0),
+        rejected: Number(row?.rejected ?? 0),
+        deadLetter: Number(row?.dead_letter ?? 0),
+      },
+      limits: limits
+        ? {
+            maxRequestsPerRecipientDay: limits.maxRequestsPerRecipientDay,
+            maxRequestsPerDay: limits.maxRequestsPerDay,
+            dailyCostBudgetVnd: limits.dailyCostBudgetVnd,
+            monthlyCostBudgetVnd: limits.monthlyCostBudgetVnd,
+            interactionWindowHours: limits.interactionWindowHours,
+            freeWindowHours: limits.freeWindowHours,
+          }
+        : null,
+    };
+  }
 
   async list(query: { status?: ChannelOutboxStatus; limit?: number }) {
     const status = query.status ?? ChannelOutboxStatus.UNKNOWN;
@@ -68,9 +138,18 @@ export class RecruitmentOutboxOperationsService {
               m.conversation_id AS "conversationId", left(m.content, 200) AS "messagePreview",
               o.attempt_count AS "attemptCount", o.last_error_code AS "lastErrorCode",
               o.dispatched_at AS "dispatchedAt", o.created_at AS "createdAt",
-              o.resolution, o.resolved_by AS "resolvedBy", o.resolved_at AS "resolvedAt"
+              o.resolution, o.resolved_by AS "resolvedBy", o.resolved_at AS "resolvedAt",
+              coalesce(attempts.n, 0)::int AS "requestCount",
+              attempts.last_outcome AS "lastRequestOutcome",
+              coalesce(attempts.cost, 0)::int AS "estimatedCostVnd"
        FROM "recruitment_channel_outbox" o
        LEFT JOIN "recruitment_messages" m ON m.id = o.recruitment_message_id
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS n,
+                (array_agg(a.outcome ORDER BY a.id DESC))[1] AS last_outcome,
+                sum(a.estimated_cost_vnd) AS cost
+         FROM "recruitment_outbound_attempts" a WHERE a.outbox_id = o.id
+       ) attempts ON true
        WHERE o.status = $1
        ORDER BY o.created_at, o.id
        LIMIT $2`,

@@ -134,8 +134,12 @@ export function readZaloOutboundConfig(
       120_000,
     ),
     maxTextLength: int('RECRUITMENT_ZALO_MAX_TEXT_LENGTH', 2_000, 1, 10_000),
-    // Chỉ nạp mã đã kiểm với tài liệu Zalo; mặc định rỗng = mọi từ chối thử lại có giới hạn.
-    permanentErrors: codes('RECRUITMENT_ZALO_PERMANENT_ERRORS', ''),
+    // Các mã đã đối chiếu tài liệu Zalo và không thể tự hết bằng retry cùng payload.
+    // Đặc biệt -224 là OA thiếu gói dịch vụ: retry tự động chỉ tiêu quota và gây nhiễu.
+    permanentErrors: codes(
+      'RECRUITMENT_ZALO_PERMANENT_ERRORS',
+      '-205,-209,-210,-212,-213,-221,-223,-224,-227,-230,-232,-233',
+    ),
     tokenErrors: codes('RECRUITMENT_ZALO_TOKEN_ERRORS', '-216'),
     maxRejectAttempts: int('RECRUITMENT_ZALO_MAX_REJECT_ATTEMPTS', 3, 1, 20),
     dispatchGrantRequired: flag('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED'),

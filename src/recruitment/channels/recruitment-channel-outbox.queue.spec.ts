@@ -366,3 +366,185 @@ describe('RecruitmentChannelOutboxQueue — single dispatch guard (G8 C2)', () =
     );
   });
 });
+
+describe('RecruitmentChannelOutboxQueue — production admission + quota ledger', () => {
+  const production = {
+    productionMode: true,
+    interactionWindowHours: 168,
+    freeWindowHours: 48,
+    maxRequestsPerRecipientDay: 5,
+    maxRequestsPerDay: 100,
+    dailyCostBudgetVnd: 100_000,
+    monthlyCostBudgetVnd: 2_000_000,
+    estimatedPaidMessageCostVnd: 500,
+  };
+
+  function productionDb(
+    patch: {
+      hasApplication?: boolean;
+      jobStatus?: string | null;
+      jobPublishedAt?: Date | null;
+      interactionAt?: Date | null;
+      ageSeconds?: number;
+      recipientDay?: number;
+      totalDay?: number;
+      costDay?: number;
+      costMonth?: number;
+    } = {},
+  ) {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const now = new Date('2026-10-18T03:00:00.000Z');
+    const em = {
+      query: jest.fn((sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (/FROM "recruitment_runtime_controls"/.test(sql)) {
+          return Promise.resolve([
+            { outbound_halted: false, failsafe_halted: false },
+          ]);
+        }
+        if (/FROM "recruitment_conversations" c/.test(sql)) {
+          return Promise.resolve([
+            { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 8 },
+          ]);
+        }
+        if (/AS has_application/.test(sql)) {
+          return Promise.resolve([
+            {
+              has_application: patch.hasApplication ?? true,
+              job_status:
+                patch.jobStatus === undefined ? 'ACTIVE' : patch.jobStatus,
+              job_published_at:
+                patch.jobPublishedAt === undefined
+                  ? new Date('2026-10-01T00:00:00.000Z')
+                  : patch.jobPublishedAt,
+              interaction_at:
+                patch.interactionAt === undefined
+                  ? new Date('2026-10-18T02:00:00.000Z')
+                  : patch.interactionAt,
+            },
+          ]);
+        }
+        if (/interaction_age_seconds/.test(sql)) {
+          return Promise.resolve([
+            {
+              at: now,
+              day_start: new Date('2026-10-17T17:00:00.000Z'),
+              next_day: new Date('2026-10-18T17:00:00.000Z'),
+              month_start: new Date('2026-09-30T17:00:00.000Z'),
+              next_month: new Date('2026-10-31T17:00:00.000Z'),
+              interaction_age_seconds: patch.ageSeconds ?? 3600,
+            },
+          ]);
+        }
+        if (/AS recipient_day/.test(sql)) {
+          return Promise.resolve([
+            {
+              recipient_day: patch.recipientDay ?? 0,
+              total_day: patch.totalDay ?? 0,
+              cost_day: patch.costDay ?? 0,
+              cost_month: patch.costMonth ?? 0,
+            },
+          ]);
+        }
+        if (/UPDATE "recruitment_channel_outbox"/.test(sql)) {
+          return Promise.resolve([[{ id: 21 }], 1]);
+        }
+        return Promise.resolve([]);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((fn: (e: typeof em) => unknown) => fn(em)),
+    };
+    return {
+      queue: new RecruitmentChannelOutboxQueue(dataSource as any),
+      calls,
+      ran: (re: RegExp) => calls.filter((call) => re.test(call.sql)),
+    };
+  }
+
+  const hr = row({ sourceType: 'HR_MESSAGE', controlVersion: null });
+
+  it('interaction hợp lệ + job ACTIVE + còn quota → ghi ledger rồi mới cho mở mạng', async () => {
+    const db = productionDb();
+    await expect(
+      db.queue.dispatch(hr, 'owner-1', false, null, null, production),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+    expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(1);
+    const [ledger] = db.ran(/INSERT INTO "recruitment_outbound_attempts"/);
+    expect(ledger).toBeDefined();
+    expect(ledger.params).toEqual([
+      21,
+      'owner-1',
+      'HR_MESSAGE',
+      'oa-recruit',
+      pilotFingerprint('oa-recruit', '8812345'),
+      new Date('2026-10-18T02:00:00.000Z'),
+      0,
+    ]);
+    expect(JSON.stringify(ledger.params)).not.toContain('8812345');
+  });
+
+  it.each([
+    [
+      'không có interaction',
+      { interactionAt: null },
+      'ZALO_INTERACTION_MISSING',
+    ],
+    [
+      'interaction quá 7 ngày',
+      { ageSeconds: 169 * 3600 },
+      'ZALO_INTERACTION_EXPIRED',
+    ],
+    ['job không còn công bố', { jobStatus: 'PAUSED' }, 'JOB_NOT_PUBLISHED'],
+    [
+      'job ACTIVE nhưng chưa từng publish',
+      { jobPublishedAt: null },
+      'JOB_NOT_PUBLISHED',
+    ],
+  ])('%s → INVALID, không dispatch/ledger', async (_name, patch, code) => {
+    const db = productionDb(patch as any);
+    await expect(
+      db.queue.dispatch(hr, 'owner-1', false, null, null, production),
+    ).resolves.toEqual({ outcome: 'INVALID', code });
+    expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+    expect(db.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
+      0,
+    );
+  });
+
+  it('chạm quota ứng viên/ngày → RETRY tới ngày sau, 0 request mạng', async () => {
+    const db = productionDb({ recipientDay: 5 });
+    await expect(
+      db.queue.dispatch(hr, 'owner-1', false, null, null, production),
+    ).resolves.toEqual({
+      outcome: 'DEFERRED',
+      code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+      retryAt: new Date('2026-10-18T17:00:00.000Z'),
+    });
+    const [defer] = db.ran(/SET status = 'RETRY'/);
+    expect(defer.params[3]).toBe('OUTBOUND_RECIPIENT_DAILY_LIMIT');
+    expect(db.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+    expect(db.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
+      0,
+    );
+  });
+
+  it('tin ngoài cửa sổ miễn phí giữ chi phí ước tính và chặn khi hết ngân sách', async () => {
+    const allowed = productionDb({ ageSeconds: 49 * 3600 });
+    await allowed.queue.dispatch(hr, 'owner-1', false, null, null, production);
+    expect(
+      allowed.ran(/INSERT INTO "recruitment_outbound_attempts"/)[0].params[6],
+    ).toBe(500);
+
+    const blocked = productionDb({
+      ageSeconds: 49 * 3600,
+      costDay: 100_000,
+    });
+    await expect(
+      blocked.queue.dispatch(hr, 'owner-1', false, null, null, production),
+    ).resolves.toMatchObject({
+      outcome: 'DEFERRED',
+      code: 'OUTBOUND_DAILY_COST_LIMIT',
+    });
+  });
+});

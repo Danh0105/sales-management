@@ -11,6 +11,7 @@ import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guar
 import { RecruitmentAiRuntimeGuard } from './ai/recruitment-ai-runtime.guard';
 import { RecruitmentAiLimitsService } from './channels/recruitment-ai-limits.service';
 import { assertAiSafetyConfig } from './channels/recruitment-ai-safety.config';
+import { assertOutboundSafetyConfig } from './channels/recruitment-outbound-safety.config';
 import { RecruitmentRuntimeControlService } from './channels/recruitment-runtime-control.service';
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
@@ -170,5 +171,6 @@ export class RecruitmentModule implements OnModuleInit {
     assertRecruitmentWorkerConfig(get);
     assertZaloOutboundConfig(get);
     assertAiSafetyConfig(get);
+    assertOutboundSafetyConfig(get);
   }
 }

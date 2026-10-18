@@ -104,6 +104,7 @@ function row(patch: Partial<ClaimedOutbox> = {}): ClaimedOutbox {
 function setup(
   opts: {
     enabled?: boolean;
+    runtimeHalted?: boolean;
     canonical?: Record<string, unknown> | null;
     /** Env đầy đủ (ghi đè cách đọc mặc định chỉ có công tắc outbound). */
     env?: Record<string, string>;
@@ -166,6 +167,13 @@ function setup(
     audit as any,
     dataSource as any,
     { sweep: jest.fn().mockResolvedValue(0) } as any,
+    opts.runtimeHalted === undefined
+      ? undefined
+      : ({
+          state: jest
+            .fn()
+            .mockResolvedValue({ outboundHalted: opts.runtimeHalted }),
+        } as any),
   );
   return { sender, queue, credentials, audit };
 }
@@ -211,6 +219,7 @@ describe('RecruitmentZaloSender.process', () => {
       expect.objectContaining({ id: 21, controlVersion: 3 }),
       'o1',
       false,
+      null,
       null,
       null,
     );
@@ -327,6 +336,20 @@ describe('RecruitmentZaloSender.process', () => {
       21,
       'o1',
       'OUTBOUND_DISABLED',
+      1000,
+    );
+  });
+
+  it('dừng khẩn bật sau dispatch nhưng trước socket → RETRY an toàn, 0 request', async () => {
+    zalo = await fakeZalo([]);
+    const { sender, queue } = setup({ runtimeHalted: true });
+    await sender.process(row(), 'o1', config(zalo.url));
+    expect(queue.dispatch).toHaveBeenCalledTimes(1);
+    expect(zalo.requests).toHaveLength(0);
+    expect(queue.markRetry).toHaveBeenCalledWith(
+      21,
+      'o1',
+      'OUTBOUND_HALTED',
       1000,
     );
   });
@@ -493,6 +516,12 @@ describe('RecruitmentZaloSender.process', () => {
       'ZALO_-213',
     ],
     [
+      'OA thiếu gói dịch vụ (-224)',
+      json({ error: -224, message: 'x' }),
+      'markDeadLetter',
+      'ZALO_-224',
+    ],
+    [
       'từ chối chưa phân loại, lần 1',
       json({ error: -230, message: 'x' }),
       'markRetry',
@@ -501,7 +530,12 @@ describe('RecruitmentZaloSender.process', () => {
   ])('Zalo %s → %s(%s)', async (_name, reply, method, code) => {
     zalo = await fakeZalo([reply as (res: http.ServerResponse) => void]);
     const { sender, queue } = setup();
-    await sender.process(row(), 'o1', config(zalo.url));
+    const permanent = code === 'ZALO_-224' ? new Set([-213, -224]) : undefined;
+    await sender.process(
+      row(),
+      'o1',
+      config(zalo.url, permanent ? { permanentErrors: permanent } : {}),
+    );
     expect(zalo.requests).toHaveLength(1);
     const call = (queue as Record<string, jest.Mock>)[method].mock.calls[0];
     expect(call.slice(0, 3)).toEqual([21, 'o1', code]);
@@ -780,6 +814,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
         false,
         expect.any(Array),
         { oaId: 'oa-recruit' },
+        null,
       );
       expect(queue.dispatch).toHaveBeenNthCalledWith(
         2,
@@ -788,6 +823,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
         true,
         expect.any(Array),
         { oaId: 'oa-recruit' },
+        null,
       );
       expect(zalo.requests).toHaveLength(2);
     } finally {

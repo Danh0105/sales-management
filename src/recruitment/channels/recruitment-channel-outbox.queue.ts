@@ -6,6 +6,7 @@ import { DataSource, type EntityManager } from 'typeorm';
 import { pilotFingerprint } from './recruitment-ai-safety.config';
 import { returnedRows } from './recruitment-channel-event.queue';
 import { OUTBOX_TEXT_RETENTION_DAYS } from './zalo-outbound.config';
+import type { RecruitmentOutboundSafetyConfig } from './recruitment-outbound-safety.config';
 
 export interface ClaimedOutbox {
   id: number;
@@ -49,6 +50,8 @@ export type DispatchGate =
   | { outcome: 'INVALID'; code: string }
   /** Mất lease (sender khác đã lấy dòng) — không ghi gì. */
   | { outcome: 'LOST' }
+  /** Hạn mức production đã chạm: giữ nguyên nội dung, tự thử lại ở kỳ sau. */
+  | { outcome: 'DEFERRED'; code: string; retryAt: Date }
   /**
    * Trả về chờ, không mở kết nối: outbound đang dừng khẩn / không đọc được trạng thái
    * (`code` trống), hoặc single dispatch guard không cho (`code` = `DISPATCH_GRANT_*`).
@@ -225,6 +228,7 @@ export class RecruitmentChannelOutboxQueue {
     redispatch = false,
     pilotSenders: string[] | null = null,
     guard: DispatchGuard | null = null,
+    production: RecruitmentOutboundSafetyConfig | null = null,
   ): Promise<DispatchGate> {
     return this.dataSource.transaction(async (em) => {
       // Dừng khẩn outbound (P3-7.3 / G8): khoá chia sẻ dòng điều khiển — thao tác dừng
@@ -329,6 +333,32 @@ export class RecruitmentChannelOutboxQueue {
         if (grant && 'denied' in grant) {
           return this.hold(em, row, owner, redispatch, grant.denied);
         }
+
+        let productionAdmission:
+          | { interactionAt: Date; estimatedCostVnd: number }
+          | { denied: string }
+          | { deferred: string; retryAt: Date }
+          | null = null;
+        if (production) {
+          productionAdmission = await this.checkProductionAdmission(
+            em,
+            row,
+            production,
+          );
+          if ('denied' in productionAdmission) {
+            return { outcome: 'INVALID', code: productionAdmission.denied };
+          }
+          if ('deferred' in productionAdmission) {
+            return this.defer(
+              em,
+              row,
+              owner,
+              redispatch,
+              productionAdmission.deferred,
+              productionAdmission.retryAt,
+            );
+          }
+        }
         const dispatched = returnedRows(
           await em.query(
             `UPDATE "recruitment_channel_outbox" SET dispatched_at = now(), updated_at = now()
@@ -354,6 +384,29 @@ export class RecruitmentChannelOutboxQueue {
           // rollback cả `dispatched_at`, không mở kết nối.
           if (used.length !== 1)
             throw new Error('DISPATCH_GRANT_CONSUME_FAILED');
+        }
+        if (productionAdmission && 'interactionAt' in productionAdmission) {
+          // Một dòng = một lần chuẩn bị mở request Send API. Không có nội dung, token
+          // hay user id thô. Nếu process chết sau commit, maintenance chuyển UNKNOWN.
+          await em.query(
+            `INSERT INTO "recruitment_outbound_attempts"
+               (outbox_id, request_no, lease_owner, source_type, channel_account_id,
+                recipient_fingerprint, interaction_at, estimated_cost_vnd)
+             SELECT $1,
+                    coalesce(max(a.request_no), 0) + 1,
+                    $2, $3, $4, $5, $6, $7
+             FROM "recruitment_outbound_attempts" a
+             WHERE a.outbox_id = $1`,
+            [
+              row.id,
+              owner,
+              row.sourceType,
+              row.channelAccountId,
+              pilotFingerprint(row.channelAccountId, row.externalRecipientId),
+              productionAdmission.interactionAt,
+              productionAdmission.estimatedCostVnd,
+            ],
+          );
         }
         return { outcome: 'DISPATCHED' };
       }
@@ -415,6 +468,184 @@ export class RecruitmentChannelOutboxQueue {
     );
     if (!held.length) return { outcome: 'LOST' };
     return code ? { outcome: 'HELD', code } : { outcome: 'HELD' };
+  }
+
+  /** Quota hết: RETRY ở đầu kỳ kế tiếp, không tăng attempt_count và không mở mạng. */
+  private async defer(
+    em: EntityManager,
+    row: ClaimedOutbox,
+    owner: string,
+    redispatch: boolean,
+    code: string,
+    retryAt: Date,
+  ): Promise<DispatchGate> {
+    const deferred = returnedRows(
+      await em.query(
+        `UPDATE "recruitment_channel_outbox"
+         SET status = 'RETRY', attempt_count = greatest(attempt_count - 1, 0),
+             last_error_code = $4, next_attempt_at = $5, dispatched_at = NULL,
+             lease_until = NULL, lease_owner = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2
+           AND (dispatched_at IS NULL OR $3::boolean)
+         RETURNING id`,
+        [row.id, owner, redispatch, code, retryAt],
+      ),
+    );
+    return deferred.length
+      ? { outcome: 'DEFERRED', code, retryAt }
+      : { outcome: 'LOST' };
+  }
+
+  /**
+   * Production admission dưới transaction/khoá toàn cục: chỉ ứng viên vừa tương tác
+   * thật với đúng OA; nếu hồ sơ đã gắn vị trí thì vị trí vẫn phải ACTIVE; quota và
+   * ngân sách được tính từ ledger request bền, không từ log process.
+   */
+  private async checkProductionAdmission(
+    em: EntityManager,
+    row: ClaimedOutbox,
+    limits: RecruitmentOutboundSafetyConfig,
+  ): Promise<
+    | { interactionAt: Date; estimatedCostVnd: number }
+    | { denied: string }
+    | { deferred: string; retryAt: Date }
+  > {
+    await em.query(
+      `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_quota'))`,
+    );
+    await em.query(
+      `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_attempts'), $1::int)`,
+      [row.id],
+    );
+
+    const [eligibility]: Array<{
+      has_application: boolean;
+      job_status: string | null;
+      job_published_at: Date | null;
+      interaction_at: Date | null;
+    }> = await em.query(
+      `SELECT (c.application_id IS NOT NULL) AS has_application,
+              j.status::text AS job_status,
+              j.published_at AS job_published_at,
+              (
+                SELECT max(coalesce(e.provider_created_at, e.received_at))
+                FROM "recruitment_channel_events" e
+                WHERE e.channel = 'ZALO'
+                  AND e.channel_account_id = o.channel_account_id
+                  AND e.external_sender_id = o.external_recipient_id
+                  AND e.event_type = 'user_send_text'
+                  AND e.status = 'PROCESSED'
+                  AND coalesce(e.provider_created_at, e.received_at)
+                        <= clock_timestamp() + interval '5 minutes'
+              ) AS interaction_at
+       FROM "recruitment_channel_outbox" o
+       JOIN "recruitment_messages" m ON m.id = o.recruitment_message_id
+       JOIN "recruitment_conversations" c ON c.id = m.conversation_id
+       LEFT JOIN "recruitment_applications" app ON app.id = c.application_id
+       LEFT JOIN "recruitment_jobs" j ON j.id = app.job_id
+       WHERE o.id = $1`,
+      [row.id],
+    );
+    if (!eligibility) return { denied: 'PRODUCTION_CONTEXT_MISSING' };
+    if (
+      eligibility.has_application &&
+      (eligibility.job_status !== 'ACTIVE' || !eligibility.job_published_at)
+    ) {
+      return { denied: 'JOB_NOT_PUBLISHED' };
+    }
+    if (!eligibility.interaction_at) {
+      return { denied: 'ZALO_INTERACTION_MISSING' };
+    }
+
+    const [clock]: Array<{
+      at: Date;
+      day_start: Date;
+      next_day: Date;
+      month_start: Date;
+      next_month: Date;
+      interaction_age_seconds: number | string;
+    }> = await em.query(
+      `WITH tick AS (SELECT clock_timestamp() AS at)
+       SELECT at,
+              date_trunc('day', at AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS day_start,
+              (date_trunc('day', at AT TIME ZONE 'Asia/Ho_Chi_Minh') + interval '1 day') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS next_day,
+              date_trunc('month', at AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS month_start,
+              (date_trunc('month', at AT TIME ZONE 'Asia/Ho_Chi_Minh') + interval '1 month') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS next_month,
+              extract(epoch FROM (at - $1::timestamptz)) AS interaction_age_seconds
+       FROM tick`,
+      [eligibility.interaction_at],
+    );
+    const ageSeconds = Number(clock.interaction_age_seconds);
+    if (
+      !Number.isFinite(ageSeconds) ||
+      ageSeconds < -300 ||
+      ageSeconds > limits.interactionWindowHours * 3600
+    ) {
+      return { denied: 'ZALO_INTERACTION_EXPIRED' };
+    }
+    const estimatedCostVnd =
+      ageSeconds > limits.freeWindowHours * 3600
+        ? limits.estimatedPaidMessageCostVnd
+        : 0;
+    const fingerprint = pilotFingerprint(
+      row.channelAccountId,
+      row.externalRecipientId,
+    );
+    const [usage]: Array<{
+      recipient_day: number | string;
+      total_day: number | string;
+      cost_day: number | string;
+      cost_month: number | string;
+    }> = await em.query(
+      `SELECT
+         count(*) FILTER (
+           WHERE channel_account_id = $1 AND recipient_fingerprint = $2
+             AND started_at >= $3::timestamptz AND started_at < $4::timestamptz
+         ) AS recipient_day,
+         count(*) FILTER (
+           WHERE started_at >= $3::timestamptz AND started_at < $4::timestamptz
+         ) AS total_day,
+         coalesce(sum(estimated_cost_vnd) FILTER (
+           WHERE started_at >= $3::timestamptz AND started_at < $4::timestamptz
+         ), 0) AS cost_day,
+         coalesce(sum(estimated_cost_vnd) FILTER (
+           WHERE started_at >= $5::timestamptz AND started_at < $6::timestamptz
+         ), 0) AS cost_month
+       FROM "recruitment_outbound_attempts"`,
+      [
+        row.channelAccountId,
+        fingerprint,
+        clock.day_start,
+        clock.next_day,
+        clock.month_start,
+        clock.next_month,
+      ],
+    );
+    if (Number(usage.recipient_day) >= limits.maxRequestsPerRecipientDay) {
+      return {
+        deferred: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+        retryAt: clock.next_day,
+      };
+    }
+    if (Number(usage.total_day) >= limits.maxRequestsPerDay) {
+      return { deferred: 'OUTBOUND_DAILY_LIMIT', retryAt: clock.next_day };
+    }
+    if (
+      Number(usage.cost_month) + estimatedCostVnd >
+      limits.monthlyCostBudgetVnd
+    ) {
+      return {
+        deferred: 'OUTBOUND_MONTHLY_COST_LIMIT',
+        retryAt: clock.next_month,
+      };
+    }
+    if (Number(usage.cost_day) + estimatedCostVnd > limits.dailyCostBudgetVnd) {
+      return {
+        deferred: 'OUTBOUND_DAILY_COST_LIMIT',
+        retryAt: clock.next_day,
+      };
+    }
+    return { interactionAt: eligibility.interaction_at, estimatedCostVnd };
   }
 
   /**
@@ -504,6 +735,28 @@ export class RecruitmentChannelOutboxQueue {
     return row?.ready === true;
   }
 
+  async productionSafetyReady(): Promise<boolean> {
+    const [row]: Array<{ ready: boolean }> = await this.dataSource.query(
+      `SELECT to_regclass('public.recruitment_outbound_attempts') IS NOT NULL AS ready`,
+    );
+    return row?.ready === true;
+  }
+
+  /** Lần Send API đầu bị Zalo từ chối token; kết thúc ledger trước request thứ hai. */
+  async markAttemptRejected(id: number, owner: string, code: string) {
+    return (
+      returnedRows(
+        await this.dataSource.query(
+          `UPDATE "recruitment_outbound_attempts"
+         SET outcome = 'REJECTED', result_code = $3, completed_at = clock_timestamp()
+         WHERE outbox_id = $1 AND lease_owner = $2 AND outcome = 'DISPATCHING'
+         RETURNING id`,
+          [id, owner, code],
+        ),
+      ).length > 0
+    );
+  }
+
   async heartbeat(id: number, owner: string, leaseMs: number) {
     return this.fenced(
       `UPDATE "recruitment_channel_outbox"
@@ -516,11 +769,19 @@ export class RecruitmentChannelOutboxQueue {
   /** Đã gửi: lưu id tin phía Zalo và XOÁ bản sao nội dung (canonical còn ở recruitment_messages). */
   async markSent(id: number, owner: string, providerMessageId: string | null) {
     return this.fenced(
-      `UPDATE "recruitment_channel_outbox"
-       SET status = 'SENT', sent_at = now(), provider_message_id = $3::varchar,
-           message_text = NULL, text_redacted_at = now(), lease_until = NULL,
-           next_attempt_at = NULL, last_error_code = NULL, updated_at = now()
-       WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
+      `WITH changed AS (
+         UPDATE "recruitment_channel_outbox"
+         SET status = 'SENT', sent_at = now(), provider_message_id = $3::varchar,
+             message_text = NULL, text_redacted_at = now(), lease_until = NULL,
+             next_attempt_at = NULL, last_error_code = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id
+       ), completed AS (
+         UPDATE "recruitment_outbound_attempts"
+         SET outcome = 'SENT', result_code = NULL, provider_message_id = $3::varchar,
+             completed_at = clock_timestamp()
+         WHERE outbox_id = $1 AND lease_owner = $2 AND outcome = 'DISPATCHING'
+           AND EXISTS (SELECT 1 FROM changed)
+       ) SELECT id FROM changed`,
       [id, owner, providerMessageId],
     );
   }
@@ -528,11 +789,19 @@ export class RecruitmentChannelOutboxQueue {
   /** Chắc chắn chưa gửi → thử lại sau `delayMs` (giữ vị trí đầu hàng của người nhận). */
   async markRetry(id: number, owner: string, code: string, delayMs: number) {
     return this.fenced(
-      `UPDATE "recruitment_channel_outbox"
-       SET status = 'RETRY', last_error_code = $3::varchar, dispatched_at = NULL,
-           next_attempt_at = now() + $4::int * interval '1 millisecond',
-           lease_until = NULL, updated_at = now()
-       WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
+      `WITH changed AS (
+         UPDATE "recruitment_channel_outbox"
+         SET status = 'RETRY', last_error_code = $3::varchar, dispatched_at = NULL,
+             next_attempt_at = now() + $4::int * interval '1 millisecond',
+             lease_until = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id
+       ), completed AS (
+         UPDATE "recruitment_outbound_attempts"
+         SET outcome = 'RETRY', result_code = $3::varchar,
+             completed_at = clock_timestamp()
+         WHERE outbox_id = $1 AND lease_owner = $2 AND outcome = 'DISPATCHING'
+           AND EXISTS (SELECT 1 FROM changed)
+       ) SELECT id FROM changed`,
       [id, owner, code, delayMs],
     );
   }
@@ -540,20 +809,36 @@ export class RecruitmentChannelOutboxQueue {
   /** Có thể đã gửi → chờ đối soát, không tự gửi lại. */
   async markUnknown(id: number, owner: string, code: string) {
     return this.fenced(
-      `UPDATE "recruitment_channel_outbox"
-       SET status = 'UNKNOWN', last_error_code = $3::varchar, lease_until = NULL,
-           next_attempt_at = NULL, updated_at = now()
-       WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
+      `WITH changed AS (
+         UPDATE "recruitment_channel_outbox"
+         SET status = 'UNKNOWN', last_error_code = $3::varchar, lease_until = NULL,
+             next_attempt_at = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id
+       ), completed AS (
+         UPDATE "recruitment_outbound_attempts"
+         SET outcome = 'UNKNOWN', result_code = $3::varchar,
+             completed_at = clock_timestamp()
+         WHERE outbox_id = $1 AND lease_owner = $2 AND outcome = 'DISPATCHING'
+           AND EXISTS (SELECT 1 FROM changed)
+       ) SELECT id FROM changed`,
       [id, owner, code],
     );
   }
 
   async markDeadLetter(id: number, owner: string, code: string) {
     return this.fenced(
-      `UPDATE "recruitment_channel_outbox"
-       SET status = 'DEAD_LETTER', last_error_code = $3::varchar, lease_until = NULL,
-           next_attempt_at = NULL, updated_at = now()
-       WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id`,
+      `WITH changed AS (
+         UPDATE "recruitment_channel_outbox"
+         SET status = 'DEAD_LETTER', last_error_code = $3::varchar, lease_until = NULL,
+             next_attempt_at = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'SENDING' AND lease_owner = $2 RETURNING id
+       ), completed AS (
+         UPDATE "recruitment_outbound_attempts"
+         SET outcome = 'DEAD_LETTER', result_code = $3::varchar,
+             completed_at = clock_timestamp()
+         WHERE outbox_id = $1 AND lease_owner = $2 AND outcome = 'DISPATCHING'
+           AND EXISTS (SELECT 1 FROM changed)
+       ) SELECT id FROM changed`,
       [id, owner, code],
     );
   }
@@ -565,12 +850,20 @@ export class RecruitmentChannelOutboxQueue {
   async recoverDispatched(oaId: string): Promise<number[]> {
     const rows = returnedRows<{ id: number | string }>(
       await this.dataSource.query(
-        `UPDATE "recruitment_channel_outbox"
-         SET status = 'UNKNOWN', last_error_code = 'LEASE_EXPIRED_AFTER_DISPATCH',
-             lease_until = NULL, updated_at = now()
-         WHERE channel_account_id = $1 AND status = 'SENDING'
-           AND lease_until < now() AND dispatched_at IS NOT NULL
-         RETURNING id`,
+        `WITH changed AS (
+           UPDATE "recruitment_channel_outbox"
+           SET status = 'UNKNOWN', last_error_code = 'LEASE_EXPIRED_AFTER_DISPATCH',
+               lease_until = NULL, updated_at = now()
+           WHERE channel_account_id = $1 AND status = 'SENDING'
+             AND lease_until < now() AND dispatched_at IS NOT NULL
+           RETURNING id
+         ), completed AS (
+           UPDATE "recruitment_outbound_attempts" a
+           SET outcome = 'UNKNOWN', result_code = 'LEASE_EXPIRED_AFTER_DISPATCH',
+               completed_at = clock_timestamp()
+           FROM changed c
+           WHERE a.outbox_id = c.id AND a.outcome = 'DISPATCHING'
+         ) SELECT id FROM changed`,
         [oaId],
       ),
     );
