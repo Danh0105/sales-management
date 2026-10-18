@@ -47,6 +47,58 @@ export class AddRecruitmentOutboundAttemptLedger1793200000000 implements Migrati
     await queryRunner.query(
       `CREATE UNIQUE INDEX "UQ_outbound_attempt_active_lease" ON "recruitment_outbound_attempts" ("outbox_id", "lease_owner") WHERE "outcome" = 'DISPATCHING'`,
     );
+    // Ledger là nguồn quota/chi phí: INSERT luôn DISPATCHING + giờ DB; chỉ ghi kết quả
+    // một lần; không xoá (xoá = "hoàn" quota + mất bằng chứng đối soát).
+    await queryRunner.query(`
+      CREATE FUNCTION "recruitment_outbound_attempt_guard"() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          RAISE EXCEPTION 'request outbound % là bằng chứng đối soát/quota — không xoá được', OLD."id";
+        END IF;
+        IF TG_OP = 'INSERT' THEN
+          NEW."outcome" := 'DISPATCHING';
+          NEW."result_code" := NULL;
+          NEW."provider_message_id" := NULL;
+          NEW."completed_at" := NULL;
+          NEW."started_at" := clock_timestamp();
+          RETURN NEW;
+        END IF;
+        IF OLD."outcome" <> 'DISPATCHING' THEN
+          RAISE EXCEPTION 'request outbound % đã kết thúc (%) — bất biến', OLD."id", OLD."outcome";
+        END IF;
+        IF (NEW."id", NEW."outbox_id", NEW."request_no", NEW."lease_owner", NEW."source_type",
+            NEW."channel_account_id", NEW."recipient_fingerprint", NEW."interaction_at",
+            NEW."estimated_cost_vnd", NEW."started_at")
+           IS DISTINCT FROM
+           (OLD."id", OLD."outbox_id", OLD."request_no", OLD."lease_owner", OLD."source_type",
+            OLD."channel_account_id", OLD."recipient_fingerprint", OLD."interaction_at",
+            OLD."estimated_cost_vnd", OLD."started_at") THEN
+          RAISE EXCEPTION 'request outbound %: chỉ được ghi kết quả, metadata bất biến', OLD."id";
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `);
+    await queryRunner.query(`
+      CREATE TRIGGER "TRG_outbound_attempt_guard"
+        BEFORE INSERT OR UPDATE OR DELETE ON "recruitment_outbound_attempts"
+        FOR EACH ROW EXECUTE FUNCTION "recruitment_outbound_attempt_guard"()
+    `);
+    // App: đọc, thêm, ghi kết quả. Không xoá, không sửa metadata.
+    await queryRunner.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sales_app') THEN
+          REVOKE ALL ON TABLE "recruitment_outbound_attempts" FROM sales_app;
+          GRANT SELECT, INSERT ON TABLE "recruitment_outbound_attempts" TO sales_app;
+          GRANT UPDATE ("outcome", "result_code", "provider_message_id", "completed_at")
+            ON TABLE "recruitment_outbound_attempts" TO sales_app;
+          REVOKE ALL ON SEQUENCE "recruitment_outbound_attempts_id_seq" FROM sales_app;
+          GRANT USAGE, SELECT ON SEQUENCE "recruitment_outbound_attempts_id_seq" TO sales_app;
+        END IF;
+      END $$
+    `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
@@ -59,5 +111,8 @@ export class AddRecruitmentOutboundAttemptLedger1793200000000 implements Migrati
       );
     }
     await queryRunner.query(`DROP TABLE "recruitment_outbound_attempts"`);
+    await queryRunner.query(
+      `DROP FUNCTION "recruitment_outbound_attempt_guard"()`,
+    );
   }
 }
