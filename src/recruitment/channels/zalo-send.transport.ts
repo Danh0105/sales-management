@@ -110,8 +110,11 @@ export type SendClassification =
   | { result: 'TOKEN_INVALID'; code: string }
   /** Chắc chắn chưa gửi — thử lại an toàn. */
   | { result: 'RETRY'; code: string }
-  /** Zalo từ chối (tin chưa đi); `permanent` = không bao giờ gửi được. */
-  | { result: 'REJECTED'; code: string; permanent: boolean }
+  /**
+   * Zalo từ chối (tin chưa đi); `permanent` = không bao giờ gửi được; `oaBlocked` = lỗi quyền
+   * dịch vụ của cả OA (vd. -224 thiếu gói) — mọi tin sau cũng sẽ bị từ chối.
+   */
+  | { result: 'REJECTED'; code: string; permanent: boolean; oaBlocked: boolean }
   /** Có thể đã gửi — không tự gửi lại. */
   | { result: 'UNKNOWN'; code: string };
 
@@ -123,7 +126,10 @@ export type SendClassification =
  */
 export function classifySend(
   outcome: TransportOutcome,
-  config: Pick<ZaloOutboundConfig, 'permanentErrors' | 'tokenErrors'>,
+  config: Pick<
+    ZaloOutboundConfig,
+    'permanentErrors' | 'tokenErrors' | 'oaBlockingErrors'
+  >,
 ): SendClassification {
   if (outcome.kind === 'not-sent') {
     return {
@@ -152,6 +158,7 @@ export function classifySend(
       result: 'REJECTED',
       code: `PROVIDER_HTTP_${status}`,
       permanent: true,
+      oaBlocked: false,
     };
   }
 
@@ -188,6 +195,9 @@ export function classifySend(
   return {
     result: 'REJECTED',
     code,
-    permanent: config.permanentErrors.has(record.error),
+    permanent:
+      config.permanentErrors.has(record.error) ||
+      config.oaBlockingErrors.has(record.error),
+    oaBlocked: config.oaBlockingErrors.has(record.error),
   };
 }

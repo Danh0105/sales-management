@@ -11,6 +11,7 @@ const TIMEOUTS = { connectTimeoutMs: 1000, responseTimeoutMs: 300 };
 const CODES = {
   permanentErrors: new Set([-213]),
   tokenErrors: new Set([-216]),
+  oaBlockingErrors: new Set([-224]),
 };
 
 /** Server HTTP thật trên localhost — hành vi do từng test quyết định. */
@@ -174,17 +175,45 @@ describe('classifySend', () => {
     [
       'mã vĩnh viễn cấu hình → REJECTED permanent',
       response(200, { error: -213, message: 'x' }),
-      { result: 'REJECTED', code: 'ZALO_-213', permanent: true },
+      {
+        result: 'REJECTED',
+        code: 'ZALO_-213',
+        permanent: true,
+        oaBlocked: false,
+      },
+    ],
+    [
+      'OA thiếu quyền gói dịch vụ (-224) → REJECTED permanent + oaBlocked (không retry)',
+      response(200, {
+        error: -224,
+        message: 'The OA needs to upgrade OA Tier Package',
+      }),
+      {
+        result: 'REJECTED',
+        code: 'ZALO_-224',
+        permanent: true,
+        oaBlocked: true,
+      },
     ],
     [
       'mã chưa phân loại → REJECTED (thử lại có giới hạn)',
       response(200, { error: -230, message: 'x' }),
-      { result: 'REJECTED', code: 'ZALO_-230', permanent: false },
+      {
+        result: 'REJECTED',
+        code: 'ZALO_-230',
+        permanent: false,
+        oaBlocked: false,
+      },
     ],
     [
       '400 → REJECTED permanent',
       response(400, ''),
-      { result: 'REJECTED', code: 'PROVIDER_HTTP_400', permanent: true },
+      {
+        result: 'REJECTED',
+        code: 'PROVIDER_HTTP_400',
+        permanent: true,
+        oaBlocked: false,
+      },
     ],
     [
       '200 nhưng không phải JSON → UNKNOWN',

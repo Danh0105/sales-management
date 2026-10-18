@@ -11,6 +11,11 @@ import { hostname } from 'os';
 import { DataSource } from 'typeorm';
 
 import { RecruitmentAuditService } from '../recruitment-audit.service';
+import {
+  HrAlertSeverity,
+  HrAlertType,
+  RuntimeControlScope,
+} from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import {
   RecruitmentChannelOutboxQueue,
@@ -49,7 +54,7 @@ type Outcome =
   | { status: 'SENT'; providerMessageId: string | null }
   | { status: 'RETRY'; code: string }
   | { status: 'UNKNOWN'; code: string }
-  | { status: 'DEAD_LETTER'; code: string };
+  | { status: 'DEAD_LETTER'; code: string; oaBlocked?: boolean };
 
 /**
  * Sender: `recruitment_channel_outbox` → Zalo Send API của OA **tuyển dụng**.
@@ -369,6 +374,9 @@ export class RecruitmentZaloSender
       case 'TOKEN_INVALID':
         return { status: 'RETRY', code: 'CREDENTIAL_INVALID' };
       case 'REJECTED':
+        if (result.oaBlocked) {
+          return { status: 'DEAD_LETTER', code: result.code, oaBlocked: true };
+        }
         return result.permanent || row.attemptCount >= config.maxRejectAttempts
           ? { status: 'DEAD_LETTER', code: result.code }
           : { status: 'RETRY', code: result.code };
@@ -474,6 +482,64 @@ export class RecruitmentZaloSender
       (outcome.status === 'UNKNOWN' || outcome.status === 'DEAD_LETTER')
     ) {
       await this.record(row.id, outcome.status, code);
+    }
+    // Lỗi quyền dịch vụ của cả OA: dừng khẩn ngay cả khi mất lease (Zalo đã trả lời).
+    if (outcome.status === 'DEAD_LETTER' && outcome.oaBlocked) {
+      await this.blockOutbound(row.id, config, code);
+    }
+  }
+
+  /**
+   * Zalo từ chối vì quyền dịch vụ của OA (vd. -224): DỪNG KHẨN outbound (audit RUNTIME_STOP,
+   * actor hệ thống) + cảnh báo CRITICAL cho HR / SYSTEM OWNER. Không tự mở lại khi gói OA
+   * thay đổi — người vận hành mở lại thủ công sau khi Owner xác nhận gói. Dừng khẩn lỗi
+   * → runtime tự bật failsafe (fail-closed).
+   */
+  private async blockOutbound(
+    outboxId: number,
+    config: ZaloOutboundConfig,
+    code: string,
+  ): Promise<void> {
+    this.logger.error(
+      `sender OUTBOUND DỪNG KHẨN: Zalo ${code} — OA thiếu quyền dịch vụ (gói OA); chỉ mở lại thủ công sau khi SYSTEM OWNER xác nhận gói OA`,
+    );
+    if (!this.runtime) {
+      this.logger.error(
+        'sender: không có runtime control — KHÔNG dừng được outbound tự động',
+      );
+    } else {
+      try {
+        await this.runtime.set(
+          [RuntimeControlScope.OUTBOUND],
+          true,
+          `ZALO_OA_SERVICE_BLOCKED ${code}: OA cần kiểm tra/nâng cấp gói dịch vụ — chỉ mở lại sau khi SYSTEM OWNER xác nhận`,
+          SYSTEM_ACTOR,
+        );
+      } catch (error) {
+        this.logger.error(
+          `sender: dừng khẩn outbound lỗi error=${errorCode(error)} (runtime đã bật failsafe)`,
+        );
+      }
+    }
+    try {
+      const day = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+      }).format(new Date());
+      await this.alerts.raise({
+        type: HrAlertType.OUTBOUND_PROVIDER_BLOCKED,
+        severity: HrAlertSeverity.CRITICAL,
+        sourceKey: `zalo-oa:${config.oaId}:${code}:${day}`,
+        outboxId,
+        details: {
+          code,
+          outboundHalted: true,
+          action: 'OWNER_CHECK_OA_PACKAGE',
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `sender: cảnh báo OA bị chặn lỗi error=${errorCode(error)}`,
+      );
     }
   }
 

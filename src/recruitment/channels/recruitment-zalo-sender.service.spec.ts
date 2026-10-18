@@ -81,6 +81,7 @@ function config(
     maxTextLength: 2000,
     permanentErrors: new Set([-213]),
     tokenErrors: new Set([-216]),
+    oaBlockingErrors: new Set([-224]),
     maxRejectAttempts: 3,
     dispatchGrantRequired: false,
     ...patch,
@@ -108,6 +109,8 @@ function setup(
     canonical?: Record<string, unknown> | null;
     /** Env đầy đủ (ghi đè cách đọc mặc định chỉ có công tắc outbound). */
     env?: Record<string, string>;
+    runtime?: Record<string, jest.Mock>;
+    alerts?: Record<string, jest.Mock>;
   } = {},
 ) {
   const queue = {
@@ -166,14 +169,15 @@ function setup(
     credentials as any,
     audit as any,
     dataSource as any,
-    { sweep: jest.fn().mockResolvedValue(0) } as any,
-    opts.runtimeHalted === undefined
-      ? undefined
-      : ({
-          state: jest
-            .fn()
-            .mockResolvedValue({ outboundHalted: opts.runtimeHalted }),
-        } as any),
+    (opts.alerts ?? { sweep: jest.fn().mockResolvedValue(0) }) as any,
+    opts.runtime ??
+      (opts.runtimeHalted === undefined
+        ? undefined
+        : ({
+            state: jest
+              .fn()
+              .mockResolvedValue({ outboundHalted: opts.runtimeHalted }),
+          } as any)),
   );
   return { sender, queue, credentials, audit };
 }
@@ -541,6 +545,74 @@ describe('RecruitmentZaloSender.process', () => {
     const call = (queue as Record<string, jest.Mock>)[method].mock.calls[0];
     expect(call.slice(0, 3)).toEqual([21, 'o1', code]);
     expect(queue.markSent).not.toHaveBeenCalled();
+  });
+
+  it('Zalo -224 (OA thiếu quyền gói dịch vụ) → DEAD_LETTER, outbound TỰ DỪNG KHẨN (actor hệ thống) + cảnh báo CRITICAL; không retry', async () => {
+    zalo = await fakeZalo([
+      json({ error: -224, message: 'The OA needs to upgrade OA Tier Package' }),
+    ]);
+    const runtime = {
+      state: jest.fn().mockResolvedValue({ outboundHalted: false }),
+      set: jest.fn().mockResolvedValue({ outboundHalted: true }),
+    };
+    const alerts = {
+      sweep: jest.fn().mockResolvedValue(0),
+      raise: jest.fn().mockResolvedValue(true),
+    };
+    const { sender, queue } = setup({ runtime, alerts });
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    await sender.process(row({ attemptCount: 1 }), 'o1', config(zalo.url));
+    expect(zalo.requests).toHaveLength(1);
+    expect(queue.markDeadLetter).toHaveBeenCalledWith(21, 'o1', 'ZALO_-224');
+    expect(queue.markRetry).not.toHaveBeenCalled();
+    expect(runtime.set).toHaveBeenCalledWith(
+      ['OUTBOUND'],
+      true,
+      expect.stringContaining('ZALO_OA_SERVICE_BLOCKED ZALO_-224'),
+      expect.objectContaining({ type: 'SYSTEM' }),
+    );
+    expect(runtime.set.mock.calls[0][2].length).toBeLessThanOrEqual(200);
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'OUTBOUND_PROVIDER_BLOCKED',
+        severity: 'CRITICAL',
+        outboxId: 21,
+        sourceKey: expect.stringMatching(
+          /^zalo-oa:oa-recruit:ZALO_-224:\d{4}-\d{2}-\d{2}$/,
+        ),
+      }),
+    );
+  });
+
+  it('mã từ chối của MỘT tin (-213) không dừng outbound', async () => {
+    zalo = await fakeZalo([json({ error: -213, message: 'x' })]);
+    const runtime = {
+      state: jest.fn().mockResolvedValue({ outboundHalted: false }),
+      set: jest.fn(),
+    };
+    const alerts = { sweep: jest.fn(), raise: jest.fn() };
+    const { sender, queue } = setup({ runtime, alerts });
+    await sender.process(row(), 'o1', config(zalo.url));
+    expect(queue.markDeadLetter).toHaveBeenCalledWith(21, 'o1', 'ZALO_-213');
+    expect(runtime.set).not.toHaveBeenCalled();
+    expect(alerts.raise).not.toHaveBeenCalled();
+  });
+
+  it('-224 nhưng dừng khẩn lỗi → vẫn DEAD_LETTER + vẫn cảnh báo (runtime tự bật failsafe)', async () => {
+    zalo = await fakeZalo([json({ error: -224, message: 'x' })]);
+    const runtime = {
+      state: jest.fn().mockResolvedValue({ outboundHalted: false }),
+      set: jest.fn().mockRejectedValue(new Error('db down')),
+    };
+    const alerts = {
+      sweep: jest.fn(),
+      raise: jest.fn().mockResolvedValue(true),
+    };
+    const { sender, queue } = setup({ runtime, alerts });
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    await sender.process(row(), 'o1', config(zalo.url));
+    expect(queue.markDeadLetter).toHaveBeenCalledWith(21, 'o1', 'ZALO_-224');
+    expect(alerts.raise).toHaveBeenCalled();
   });
 
   it('UNKNOWN có audit cho vận hành đối soát', async () => {

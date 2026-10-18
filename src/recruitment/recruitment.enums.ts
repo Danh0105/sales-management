@@ -277,6 +277,11 @@ export enum HrAlertType {
   REPEATED_AI_FAILURE = 'REPEATED_AI_FAILURE',
   /** Vượt trần lượt / token toàn hệ thống — AI đã tự dừng, cần người vận hành. */
   AI_LIMIT_REACHED = 'AI_LIMIT_REACHED',
+  /**
+   * Zalo từ chối vì quyền dịch vụ của OA (vd. -224: OA cần nâng cấp gói) — outbound đã tự
+   * DỪNG KHẨN; chỉ mở lại thủ công sau khi SYSTEM OWNER xác nhận gói OA.
+   */
+  OUTBOUND_PROVIDER_BLOCKED = 'OUTBOUND_PROVIDER_BLOCKED',
 }
 
 export enum HrAlertSeverity {
