@@ -535,8 +535,9 @@ export class RecruitmentChannelOutboxQueue {
 
   /**
    * Production admission dưới transaction/khoá toàn cục: chỉ ứng viên vừa tương tác
-   * thật với đúng OA; nếu hồ sơ đã gắn vị trí thì vị trí vẫn phải ACTIVE; quota và
-   * ngân sách được tính từ ledger request bền, không từ log process.
+   * thật với đúng OA; phản hồi AI của hồ sơ gắn vị trí chưa công bố (DRAFT / chưa từng
+   * publish) bị chặn — tin HR không áp điều kiện vị trí; quota và ngân sách tính từ ledger
+   * request bền, không từ log process.
    */
   private async checkProductionAdmission(
     em: EntityManager,
@@ -619,9 +620,12 @@ export class RecruitmentChannelOutboxQueue {
       [row.id],
     );
     if (!eligibility) return { denied: 'PRODUCTION_CONTEXT_MISSING' };
+    // Chỉ phản hồi AI mới có thể mang thông tin vị trí (backend AI vốn đã ẩn vị trí DRAFT).
+    // Vị trí đã công bố rồi tạm dừng/đóng vẫn được AI báo trạng thái; HR viết tay tự chịu trách nhiệm.
     if (
+      row.sourceType === 'AI_REPLY' &&
       eligibility.has_application &&
-      (eligibility.job_status !== 'ACTIVE' || !eligibility.job_published_at)
+      (eligibility.job_status === 'DRAFT' || !eligibility.job_published_at)
     ) {
       return { denied: 'JOB_NOT_PUBLISHED' };
     }

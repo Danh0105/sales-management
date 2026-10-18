@@ -392,6 +392,7 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
       costMonth?: number;
       /** Uỷ quyền GO PROD ACTIVE; `null` = không có. */
       authorization?: Record<string, number> | null;
+      control?: { control_mode: string; control_version: number };
     } = {},
   ) {
     const calls: Array<{ sql: string; params: unknown[] }> = [];
@@ -406,7 +407,9 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
         }
         if (/FROM "recruitment_conversations" c/.test(sql)) {
           return Promise.resolve([
-            { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 8 },
+            patch.control
+              ? { id: 9, ...patch.control }
+              : { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 8 },
           ]);
         }
         if (/FROM "recruitment_production_authorizations"/.test(sql)) {
@@ -423,6 +426,9 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
               ...patch.authorization,
             },
           ]);
+        }
+        if (/FOR SHARE OF o, a, m/.test(sql)) {
+          return Promise.resolve([{ outbox_id: 21 }]);
         }
         if (/AS has_application/.test(sql)) {
           return Promise.resolve([
@@ -512,12 +518,6 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
       { ageSeconds: 169 * 3600 },
       'ZALO_INTERACTION_EXPIRED',
     ],
-    ['job không còn công bố', { jobStatus: 'PAUSED' }, 'JOB_NOT_PUBLISHED'],
-    [
-      'job ACTIVE nhưng chưa từng publish',
-      { jobPublishedAt: null },
-      'JOB_NOT_PUBLISHED',
-    ],
   ])('%s → INVALID, không dispatch/ledger', async (_name, patch, code) => {
     const db = productionDb(patch as any);
     await expect(
@@ -527,6 +527,41 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     expect(db.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
       0,
     );
+  });
+
+  const ai = row({ sourceType: 'AI_REPLY', controlVersion: 3 });
+  const aiControl = { control_mode: 'AI_ACTIVE', control_version: 3 };
+
+  it.each([
+    ['vị trí DRAFT', { jobStatus: 'DRAFT', jobPublishedAt: null }],
+    ['vị trí ACTIVE nhưng chưa từng publish', { jobPublishedAt: null }],
+  ])(
+    'phản hồi AI cho hồ sơ gắn %s → INVALID JOB_NOT_PUBLISHED',
+    async (_n, patch) => {
+      const db = productionDb({ ...patch, control: aiControl } as any);
+      await expect(
+        db.queue.dispatch(ai, 'owner-1', false, null, null, production),
+      ).resolves.toEqual({ outcome: 'INVALID', code: 'JOB_NOT_PUBLISHED' });
+      expect(
+        db.ran(/INSERT INTO "recruitment_outbound_attempts"/),
+      ).toHaveLength(0);
+    },
+  );
+
+  it('phản hồi AI cho vị trí đã công bố rồi tạm dừng/đóng → vẫn gửi được (AI báo trạng thái)', async () => {
+    for (const jobStatus of ['PAUSED', 'CLOSED']) {
+      const db = productionDb({ jobStatus, control: aiControl } as any);
+      await expect(
+        db.queue.dispatch(ai, 'owner-1', false, null, null, production),
+      ).resolves.toEqual({ outcome: 'DISPATCHED' });
+    }
+  });
+
+  it('tin HR không áp điều kiện vị trí (kể cả hồ sơ gắn vị trí DRAFT)', async () => {
+    const db = productionDb({ jobStatus: 'DRAFT', jobPublishedAt: null });
+    await expect(
+      db.queue.dispatch(hr, 'owner-1', false, null, null, production),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
   });
 
   it.each([
