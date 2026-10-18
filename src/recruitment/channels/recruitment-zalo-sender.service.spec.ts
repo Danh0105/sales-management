@@ -758,6 +758,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
       expect.any(String),
       60_000,
       { oaId: 'oa-recruit' },
+      false,
     );
     expect(logs.join('\n')).toContain('dispatchGuard=on');
   });
@@ -779,6 +780,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
       expect.any(String),
       60_000,
       null,
+      false,
     );
   });
 
@@ -795,6 +797,7 @@ describe('RecruitmentZaloSender — single dispatch guard (G8 C2)', () => {
       expect.any(String),
       60_000,
       { oaId: 'oa-recruit' },
+      false,
     );
   });
 

@@ -152,13 +152,28 @@ export class RecruitmentZaloSender
       if (!ready) {
         this.running = false;
         this.logger.error(
-          'sender KHÔNG chạy: production mode thiếu bảng recruitment_outbound_attempts',
+          'sender KHÔNG chạy: production mode thiếu bảng recruitment_outbound_attempts / recruitment_production_authorizations',
         );
         return;
       }
     }
+    // GO PROD: không có uỷ quyền ACTIVE thì sender vẫn chạy nhưng không claim tin nào
+    // (cửa claim + cửa dispatch đều đòi uỷ quyền) — chỉ đổi env không gửi được.
+    let authorization = '-';
+    if (this.production) {
+      try {
+        const auth = await this.queue.activeProductionAuthorization(
+          config.oaId,
+        );
+        authorization = auth
+          ? `${auth.id} limits=${auth.maxRequestsPerRecipientDay}/${auth.maxRequestsPerDay} budget=${auth.dailyCostBudgetVnd}/${auth.monthlyCostBudgetVnd}`
+          : 'none';
+      } catch (error) {
+        authorization = `error:${errorCode(error)}`;
+      }
+    }
     this.logger.log(
-      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} mode=${this.production ? 'production' : 'pilot'} dispatchGuard=${this.guard ? 'on' : 'off'}`,
+      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} mode=${this.production ? 'production' : 'pilot'} dispatchGuard=${this.guard ? 'on' : 'off'} authorization=${authorization}`,
     );
     const loops: Promise<void>[] = [];
     for (let slot = 0; slot < config.concurrency; slot++) {
@@ -190,6 +205,7 @@ export class RecruitmentZaloSender
           owner,
           config.leaseMs,
           this.guard,
+          this.production !== null,
         );
         if (!row) {
           await sleep(config.pollMs + Math.floor(Math.random() * 200));

@@ -390,6 +390,8 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
       totalDay?: number;
       costDay?: number;
       costMonth?: number;
+      /** Uỷ quyền GO PROD ACTIVE; `null` = không có. */
+      authorization?: Record<string, number> | null;
     } = {},
   ) {
     const calls: Array<{ sql: string; params: unknown[] }> = [];
@@ -405,6 +407,21 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
         if (/FROM "recruitment_conversations" c/.test(sql)) {
           return Promise.resolve([
             { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 8 },
+          ]);
+        }
+        if (/FROM "recruitment_production_authorizations"/.test(sql)) {
+          if (patch.authorization === null) return Promise.resolve([]);
+          return Promise.resolve([
+            {
+              id: 1,
+              max_requests_per_recipient_day: 1000,
+              max_requests_per_day: 1_000_000,
+              daily_cost_budget_vnd: 2_000_000_000,
+              monthly_cost_budget_vnd: 2_000_000_000,
+              interaction_window_hours: 168,
+              free_window_hours: 168,
+              ...patch.authorization,
+            },
           ]);
         }
         if (/AS has_application/.test(sql)) {
@@ -563,6 +580,205 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     expect(
       zeroBudget.ran(/INSERT INTO "recruitment_outbound_attempts"/),
     ).toHaveLength(0);
+  });
+});
+
+describe('RecruitmentChannelOutboxQueue — GO PROD (uỷ quyền production của Owner)', () => {
+  const production = {
+    productionMode: true,
+    interactionWindowHours: 168,
+    freeWindowHours: 48,
+    maxRequestsPerRecipientDay: 50,
+    maxRequestsPerDay: 1000,
+    dailyCostBudgetVnd: 100_000,
+    monthlyCostBudgetVnd: 2_000_000,
+    estimatedPaidMessageCostVnd: 500,
+  };
+  function db(
+    authorization: Record<string, number> | null,
+    usage: Record<string, number> = {},
+    ageSeconds = 3600,
+  ) {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const em = {
+      query: jest.fn((sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (/FROM "recruitment_runtime_controls"/.test(sql)) {
+          return Promise.resolve([
+            { outbound_halted: false, failsafe_halted: false },
+          ]);
+        }
+        if (/FROM "recruitment_conversations" c/.test(sql)) {
+          return Promise.resolve([
+            { id: 9, control_mode: 'HUMAN_TAKEOVER', control_version: 8 },
+          ]);
+        }
+        if (/FROM "recruitment_production_authorizations"/.test(sql)) {
+          return Promise.resolve(authorization ? [authorization] : []);
+        }
+        if (/AS has_application/.test(sql)) {
+          return Promise.resolve([
+            {
+              has_application: false,
+              job_status: null,
+              job_published_at: null,
+              interaction_at: new Date('2026-10-18T02:00:00.000Z'),
+            },
+          ]);
+        }
+        if (/interaction_age_seconds/.test(sql)) {
+          return Promise.resolve([
+            {
+              at: new Date(),
+              day_start: new Date(),
+              next_day: new Date(),
+              month_start: new Date(),
+              next_month: new Date(),
+              interaction_age_seconds: ageSeconds,
+            },
+          ]);
+        }
+        if (/AS recipient_day/.test(sql)) {
+          return Promise.resolve([
+            {
+              recipient_day: 0,
+              total_day: 0,
+              cost_day: 0,
+              cost_month: 0,
+              ...usage,
+            },
+          ]);
+        }
+        if (/UPDATE "recruitment_channel_outbox"/.test(sql)) {
+          return Promise.resolve([[{ id: 21 }], 1]);
+        }
+        return Promise.resolve([]);
+      }),
+    };
+    const dataSource = {
+      transaction: jest.fn((fn: (e: typeof em) => unknown) => fn(em)),
+      query: jest.fn((sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        return Promise.resolve([]);
+      }),
+    };
+    return {
+      queue: new RecruitmentChannelOutboxQueue(dataSource as any),
+      ran: (re: RegExp) => calls.filter((c) => re.test(c.sql)),
+    };
+  }
+  const auth = {
+    id: 3,
+    max_requests_per_recipient_day: 3,
+    max_requests_per_day: 20,
+    daily_cost_budget_vnd: 0,
+    monthly_cost_budget_vnd: 0,
+    interaction_window_hours: 48,
+    free_window_hours: 48,
+  };
+  const hr = row({ sourceType: 'HR_MESSAGE', controlVersion: null });
+
+  it('không có uỷ quyền ACTIVE → HELD PRODUCTION_NOT_AUTHORIZED: không dispatch, không ledger (env một mình không gửi được)', async () => {
+    const d = db(null);
+    await expect(
+      d.queue.dispatch(hr, 'o1', false, null, null, production),
+    ).resolves.toEqual({ outcome: 'HELD', code: 'PRODUCTION_NOT_AUTHORIZED' });
+    expect(d.ran(/SET dispatched_at = now\(\)/)).toHaveLength(0);
+    expect(d.ran(/INSERT INTO "recruitment_outbound_attempts"/)).toHaveLength(
+      0,
+    );
+    // uỷ quyền đọc FOR SHARE, sau khoá quota toàn cục, trong cùng transaction
+    const [read] = d.ran(/FROM "recruitment_production_authorizations"/);
+    expect(read.sql).toMatch(
+      /status = 'ACTIVE' AND channel_account_id = \$1\s+FOR SHARE/,
+    );
+  });
+
+  it('env cao hơn uỷ quyền → áp hạn mức uỷ quyền (3/ứng viên/ngày, 20/ngày, ngân sách 0, cửa sổ 48h)', async () => {
+    await expect(
+      db(auth, { recipient_day: 3 }).queue.dispatch(
+        hr,
+        'o1',
+        false,
+        null,
+        null,
+        production,
+      ),
+    ).resolves.toEqual({
+      outcome: 'INVALID',
+      code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+    });
+    await expect(
+      db(auth, { total_day: 20 }).queue.dispatch(
+        hr,
+        'o1',
+        false,
+        null,
+        null,
+        production,
+      ),
+    ).resolves.toEqual({ outcome: 'INVALID', code: 'OUTBOUND_DAILY_LIMIT' });
+    await expect(
+      db(auth, {}, 49 * 3600).queue.dispatch(
+        hr,
+        'o1',
+        false,
+        null,
+        null,
+        production,
+      ),
+    ).resolves.toEqual({
+      outcome: 'INVALID',
+      code: 'ZALO_INTERACTION_EXPIRED',
+    });
+    await expect(
+      db(auth, { recipient_day: 2, total_day: 19 }).queue.dispatch(
+        hr,
+        'o1',
+        false,
+        null,
+        null,
+        production,
+      ),
+    ).resolves.toEqual({ outcome: 'DISPATCHED' });
+  });
+
+  it('env thấp hơn uỷ quyền → env thắng (chỉ hạ được, không nâng được)', async () => {
+    await expect(
+      db(
+        { ...auth, max_requests_per_day: 500 },
+        { total_day: 20 },
+      ).queue.dispatch(hr, 'o1', false, null, null, {
+        ...production,
+        maxRequestsPerDay: 20,
+      }),
+    ).resolves.toEqual({ outcome: 'INVALID', code: 'OUTBOUND_DAILY_LIMIT' });
+  });
+
+  it('claim production đòi uỷ quyền ACTIVE của đúng OA; pilot/guard thì không', async () => {
+    for (const production of [true, false]) {
+      const d = db(auth);
+      (d.queue as any).dataSource.query = jest.fn((sql: string) =>
+        Promise.resolve(
+          /SELECT head\.id/.test(sql) ? [{ id: 21, recipient: '8812345' }] : [],
+        ),
+      );
+      (d.queue as any).dataSource.transaction = jest.fn((fn: any) =>
+        fn({
+          query: jest.fn((sql: string) =>
+            Promise.resolve(
+              /pg_try_advisory_xact_lock/.test(sql)
+                ? [{ locked: true }]
+                : (expect(
+                    /recruitment_production_authorizations/.test(sql),
+                  ).toBe(production),
+                  [[], 0]),
+            ),
+          ),
+        }),
+      );
+      await d.queue.claimNext('oa-recruit', 'o1', 60_000, null, production);
+    }
   });
 });
 

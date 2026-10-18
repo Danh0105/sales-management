@@ -10,6 +10,11 @@
     python3 -I g8-owner-go.py grant-dispatch <mã GO C2S> <outbox_id>   # dùng GO C2S (1 lần) → grant đúng 1 lần dispatch
     python3 -I g8-owner-go.py revoke-dispatch <grant_id>              # thu hồi grant chưa dùng
     python3 -I g8-owner-go.py list-dispatch                           # các grant dispatch
+    python3 -I g8-owner-go.py approve prod          # GO PROD: Owner duyệt chuyển production (hạn mức, artifact, OA)
+    python3 -I g8-owner-go.py authorize-prod <mã GO PROD> [nhật ký]   # activate-g8.sh prod gọi: tạo uỷ quyền DB
+    python3 -I g8-owner-go.py revoke-prod <authorization_id>          # Owner thu hồi uỷ quyền production (dừng gửi)
+    python3 -I g8-owner-go.py end-prod "<lý do>"                      # activate-g8.sh pilot gọi: kết thúc uỷ quyền
+    python3 -I g8-owner-go.py list-prod                               # các uỷ quyền production
 
 Nguyên tắc
 - GO chỉ được tạo khi có người gõ trực tiếp trong terminal (stdin và stdout đều là TTY) và gõ đúng câu xác nhận;
@@ -28,6 +33,11 @@ Nguyên tắc
   min(hạn bản duyệt, 30 phút), dùng đúng 1 lần cho `grant-dispatch`. Một GO C2S → tối đa một grant (DB
   `UQ_dispatch_grant_go`); trạng thái GO C2S tính theo DB nên crash giữa chừng không làm GO trở lại VALID.
 - Không ghi mã GO vào log: sự kiện ledger mới và audit DB (`activity_log`) chỉ ghi sha256 của mã.
+- GO PROD (`approve prod`, sau khi OA đã nâng cấp gói và một lần gửi nghiệm thu đã SENT): gắn hạn mức trong
+  `3010-production.env`, hash artifact đang chạy, OA, outbox nghiệm thu; 12 giờ, dùng 1 lần — `activate-g8.sh prod`
+  dùng nó để tạo ĐÚNG MỘT uỷ quyền `recruitment_production_authorizations` (app chỉ đọc). Production mode của 3010
+  không claim/gửi tin nào khi không có uỷ quyền ACTIVE; hạn mức hiệu lực = min(env, uỷ quyền) — đổi env không bật
+  hay nới được production. Không dùng lại GO C2 / C2S.
 """
 import datetime as dt
 import fcntl
@@ -46,7 +56,7 @@ CONF = "/opt/kido-recruiter-prod/3010-g8.env"
 GATEWAY_ENV = "/opt/kido-recruiter-prod/.env"
 VALID_HOURS = 12
 VN = dt.timezone(dt.timedelta(hours=7))
-CODE_RE = re.compile(r"^G8-(C[012]|C2S)-\d{8}-\d{6}-[0-9a-f]{4}$")
+CODE_RE = re.compile(r"^G8-(C[012]|C2S|PROD)-\d{8}-\d{6}-[0-9a-f]{4}$")
 C2S_MAX_MINUTES = 30
 LIMIT_KEYS = (
     "RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR", "RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY",
@@ -63,6 +73,9 @@ SCOPE = {
           "GO C2S riêng mới được gửi, đúng 1 lần, chỉ tới pilot; tin HR / tin khác giữ chờ. Restart 3010 (~10–20 giây).",
     "c2s": "Cho phép gửi ĐÚNG MỘT tin AI đã được HR duyệt (outbox cố định, nội dung/người nhận/OA/version cố định); "
            "chỉ dùng 1 lần cho grant-dispatch, hết hạn cùng bản duyệt (tối đa 30 phút).",
+    "prod": "Chuyển 3010 sang production: PILOT=false, bỏ single dispatch grant; mọi tin vẫn qua HR duyệt (AI) / HR viết, "
+            "chỉ tới ứng viên có tương tác hợp lệ, trong hạn mức đã duyệt (ledger bền), ngân sách tin tính phí, dừng khẩn. "
+            "Tạo 1 uỷ quyền DB (app chỉ đọc). Restart 3010 (~10–20 giây). Gửi Zalo vẫn DỪNG cho tới khi HR mở lại.",
 }
 
 
@@ -140,6 +153,9 @@ def status(code):
     # GO C2S: DB là nguồn sự thật — đã có grant mang mã này thì GO đã dùng (kể cả khi chưa kịp ghi ledger).
     if record.get("stage") == "c2s" and grant_count_for_go(code) > 0:
         return record, "USED", "GO C2S đã dùng để cấp grant"
+    # GO PROD: tương tự — đã có uỷ quyền mang fingerprint mã này thì GO đã dùng.
+    if record.get("stage") == "prod" and prod_count_for_go(code) > 0:
+        return record, "USED", "GO PROD đã dùng để tạo uỷ quyền production"
     if now() > dt.datetime.fromisoformat(record["expires_at"]):
         return record, "EXPIRED", f"GO hết hạn lúc {record['expires_at']}"
     return record, "VALID", ""
@@ -611,7 +627,320 @@ def revoke(code):
     if record["stage"] == "c2s":
         db_audit("OWNER_GO_C2S_REVOKE", owner, {"goFp": code_fp(code)[:16],
                                                  "outboxId": record["dispatch"]["outbox_id"]})
+    elif record["stage"] == "prod":
+        db_audit("OWNER_GO_PROD_REVOKE", owner, {"goFp": code_fp(code)[:16]})
     print(f"Đã thu hồi GO fp {code_fp(code)[:12]}")
+
+
+# ---------------------------------------------------------------- GO PROD
+PROD_CONF = "/opt/kido-recruiter-prod/3010-production.env"
+AUTH_TABLE = "recruitment_production_authorizations"
+APP_DIST = "/var/www/sales-management/dist"
+RELEASES = "/opt/kido-recruiter/releases"
+PROD_LIMITS = (  # khoá env → cột uỷ quyền; giá trị phải khớp ràng buộc CHK_prod_auth_limits
+    ("RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY", "max_requests_per_recipient_day", 1, 1000),
+    ("RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY", "max_requests_per_day", 1, 1_000_000),
+    ("RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND", "daily_cost_budget_vnd", 0, 2_000_000_000),
+    ("RECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND", "monthly_cost_budget_vnd", 0, 2_000_000_000),
+    ("RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS", "interaction_window_hours", 1, 168),
+    ("RECRUITMENT_ZALO_FREE_WINDOW_HOURS", "free_window_hours", 1, 168),
+)
+PROD_FLAGS = {"RECRUITMENT_PRODUCTION_MODE": "true", "RECRUITMENT_PILOT_MODE": "false",
+              "RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED": "false", "RECRUITMENT_ZALO_OUTBOUND_ENABLED": "true",
+              "RECRUITMENT_AI_ENABLED": "true", "RECRUITMENT_WORKER_ENABLED": "true"}
+
+
+def prod_count_for_go(code):
+    if psql(f"SELECT to_regclass('public.{AUTH_TABLE}') IS NOT NULL") != "t":
+        return 0
+    return int(psql(f"SELECT count(*) FROM {AUTH_TABLE} WHERE go_code_fp = :'fp'", fp=code_fp(code)) or "0")
+
+
+def dist_hash(path=None):
+    """Cùng cách tính với deploy-3010.sh (h): sha256 của danh sách sha256 từng file, 16 ký tự."""
+    path = path or APP_DIST
+    out = subprocess.run(["bash", "-c", "cd \"$1\" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | "
+                          "xargs -0 sha256sum | sha256sum | cut -c1-16", "_", path],
+                         capture_output=True, text=True, check=False)
+    value = out.stdout.strip()
+    if out.returncode != 0 or not re.fullmatch(r"[0-9a-f]{16}", value):
+        die(f"không tính được hash artifact {path}")
+    return value
+
+
+def prod_config():
+    """Đọc + kiểm 3010-production.env (600 root). Trả (conf, hạn mức) — không in secret."""
+    st = os.stat(PROD_CONF) if os.path.exists(PROD_CONF) else None
+    if not st or st.st_uid != 0 or (st.st_mode & 0o777) != 0o600:
+        die(f"{PROD_CONF} phải tồn tại, 600 root")
+    conf = read_env(PROD_CONF)
+    problems = [f"{k} phải {v}" for k, v in PROD_FLAGS.items() if conf.get(k) != v]
+    limits = {}
+    for key, column, low, high in PROD_LIMITS:
+        raw = conf.get(key, "")
+        if not re.fullmatch(r"\d{1,10}", raw) or not low <= int(raw) <= high:
+            problems.append(f"{key} phải là số nguyên {low}–{high}")
+            continue
+        limits[column] = int(raw)
+    if len(limits) == len(PROD_LIMITS):
+        if limits["max_requests_per_recipient_day"] > limits["max_requests_per_day"]:
+            problems.append("hạn mức ứng viên/ngày lớn hơn toàn hệ thống/ngày")
+        if limits["monthly_cost_budget_vnd"] < limits["daily_cost_budget_vnd"]:
+            problems.append("ngân sách tháng nhỏ hơn ngân sách ngày")
+        if limits["free_window_hours"] > limits["interaction_window_hours"]:
+            problems.append("cửa sổ miễn phí lớn hơn cửa sổ tương tác")
+    est = conf.get("RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND", "")
+    if not re.fullmatch(r"[1-9]\d{0,7}", est):
+        problems.append("RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND phải > 0")
+    if "-224" not in conf.get("RECRUITMENT_ZALO_OA_BLOCKING_ERRORS", "-224").split(","):
+        problems.append("RECRUITMENT_ZALO_OA_BLOCKING_ERRORS phải gồm -224")
+    return conf, limits, problems
+
+
+def prod_facts(oa):
+    raw = psql(f"""
+SELECT json_build_object(
+  'ledger_mig', EXISTS (SELECT 1 FROM migrations WHERE timestamp = 1793200000000
+                        AND name = 'AddRecruitmentOutboundAttemptLedger1793200000000'),
+  'prod_mig', EXISTS (SELECT 1 FROM migrations WHERE timestamp = 1793300000000
+                      AND name = 'AddRecruitmentProductionAuthorizations1793300000000'),
+  'halted', (SELECT outbound_halted FROM recruitment_runtime_controls WHERE id = 1),
+  'failsafe', (SELECT failsafe_halted FROM recruitment_runtime_controls WHERE id = 1),
+  'unfinished', (SELECT coalesce(json_agg(json_build_object('id', id, 'source', source_type, 'status', status)
+                 ORDER BY id), '[]') FROM recruitment_channel_outbox
+                 WHERE status IN ('PENDING', 'SENDING', 'RETRY', 'UNKNOWN')),
+  'credential_oa', (SELECT count(*) FROM recruitment_zalo_credentials WHERE oa_id = :'oa'),
+  'credential_other', (SELECT count(*) FROM recruitment_zalo_credentials WHERE oa_id <> :'oa'),
+  'jobs_active', (SELECT count(*) FROM recruitment_jobs WHERE status = 'ACTIVE'),
+  'jobs_unpublished', (SELECT count(*) FROM recruitment_jobs WHERE status = 'ACTIVE' AND published_at IS NULL),
+  'active_auth', (SELECT CASE WHEN to_regclass('public.{AUTH_TABLE}') IS NULL THEN NULL ELSE
+                  (SELECT json_agg(id) FROM {AUTH_TABLE} WHERE status = 'ACTIVE') END)
+)""", oa=oa)
+    return json.loads(raw)
+
+
+def prod_problems(facts, limits_ok=True):
+    problems = []
+    if not facts["ledger_mig"]: problems.append("chưa áp migration ledger 1793200000000")
+    if not facts["prod_mig"]: problems.append("chưa áp migration GO PROD 1793300000000")
+    if facts["halted"] is not True: problems.append("Gửi Zalo phải đang DỪNG KHẨN (HR bật lại sau khi kích hoạt)")
+    if facts["failsafe"]: problems.append("failsafe đang bật — xử lý trước")
+    if facts["unfinished"]: problems.append(f"còn outbox chưa xong {facts['unfinished']} — HR huỷ/đối soát trước")
+    if facts["credential_oa"] != 1 or facts["credential_other"]:
+        problems.append("credential OA trong DB không đúng một dòng của đúng OA tuyển dụng")
+    if facts["jobs_unpublished"]: problems.append("có vị trí ACTIVE chưa published_at")
+    if not limits_ok: problems.append("cấu hình production sai")
+    try:
+        with open(os.path.join(APP_DIST, "recruitment/channels/recruitment-channel-outbox.queue.js"), encoding="utf8") as f:
+            if AUTH_TABLE not in f.read():
+                problems.append("3010 chưa chạy release có GO PROD")
+    except OSError:
+        problems.append("không đọc được dist của 3010")
+    return problems
+
+
+def verification_send(outbox_id, oa, pilots):
+    """Lượt gửi nghiệm thu sau khi nâng cấp gói OA: outbox SENT có message id Zalo, tới pilot."""
+    raw = psql(f"""SELECT json_build_object('status', o.status, 'has_zmsg', o.provider_message_id IS NOT NULL,
+  'oa', o.channel_account_id, 'fp', {FP_SQL},
+  'sent', to_char(o.sent_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM/YYYY HH24:MI'))
+FROM recruitment_channel_outbox o WHERE o.id = :outbox""", outbox=outbox_id)
+    v = json.loads(raw) if raw else None
+    problems = []
+    if not v: problems.append(f"không có outbox #{outbox_id}")
+    else:
+        if v["status"] != "SENT" or not v["has_zmsg"]:
+            problems.append(f"outbox #{outbox_id} chưa SENT với message id Zalo ({v['status']})")
+        if v["oa"] != oa: problems.append("outbox nghiệm thu không thuộc OA tuyển dụng")
+        if v["fp"] not in pilots: problems.append("outbox nghiệm thu không gửi tới tài khoản pilot của Owner")
+    return v, problems
+
+
+def approve_prod():
+    require_owner_terminal()
+    oa, pilots = dispatch_context()
+    conf, limits, conf_problems = prod_config()
+    lock = dispatch_lock()
+    try:
+        facts = prod_facts(oa)
+        print("\n=== G8 OWNER APPROVAL — GO PROD (production) ===")
+        print(f"Phạm vi: {SCOPE['prod']}")
+        print("Hạn mức (3010-production.env): " + " · ".join(f"{k}={v}" for k, v in limits.items()))
+        current = dist_hash()
+        print(f"Artifact đang chạy: dist {current} · vị trí ACTIVE: {facts['jobs_active']} · "
+              f"uỷ quyền ACTIVE hiện có: {facts['active_auth'] or 'không'}")
+        owner = ask("\nHọ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên đầy đủ")
+        problems = conf_problems + prod_problems(facts)
+        rollback = ask("  Thư mục release rollback (trong /opt/kido-recruiter/releases): ",
+                       lambda v: re.fullmatch(r"[A-Za-z0-9._-]{3,80}", v) is not None, "chỉ tên thư mục")
+        if not os.path.isdir(os.path.join(RELEASES, rollback, "dist")):
+            problems.append(f"không có {RELEASES}/{rollback}/dist để rollback")
+        outbox = parse_id(ask("  Outbox của lượt gửi nghiệm thu (SENT, tới Zalo của Owner): ",
+                              lambda v: re.fullmatch(r"[1-9]\d{0,9}", v) is not None, "số outbox"), "outbox")
+        v, vp = verification_send(outbox, oa, pilots)
+        problems += vp
+        if problems:
+            refuse("approve-prod", owner, outbox, problems)
+        print(f"  Nghiệm thu: outbox #{outbox} SENT {v['sent']} · có message id Zalo · tới pilot fp {v['fp']}")
+        package = ask("  Gói OA đang kích hoạt (tên gói + hạn, xem OA Manager): ", lambda v: len(v) >= 3,
+                      "ghi tên gói và ngày hết hạn")
+        ask("  Gõ OA ICHI SKILL CO QUYEN OPENAPI để xác nhận đúng OA, gói còn hạn, có quyền gửi Tin Tư vấn: ",
+            lambda v: v == "OA ICHI SKILL CO QUYEN OPENAPI", "phải gõ đúng: OA ICHI SKILL CO QUYEN OPENAPI")
+        tag = (f"HAN MUC {limits['max_requests_per_recipient_day']}/{limits['max_requests_per_day']}/"
+               f"{limits['daily_cost_budget_vnd']}")
+        ask(f"  Gõ {tag} để xác nhận hạn mức ứng viên/ngày / toàn hệ thống/ngày / ngân sách tin tính phí (VND/ngày): ",
+            lambda v: v == tag, f"phải gõ đúng: {tag}")
+        ask("\nGõ TOI PHE DUYET PROD để cấp GO PROD: ", lambda v: v == "TOI PHE DUYET PROD",
+            "phải gõ đúng: TOI PHE DUYET PROD")
+        at = now()
+        code = f"G8-PROD-{at:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+        record = {
+            "code": code, "stage": "prod", "scope": SCOPE["prod"],
+            "approver_role": "SYSTEM_OWNER", "approver_name": owner,
+            "approved_at": at.isoformat(), "expires_at": (at + dt.timedelta(hours=VALID_HOURS)).isoformat(),
+            "single_use": True, "oa": oa, "limits": limits, "dist_hash": current, "rollback_release": rollback,
+            "verification_outbox_id": outbox, "oa_package": package,
+            "conditions": {"human_approval_gate": True, "interaction_window": True, "durable_quota": True,
+                           "emergency_stop": True, "outbound_halted_until_hr_resume": True},
+            "host": socket.gethostname(), "tty": os.ttyname(0),
+            "login": os.environ.get("SUDO_USER") or os.environ.get("LOGNAME") or "root",
+        }
+        os.makedirs(GO_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(GO_DIR, code + ".json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        append_ledger({"event": "approve", "code_fp": code_fp(code), "stage": "prod", "approver": owner,
+                       "at": at.isoformat(), "sha256": canonical(record)})
+        db_audit("OWNER_GO_PROD_APPROVE", owner, {"goFp": code_fp(code)[:16], "limits": limits, "distHash": current,
+                                                   "verificationOutboxId": outbox, "rollback": rollback})
+    finally:
+        os.close(lock)
+    print(f"\nĐÃ CẤP GO PROD: {code}  (hết hạn {record['expires_at']}, dùng 1 lần)")
+    print(f"Kích hoạt: ./activate-g8.sh prod --go {code}")
+
+
+def authorize_prod(code, log=None):
+    """activate-g8.sh prod: kiểm lại mọi điều kiện + GO PROD → đúng một uỷ quyền ACTIVE trong DB (1 transaction)."""
+    require_owner_terminal()
+    oa, _ = dispatch_context()
+    conf, limits, conf_problems = prod_config()
+    lock = dispatch_lock()
+    try:
+        record, state, why = status(code)
+        owner = (record or {}).get("approver_name") or "?"
+        if record is None or record.get("stage") != "prod":
+            refuse("authorize-prod", owner, None, [f"chỉ GO PROD dùng được ({(record or {}).get('stage') or why})"], code)
+        if state != "VALID":
+            refuse("authorize-prod", owner, None, [f"GO PROD không còn hiệu lực ({why or state})"], code)
+        problems = conf_problems + prod_problems(prod_facts(oa))
+        if limits != record["limits"]:
+            problems.append("hạn mức trong 3010-production.env đã đổi so với lúc Owner cấp GO PROD")
+        if dist_hash() != record["dist_hash"]:
+            problems.append("artifact 3010 đang chạy khác artifact Owner đã duyệt")
+        if oa != record["oa"]:
+            problems.append("OA tuyển dụng đã đổi")
+        if problems:
+            refuse("authorize-prod", owner, None, problems, code)
+        reason = f"superseded by GO PROD fp {code_fp(code)[:12]}"
+        audit_sql, audit_params = db_audit("OWNER_PROD_AUTHORIZE", owner,
+                                           {"goFp": code_fp(code)[:16], "limits": limits,
+                                            "distHash": record["dist_hash"]}, sql_only=True)
+        L = record["limits"]
+        out = psql(f"""
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('{AUTH_TABLE}'));
+UPDATE {AUTH_TABLE} SET status = 'SUPERSEDED', ended_at = now(), ended_by = :'owner', end_reason = :'reason'
+ WHERE status = 'ACTIVE' AND channel_account_id = :'oa';
+INSERT INTO {AUTH_TABLE} (go_code_fp, channel_account_id, max_requests_per_recipient_day, max_requests_per_day,
+  daily_cost_budget_vnd, monthly_cost_budget_vnd, interaction_window_hours, free_window_hours,
+  release_dist_hash, approved_by, approved_at)
+SELECT :'fp', :'oa', :rd, :d, :bd, :bm, :iw, :fw, :'dist', :'owner', :'approved'::timestamptz
+WHERE NOT EXISTS (SELECT 1 FROM {AUTH_TABLE} WHERE go_code_fp = :'fp')
+RETURNING id;
+SELECT (count(*) = 1) AS ok FROM {AUTH_TABLE} WHERE go_code_fp = :'fp' AND status = 'ACTIVE' \\gset
+\\if :ok
+{audit_sql}
+COMMIT;
+\\else
+ROLLBACK;
+\\endif
+""", fp=code_fp(code), oa=oa, rd=L["max_requests_per_recipient_day"], d=L["max_requests_per_day"],
+            bd=L["daily_cost_budget_vnd"], bm=L["monthly_cost_budget_vnd"], iw=L["interaction_window_hours"],
+            fw=L["free_window_hours"], dist=record["dist_hash"], owner=owner, approved=record["approved_at"],
+            reason=reason, **audit_params)
+        ids = [line for line in out.splitlines() if re.fullmatch(r"\d+", line)]
+        if len(ids) != 1 or prod_count_for_go(code) != 1:
+            refuse("authorize-prod", owner, None, ["không tạo được uỷ quyền (đã rollback) — GO chưa bị dùng"], code)
+        append_ledger({"event": "consume", "code_fp": code_fp(code), "stage": "prod", "at": now().isoformat(),
+                       "authorization_id": int(ids[0]), "log": log})
+    finally:
+        os.close(lock)
+    print(f"  Uỷ quyền production #{ids[0]} ACTIVE · GO PROD fp {code_fp(code)[:12]} đã dùng")
+
+
+def end_prod_authorization(actor, reason, method):
+    audit_sql, audit_params = db_audit(method, actor, {"reason": reason}, sql_only=True)
+    if psql(f"SELECT to_regclass('public.{AUTH_TABLE}') IS NOT NULL") != "t":
+        return []
+    out = psql(f"""
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('{AUTH_TABLE}'));
+UPDATE {AUTH_TABLE} SET status = 'REVOKED', ended_at = now(), ended_by = :'actor', end_reason = :'reason'
+ WHERE status = 'ACTIVE' RETURNING id;
+{audit_sql}
+COMMIT;
+""", actor=actor, reason=reason, **audit_params)
+    return [line for line in out.splitlines() if re.fullmatch(r"\d+", line)]
+
+
+def revoke_prod(auth_arg):
+    require_owner_terminal()
+    auth_id = parse_id(auth_arg, "authorization_id")
+    lock = dispatch_lock()
+    try:
+        owner = ask("Họ tên SYSTEM OWNER: ", lambda v: len(v) >= 3, "nhập họ tên")
+        reason = ask("Lý do thu hồi: ", lambda v: 10 <= len(v) <= 300, "10–300 ký tự")
+        ask(f"Gõ THU HOI PROD {auth_id} để xác nhận: ", lambda v: v == f"THU HOI PROD {auth_id}",
+            f"phải gõ đúng: THU HOI PROD {auth_id}")
+        active = psql(f"SELECT count(*) FROM {AUTH_TABLE} WHERE id = :aid AND status = 'ACTIVE'", aid=auth_id)
+        if active != "1":
+            refuse("revoke-prod", owner, None, [f"uỷ quyền #{auth_id} không ở ACTIVE"])
+        ended = end_prod_authorization(owner, reason, "OWNER_PROD_REVOKE")
+        append_ledger({"event": "revoke-prod", "authorization_ids": ended, "by": owner, "at": now().isoformat()})
+    finally:
+        os.close(lock)
+    print(f"Đã thu hồi uỷ quyền production {ended} — sender không claim/gửi tin mới (production)")
+
+
+def end_prod(reason):
+    """activate-g8.sh pilot: quay lại pilot → kết thúc uỷ quyền production (thu hẹp quyền, không cần GO)."""
+    if os.geteuid() != 0:
+        die("cần root")
+    if not 5 <= len(reason) <= 300:
+        die("lý do 5–300 ký tự")
+    lock = dispatch_lock()
+    try:
+        actor = f"activate-g8.sh pilot ({os.environ.get('SUDO_USER') or os.environ.get('LOGNAME') or 'root'})"
+        ended = end_prod_authorization(actor, reason, "OWNER_PROD_END")
+        append_ledger({"event": "end-prod", "authorization_ids": ended, "reason": reason, "at": now().isoformat()})
+    finally:
+        os.close(lock)
+    print(f"  Uỷ quyền production đã kết thúc: {ended or 'không có uỷ quyền ACTIVE'}")
+
+
+def list_prod():
+    if psql(f"SELECT to_regclass('public.{AUTH_TABLE}') IS NOT NULL") != "t":
+        print("Chưa áp migration GO PROD.")
+        return
+    out = psql(f"""SELECT id || ' · ' || status || ' · OA …' || right(channel_account_id, 4)
+  || ' · ' || max_requests_per_recipient_day || '/' || max_requests_per_day || ' tin · ngân sách '
+  || daily_cost_budget_vnd || '/' || monthly_cost_budget_vnd || ' VND · cửa sổ ' || free_window_hours || '/'
+  || interaction_window_hours || 'h · dist ' || release_dist_hash || ' · duyệt ' || approved_by
+  || ' · bật ' || to_char(activated_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI')
+  || coalesce(' · kết thúc ' || to_char(ended_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI') || ' bởi '
+  || ended_by || ' (' || end_reason || ')', '') || ' · GO fp ' || left(go_code_fp, 12)
+FROM {AUTH_TABLE} ORDER BY id""")
+    print(out or "Chưa có uỷ quyền production nào.")
 
 
 def main():
@@ -621,6 +950,16 @@ def main():
         approve(args[1])
     elif cmd == "approve" and len(args) == 3 and args[1] == "c2s":
         approve_c2s(args[2])
+    elif cmd == "approve" and len(args) == 2 and args[1] == "prod":
+        approve_prod()
+    elif cmd == "authorize-prod" and len(args) in (2, 3):
+        authorize_prod(args[1], args[2] if len(args) == 3 else None)
+    elif cmd == "revoke-prod" and len(args) == 2:
+        revoke_prod(args[1])
+    elif cmd == "end-prod" and len(args) == 2:
+        end_prod(args[1])
+    elif cmd == "list-prod" and len(args) == 1:
+        list_prod()
     elif cmd == "check" and len(args) == 3:
         record, state, why = status(args[1])
         if state != "VALID":
@@ -631,7 +970,7 @@ def main():
               f"duyệt {record['approved_at']} · hết hạn {record['expires_at']}")
     elif cmd == "consume" and len(args) in (3, 4):
         record, state, why = status(args[1])
-        if state != "VALID" or record["stage"] != args[2] or args[2] == "c2s":
+        if state != "VALID" or record["stage"] != args[2] or args[2] in ("c2s", "prod"):
             die(f"không đánh dấu được GO fp {code_fp(args[1])[:12]}: {why or 'sai cổng'}")
         append_ledger({"event": "consume", "code_fp": code_fp(args[1]), "stage": args[2], "at": now().isoformat(),
                        "log": args[3] if len(args) == 4 else None})

@@ -25,6 +25,41 @@ export interface ClaimedOutbox {
 export const DISPATCH_GRANT_TABLE = 'recruitment_outbound_dispatch_grants';
 
 /**
+ * Uỷ quyền production của SYSTEM OWNER (GO PROD). Production mode chỉ claim + dispatch khi
+ * OA có đúng một uỷ quyền `ACTIVE`; hạn mức hiệu lực = min(env, uỷ quyền). App chỉ đọc.
+ */
+export const PRODUCTION_AUTHORIZATION_TABLE =
+  'recruitment_production_authorizations';
+
+/** Uỷ quyền production đang hiệu lực (hạn mức trần do Owner duyệt). */
+export interface ProductionAuthorization {
+  id: number;
+  maxRequestsPerRecipientDay: number;
+  maxRequestsPerDay: number;
+  dailyCostBudgetVnd: number;
+  monthlyCostBudgetVnd: number;
+  interactionWindowHours: number;
+  freeWindowHours: number;
+}
+
+const AUTHORIZATION_COLUMNS = `id, max_requests_per_recipient_day, max_requests_per_day,
+  daily_cost_budget_vnd, monthly_cost_budget_vnd, interaction_window_hours, free_window_hours`;
+
+function authorizationOf(
+  row: Record<string, unknown>,
+): ProductionAuthorization {
+  return {
+    id: Number(row.id),
+    maxRequestsPerRecipientDay: Number(row.max_requests_per_recipient_day),
+    maxRequestsPerDay: Number(row.max_requests_per_day),
+    dailyCostBudgetVnd: Number(row.daily_cost_budget_vnd),
+    monthlyCostBudgetVnd: Number(row.monthly_cost_budget_vnd),
+    interactionWindowHours: Number(row.interaction_window_hours),
+    freeWindowHours: Number(row.free_window_hours),
+  };
+}
+
+/**
  * Single dispatch guard (G8 C2): bật thì CHỈ tin AI có grant `ACTIVE` khớp (đúng outbox,
  * OA, người nhận pilot, hash nội dung đã duyệt, version điều khiển) mới được claim và
  * dispatch; grant tiêu đúng một lần trong CÙNG transaction ghi `dispatched_at`, trước
@@ -92,6 +127,7 @@ export class RecruitmentChannelOutboxQueue {
     owner: string,
     leaseMs: number,
     guard: DispatchGuard | null = null,
+    production = false,
   ): Promise<ClaimedOutbox | null> {
     const heads: Array<{ id: number; recipient: string }> =
       await this.dataSource.query(
@@ -111,7 +147,14 @@ export class RecruitmentChannelOutboxQueue {
         [oaId],
       );
     for (const head of heads) {
-      const claimed = await this.tryClaim(oaId, head, owner, leaseMs, guard);
+      const claimed = await this.tryClaim(
+        oaId,
+        head,
+        owner,
+        leaseMs,
+        guard,
+        production,
+      );
       if (claimed) return claimed;
     }
     return null;
@@ -123,7 +166,14 @@ export class RecruitmentChannelOutboxQueue {
     owner: string,
     leaseMs: number,
     guard: DispatchGuard | null,
+    production: boolean,
   ): Promise<ClaimedOutbox | null> {
+    // Production: không có uỷ quyền GO PROD ACTIVE cho OA → không claim (tin đứng PENDING,
+    // không claim lặp); cửa kiểm cuối vẫn kiểm lại dưới khoá.
+    const productionClause = production
+      ? `AND EXISTS (SELECT 1 FROM "${PRODUCTION_AUTHORIZATION_TABLE}" p
+               WHERE p.status = 'ACTIVE' AND p.channel_account_id = t.channel_account_id)`
+      : '';
     // Guard bật: chỉ tin AI có grant ACTIVE còn hạn mới được claim (tin HR / tin không có
     // grant đứng nguyên PENDING, không bị claim lặp). Cửa kiểm cuối vẫn kiểm lại đầy đủ.
     const grantClause = guard
@@ -168,6 +218,7 @@ export class RecruitmentChannelOutboxQueue {
                   OR (t.status = 'RETRY' AND t.next_attempt_at <= now())
                   OR (t.status = 'SENDING' AND t.lease_until < now() AND t.dispatched_at IS NULL))
              ${grantClause}
+             ${productionClause}
              AND NOT EXISTS (
                SELECT 1 FROM "recruitment_channel_outbox" o
                WHERE o.channel = t.channel AND o.channel_account_id = t.channel_account_id
@@ -348,6 +399,7 @@ export class RecruitmentChannelOutboxQueue {
         let productionAdmission:
           | { interactionAt: Date; estimatedCostVnd: number }
           | { denied: string }
+          | { held: string }
           | null = null;
         if (production) {
           productionAdmission = await this.checkProductionAdmission(
@@ -359,6 +411,15 @@ export class RecruitmentChannelOutboxQueue {
           // + cảnh báo HR, không giữ tin sang ngày/tháng sau rồi gửi muộn.
           if ('denied' in productionAdmission) {
             return { outcome: 'INVALID', code: productionAdmission.denied };
+          }
+          if ('held' in productionAdmission) {
+            return this.hold(
+              em,
+              row,
+              owner,
+              redispatch,
+              productionAdmission.held,
+            );
           }
         }
         const dispatched = returnedRows(
@@ -482,11 +543,48 @@ export class RecruitmentChannelOutboxQueue {
     row: ClaimedOutbox,
     limits: RecruitmentOutboundSafetyConfig,
   ): Promise<
-    { interactionAt: Date; estimatedCostVnd: number } | { denied: string }
+    | { interactionAt: Date; estimatedCostVnd: number }
+    | { denied: string }
+    | { held: string }
   > {
     await em.query(
       `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_quota'))`,
     );
+    // GO PROD: đọc uỷ quyền FOR SHARE — Owner thu hồi (UPDATE) phải chờ dispatch đang chạy
+    // commit; sau khi thu hồi commit, không request mới nào qua được cửa này.
+    const [authRow]: Array<Record<string, unknown>> = await em.query(
+      `SELECT ${AUTHORIZATION_COLUMNS} FROM "${PRODUCTION_AUTHORIZATION_TABLE}"
+       WHERE status = 'ACTIVE' AND channel_account_id = $1
+       FOR SHARE`,
+      [row.channelAccountId],
+    );
+    if (!authRow) return { held: 'PRODUCTION_NOT_AUTHORIZED' };
+    const auth = authorizationOf(authRow);
+    // Env chỉ được hạ thấp hạn mức Owner đã duyệt, không nâng được.
+    limits = {
+      ...limits,
+      maxRequestsPerRecipientDay: Math.min(
+        limits.maxRequestsPerRecipientDay,
+        auth.maxRequestsPerRecipientDay,
+      ),
+      maxRequestsPerDay: Math.min(
+        limits.maxRequestsPerDay,
+        auth.maxRequestsPerDay,
+      ),
+      dailyCostBudgetVnd: Math.min(
+        limits.dailyCostBudgetVnd,
+        auth.dailyCostBudgetVnd,
+      ),
+      monthlyCostBudgetVnd: Math.min(
+        limits.monthlyCostBudgetVnd,
+        auth.monthlyCostBudgetVnd,
+      ),
+      interactionWindowHours: Math.min(
+        limits.interactionWindowHours,
+        auth.interactionWindowHours,
+      ),
+      freeWindowHours: Math.min(limits.freeWindowHours, auth.freeWindowHours),
+    };
     await em.query(
       `SELECT pg_advisory_xact_lock(hashtext('recruitment_outbound_attempts'), $1::int)`,
       [row.id],
@@ -702,9 +800,22 @@ export class RecruitmentChannelOutboxQueue {
 
   async productionSafetyReady(): Promise<boolean> {
     const [row]: Array<{ ready: boolean }> = await this.dataSource.query(
-      `SELECT to_regclass('public.recruitment_outbound_attempts') IS NOT NULL AS ready`,
+      `SELECT to_regclass('public.recruitment_outbound_attempts') IS NOT NULL
+          AND to_regclass('public.${PRODUCTION_AUTHORIZATION_TABLE}') IS NOT NULL AS ready`,
     );
     return row?.ready === true;
+  }
+
+  /** Uỷ quyền GO PROD đang ACTIVE của OA (để log / màn hình vận hành), `null` nếu không có. */
+  async activeProductionAuthorization(
+    oaId: string,
+  ): Promise<ProductionAuthorization | null> {
+    const [row]: Array<Record<string, unknown>> = await this.dataSource.query(
+      `SELECT ${AUTHORIZATION_COLUMNS} FROM "${PRODUCTION_AUTHORIZATION_TABLE}"
+       WHERE status = 'ACTIVE' AND channel_account_id = $1`,
+      [oaId],
+    );
+    return row ? authorizationOf(row) : null;
   }
 
   /** Lần Send API đầu bị Zalo từ chối token; kết thúc ledger trước request thứ hai. */
