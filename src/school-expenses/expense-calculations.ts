@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
+import { INVOICE_CASH_ACCOUNT_CODES } from '../revenue-item/invoice-cash-account';
 import {
   normalizeRevenueInvoiceStatus,
   normalizeRevenueInvoiceType,
@@ -163,6 +164,21 @@ export function normalizePaymentMethod(value: unknown): string | null {
   throw new BadRequestException('Invalid paymentMethod');
 }
 
+/** Khoản thu/chi của dòng Hóa Đơn — số hiệu tài khoản trong danh mục Nguồn thu chi. */
+export function normalizeInvoiceCashAccount(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const code = String(value).trim();
+
+  if (INVOICE_CASH_ACCOUNT_CODES.includes(code)) {
+    return code;
+  }
+
+  throw new BadRequestException('Invalid invoiceCashAccount');
+}
+
 /** Hình thức chi của dòng Chi trường. */
 export function normalizeSchoolPaymentType(value: unknown): string | null {
   if (value === undefined || value === null || value === '') {
@@ -273,6 +289,8 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
       String(item?.invoiceUnit ?? '')
         .trim()
         .slice(0, 50) || null,
+    invoicePaymentDate: item?.invoicePaymentDate || null,
+    invoiceCashAccount: normalizeInvoiceCashAccount(item?.invoiceCashAccount),
     invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),

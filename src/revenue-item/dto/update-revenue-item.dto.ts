@@ -12,6 +12,7 @@ import {
   REVENUE_INVOICE_STATUSES,
   REVENUE_INVOICE_TYPES,
 } from '../revenue-invoice-status.enum';
+import { INVOICE_CASH_ACCOUNT_CODES } from '../invoice-cash-account';
 
 export class UpdateRevenueItemDto {
   @IsOptional()
@@ -71,6 +72,15 @@ export class UpdateRevenueItemDto {
   @IsString()
   @MaxLength(50)
   invoiceUnit?: string;
+
+  @IsOptional()
+  @IsDateString()
+  invoicePaymentDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(INVOICE_CASH_ACCOUNT_CODES)
+  invoiceCashAccount?: string;
 
   @IsOptional()
   @IsBoolean()

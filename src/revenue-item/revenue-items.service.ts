@@ -186,6 +186,8 @@ export class RevenueItemsService {
         invoiceNumber: data.invoiceNumber,
         invoiceDate: data.invoiceDate,
         invoiceUnit: data.invoiceUnit,
+        invoicePaymentDate: data.invoicePaymentDate,
+        invoiceCashAccount: data.invoiceCashAccount,
         invoiceLocked: data.invoiceLocked,
         paidAmount: data.paidAmount,
         paymentMethod: data.paymentMethod,

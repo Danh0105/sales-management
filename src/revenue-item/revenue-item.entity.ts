@@ -140,6 +140,21 @@ export class RevenueItem {
   })
   invoiceUnit!: string | null;
 
+  /** Ngày chi (cột "Ngày chi" bảng Hóa Đơn). */
+  @Column({
+    type: 'date',
+    nullable: true,
+  })
+  invoicePaymentDate!: Date | null;
+
+  /** Khoản thu/chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1121"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  invoiceCashAccount!: string | null;
+
   /** Đã bấm "Xuất hóa đơn" — khóa dòng, không được thêm dòng doanh thu (trừ kế toán trưởng). */
   @Column({
     type: 'boolean',

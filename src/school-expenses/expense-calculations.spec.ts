@@ -312,6 +312,39 @@ describe('buildRevenueItemData — tính doanh thu', () => {
     expect(locked('false')).toBe(false);
     expect(buildRevenueItemData(base).invoiceLocked).toBe(false);
   });
+
+  it('lưu Ngày chi và Khoản thu/chi của bảng Hóa Đơn', () => {
+    const data = buildRevenueItemData({
+      ...base,
+      invoicePaymentDate: '2026-10-20',
+      invoiceCashAccount: ' 11210 ',
+    });
+
+    expect(data.invoicePaymentDate).toBe('2026-10-20');
+    expect(data.invoiceCashAccount).toBe('11210');
+  });
+
+  it('Ngày chi / Khoản thu/chi để trống thì lưu null', () => {
+    const data = buildRevenueItemData({
+      ...base,
+      invoicePaymentDate: '',
+      invoiceCashAccount: '',
+    });
+
+    expect(data.invoicePaymentDate).toBeNull();
+    expect(data.invoiceCashAccount).toBeNull();
+    expect(buildRevenueItemData(base).invoiceCashAccount).toBeNull();
+  });
+
+  it('Khoản thu/chi không có trong danh mục Nguồn thu chi thì báo lỗi', () => {
+    expect(() =>
+      buildRevenueItemData({ ...base, invoiceCashAccount: '9999' }),
+    ).toThrow(BadRequestException);
+    // Nhóm 111/112 chỉ là tiêu đề, không chọn được.
+    expect(() =>
+      buildRevenueItemData({ ...base, invoiceCashAccount: '112' }),
+    ).toThrow(BadRequestException);
+  });
 });
 
 describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
