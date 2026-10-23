@@ -425,6 +425,7 @@ export class ExpenseRequestController {
             dto.note,
             toAttachments(files),
             dto.fundSource,
+            dto.cashAccount,
         );
     }
 

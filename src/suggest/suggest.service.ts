@@ -74,7 +74,12 @@ import {
   SuggestReminderSetting,
 } from './entities/suggest-reminder-setting.entity';
 import { CreatePaymentOrderDto } from './dto/expense/create-payment-order.dto';
-import { FundSource, FUND_SOURCE_LABEL } from './enums/expense-fund-source.enum';
+import {
+  FundSource,
+  FUND_SOURCE_LABEL,
+  fundSourceOfCashAccount,
+} from './enums/expense-fund-source.enum';
+import { cashAccountLabel } from '../revenue-item/invoice-cash-account';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
@@ -2460,6 +2465,7 @@ export class SuggestService {
           note: dto.note ?? null,
           // Nguồn tiền do thủ quỹ chọn lại khi xuất tiền lần này.
           fundSource: null,
+          cashAccount: null,
         });
       },
     });
@@ -2491,13 +2497,23 @@ export class SuggestService {
     note?: string,
     files?: UploadedAttachment[],
     fundSource?: FundSource,
+    cashAccount?: string,
   ) {
+    if (!cashAccount && !fundSource) {
+      throw new BadRequestException('Vui lòng chọn nguồn chi');
+    }
+    // Nguồn chi (tài khoản) quyết định nhóm nguồn tiền; client cũ chỉ gửi nhóm.
+    const source = cashAccount ? fundSourceOfCashAccount(cashAccount) : fundSource!;
+    const sourceLabel = cashAccount
+      ? cashAccountLabel(cashAccount)
+      : FUND_SOURCE_LABEL[source];
+
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.CONFIRM_CASH_RELEASED,
       user,
       note,
-      logData: () => ({ fundSource: fundSource ?? null }),
+      logData: () => ({ fundSource: source, cashAccount: cashAccount ?? null }),
       mutate: (s) => {
         s.cashReleasedBy = user.id;
         s.cashReleasedAt = new Date();
@@ -2510,13 +2526,11 @@ export class SuggestService {
           user.id,
           ExpenseAction.CONFIRM_CASH_RELEASED,
         );
-        if (fundSource) {
-          await manager.update(
-            SuggestPaymentOrder,
-            { suggestId: s.id! },
-            { fundSource },
-          );
-        }
+        await manager.update(
+          SuggestPaymentOrder,
+          { suggestId: s.id! },
+          { fundSource: source, cashAccount: cashAccount ?? null },
+        );
       },
     });
 
@@ -2525,13 +2539,14 @@ export class SuggestService {
         suggestId: saved.id!,
         title: '💵 Thủ quỹ đã xuất tiền',
         message:
-          `Thủ quỹ đã xuất tiền cho đề xuất ${saved.code}` +
-          (fundSource
-            ? ` từ ${FUND_SOURCE_LABEL[fundSource]},`
-            : ',') +
+          `Thủ quỹ đã xuất tiền cho đề xuất ${saved.code} từ ${sourceLabel},` +
           ` vui lòng xác nhận nhận tiền`,
         senderId: user.id,
-        meta: { status: saved.status, fundSource: fundSource ?? null },
+        meta: {
+          status: saved.status,
+          fundSource: source,
+          cashAccount: cashAccount ?? null,
+        },
       },
       { userIds: saved.createdBy ? [saved.createdBy] : [] },
     );

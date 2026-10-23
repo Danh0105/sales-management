@@ -1,6 +1,7 @@
 /**
  * Danh mục "Nguồn thu chi" — tài khoản tiền chọn ở cột "Khoản thu/chi" của
- * bảng Hóa Đơn và cột "Nguồn chi" của bảng Chi Ngoài, lưu theo số hiệu tài khoản. FE (kido-app InvoiceTable) giữ bản
+ * bảng Hóa Đơn, cột "Nguồn chi" của bảng Chi Ngoài và "Nguồn chi" thủ quỹ chọn
+ * khi xuất tiền cho đề xuất chi, lưu theo số hiệu tài khoản. FE (kido-app InvoiceTable) giữ bản
  * sao danh mục này — thêm/bớt tài khoản phải sửa cả hai nơi.
  */
 export const INVOICE_CASH_ACCOUNTS = [
@@ -24,3 +25,9 @@ export const INVOICE_CASH_ACCOUNTS = [
 export const INVOICE_CASH_ACCOUNT_CODES: string[] = INVOICE_CASH_ACCOUNTS.map(
   (account) => account.code,
 );
+
+/** "1121 - TK Techcombank - ICHI"; mã không có trong danh mục thì trả nguyên mã. */
+export function cashAccountLabel(code: string): string {
+  const account = INVOICE_CASH_ACCOUNTS.find((item) => item.code === code);
+  return account ? `${account.code} - ${account.name}` : code;
+}
