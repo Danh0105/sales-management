@@ -71,7 +71,7 @@ export class RevenueItem {
   @Column({
     type: 'decimal',
     precision: 15,
-    scale: 2,
+    scale: 4,
     default: 1,
   })
   monthsCount!: number;

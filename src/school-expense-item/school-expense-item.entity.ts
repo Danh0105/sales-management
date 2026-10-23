@@ -58,7 +58,7 @@ export class SchoolExpenseItem {
   @Column({
     type: 'decimal',
     precision: 15,
-    scale: 2,
+    scale: 4,
     default: 1,
   })
   monthsCount!: number;
