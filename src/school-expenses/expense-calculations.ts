@@ -291,6 +291,10 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
         .slice(0, 50) || null,
     invoicePaymentDate: item?.invoicePaymentDate || null,
     invoiceCashAccount: normalizeInvoiceCashAccount(item?.invoiceCashAccount),
+    invoiceNote:
+      String(item?.invoiceNote ?? '')
+        .trim()
+        .slice(0, 500) || null,
     invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),

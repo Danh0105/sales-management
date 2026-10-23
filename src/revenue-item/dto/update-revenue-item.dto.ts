@@ -83,6 +83,11 @@ export class UpdateRevenueItemDto {
   invoiceCashAccount?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  invoiceNote?: string;
+
+  @IsOptional()
   @IsBoolean()
   invoiceLocked?: boolean;
 

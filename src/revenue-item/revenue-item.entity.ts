@@ -155,6 +155,14 @@ export class RevenueItem {
   })
   invoiceCashAccount!: string | null;
 
+  /** Ghi chú (cột "Ghi chú" bảng Hóa Đơn). */
+  @Column({
+    type: 'varchar',
+    length: 500,
+    nullable: true,
+  })
+  invoiceNote!: string | null;
+
   /** Đã bấm "Xuất hóa đơn" — khóa dòng, không được thêm dòng doanh thu (trừ kế toán trưởng). */
   @Column({
     type: 'boolean',

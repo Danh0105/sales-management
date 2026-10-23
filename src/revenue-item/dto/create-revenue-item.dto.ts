@@ -90,6 +90,11 @@ export class CreateRevenueItemDto {
   invoiceCashAccount?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  invoiceNote?: string;
+
+  @IsOptional()
   @IsDateString()
   invoiceDate?: string;
 

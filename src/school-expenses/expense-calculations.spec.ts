@@ -345,6 +345,24 @@ describe('buildRevenueItemData — tính doanh thu', () => {
       buildRevenueItemData({ ...base, invoiceCashAccount: '112' }),
     ).toThrow(BadRequestException);
   });
+
+  it('lưu Ghi chú của bảng Hóa Đơn (bỏ khoảng trắng đầu/cuối, tối đa 500 ký tự)', () => {
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: '  Thu tiền mặt  ' })
+        .invoiceNote,
+    ).toBe('Thu tiền mặt');
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: 'a'.repeat(600) })
+        .invoiceNote,
+    ).toBe('a'.repeat(500));
+  });
+
+  it('Ghi chú để trống hoặc không gửi thì lưu null (bản ghi cũ)', () => {
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: '   ' }).invoiceNote,
+    ).toBeNull();
+    expect(buildRevenueItemData(base).invoiceNote).toBeNull();
+  });
 });
 
 describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
