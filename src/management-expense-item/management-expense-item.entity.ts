@@ -173,6 +173,14 @@ export class ManagementExpenseItem {
   })
   payer!: string;
 
+  /** Nguồn chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1121"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  cashAccount!: string | null;
+
   @Column({
     type: 'text',
     nullable: true,

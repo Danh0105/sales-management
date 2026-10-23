@@ -164,8 +164,14 @@ export function normalizePaymentMethod(value: unknown): string | null {
   throw new BadRequestException('Invalid paymentMethod');
 }
 
-/** Khoản thu/chi của dòng Hóa Đơn — số hiệu tài khoản trong danh mục Nguồn thu chi. */
-export function normalizeInvoiceCashAccount(value: unknown): string | null {
+/**
+ * Số hiệu tài khoản trong danh mục Nguồn thu chi — "Khoản thu/chi" (Hóa Đơn),
+ * "Nguồn chi" (Chi Ngoài).
+ */
+export function normalizeCashAccount(
+  value: unknown,
+  field: string,
+): string | null {
   if (value === undefined || value === null || value === '') {
     return null;
   }
@@ -176,7 +182,7 @@ export function normalizeInvoiceCashAccount(value: unknown): string | null {
     return code;
   }
 
-  throw new BadRequestException('Invalid invoiceCashAccount');
+  throw new BadRequestException(`Invalid ${field}`);
 }
 
 /** Hình thức chi của dòng Chi trường. */
@@ -290,7 +296,10 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
         .trim()
         .slice(0, 50) || null,
     invoicePaymentDate: item?.invoicePaymentDate || null,
-    invoiceCashAccount: normalizeInvoiceCashAccount(item?.invoiceCashAccount),
+    invoiceCashAccount: normalizeCashAccount(
+      item?.invoiceCashAccount,
+      'invoiceCashAccount',
+    ),
     invoiceNote:
       String(item?.invoiceNote ?? '')
         .trim()
@@ -404,6 +413,7 @@ export function buildManagementExpenseItemData(
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer || null,
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
     note: item?.note || null,
   };
 }

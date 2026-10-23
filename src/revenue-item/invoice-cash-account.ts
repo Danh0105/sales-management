@@ -1,6 +1,6 @@
 /**
  * Danh mục "Nguồn thu chi" — tài khoản tiền chọn ở cột "Khoản thu/chi" của
- * bảng Hóa Đơn, lưu theo số hiệu tài khoản. FE (kido-app InvoiceTable) giữ bản
+ * bảng Hóa Đơn và cột "Nguồn chi" của bảng Chi Ngoài, lưu theo số hiệu tài khoản. FE (kido-app InvoiceTable) giữ bản
  * sao danh mục này — thêm/bớt tài khoản phải sửa cả hai nơi.
  */
 export const INVOICE_CASH_ACCOUNTS = [

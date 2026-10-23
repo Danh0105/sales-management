@@ -239,6 +239,22 @@ describe('buildManagementExpenseItemData (fold Chi khác vào totalOutside/remai
     expect(data.totalOutside).toBe(5110000 + 3219300); // 8329300
     expect(data.remaining).toBe(0);
   });
+
+  it('lưu Nguồn chi (số hiệu tài khoản trong danh mục Nguồn thu chi)', () => {
+    expect(
+      buildManagementExpenseItemData({ cashAccount: ' 1112 ' }).cashAccount,
+    ).toBe('1112');
+    expect(
+      buildManagementExpenseItemData({ cashAccount: '' }).cashAccount,
+    ).toBeNull();
+    expect(buildManagementExpenseItemData({}).cashAccount).toBeNull();
+  });
+
+  it('Nguồn chi không có trong danh mục Nguồn thu chi thì báo lỗi', () => {
+    expect(() =>
+      buildManagementExpenseItemData({ cashAccount: '111' }),
+    ).toThrow(BadRequestException);
+  });
 });
 
 describe('buildSchoolExpenseItemData — Hình thức chi (paymentType)', () => {
