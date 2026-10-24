@@ -155,6 +155,26 @@ export class RevenueItem {
   })
   invoiceCashAccount!: string | null;
 
+  /**
+   * Khoản ở cột "Khoản thu/chi" là thu vào ('IN') hay chi ra ('OUT') khỏi tài
+   * khoản đó — tuỳ dòng, kế toán chọn.
+   */
+  @Column({
+    type: 'varchar',
+    length: 3,
+    nullable: true,
+  })
+  invoiceCashDirection!: 'IN' | 'OUT' | null;
+
+  /** Số tiền thực thu/chi qua tài khoản ở cột "Khoản thu/chi" (kế toán nhập). */
+  @Column({
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+  })
+  invoiceCashAmount!: number | null;
+
   /** Ghi chú (cột "Ghi chú" bảng Hóa Đơn). */
   @Column({
     type: 'varchar',

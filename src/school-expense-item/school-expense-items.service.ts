@@ -184,6 +184,7 @@ export class SchoolExpenseItemsService {
         expenseDate: data.expenseDate,
         paidAmount: data.paidAmount,
         paymentType: data.paymentType,
+        cashAccount: data.cashAccount,
         payer: data.payer,
         note: data.note,
         ...body,

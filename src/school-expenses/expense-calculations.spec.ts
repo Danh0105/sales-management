@@ -6,6 +6,8 @@ import {
   buildRevenueItemData,
   buildSchoolExpenseItemData,
   computeOtherCostRows,
+  normalizeCashDirection,
+  normalizeCashAmount,
 } from './expense-calculations';
 
 describe('computeOtherCostRows', () => {
@@ -391,5 +393,42 @@ describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
   it('cho qua khi chưa kết thúc', () => {
     expect(() => assertNotFinalized({ finalized: false })).not.toThrow();
     expect(() => assertNotFinalized(null)).not.toThrow();
+  });
+});
+
+describe('khoản thu/chi trên Hóa Đơn + Nguồn chi của Chi Trường', () => {
+  it('Thu/Chi chỉ nhận IN | OUT; để trống là null', () => {
+    expect(normalizeCashDirection('IN')).toBe('IN');
+    expect(normalizeCashDirection('OUT')).toBe('OUT');
+    expect(normalizeCashDirection('')).toBeNull();
+    expect(() => normalizeCashDirection('in')).toThrow(BadRequestException);
+  });
+
+  it('số tiền: trống → null (chưa nhập), không âm, tối đa 2 số lẻ, nhận chuỗi numeric của DB', () => {
+    expect(normalizeCashAmount(undefined, 'x')).toBeNull();
+    expect(normalizeCashAmount('', 'x')).toBeNull();
+    expect(normalizeCashAmount('87100000.00', 'x')).toBe(87100000);
+    expect(normalizeCashAmount(0.1, 'x')).toBe(0.1);
+    expect(normalizeCashAmount(0, 'x')).toBe(0);
+    expect(() => normalizeCashAmount(-1, 'x')).toThrow(BadRequestException);
+    expect(() => normalizeCashAmount(1.005, 'x')).toThrow(BadRequestException);
+    expect(() => normalizeCashAmount('abc', 'x')).toThrow(BadRequestException);
+  });
+
+  it('dòng doanh thu giữ Thu/Chi + Số tiền; dòng Chi Trường giữ Nguồn chi và từ chối mã lạ', () => {
+    const revenue = buildRevenueItemData({
+      invoiceCashDirection: 'OUT',
+      invoiceCashAmount: '5000000',
+      invoiceCashAccount: '1111',
+    });
+    expect(revenue.invoiceCashDirection).toBe('OUT');
+    expect(revenue.invoiceCashAmount).toBe(5000000);
+    expect(
+      buildSchoolExpenseItemData({ cashAccount: '1121' }).cashAccount,
+    ).toBe('1121');
+    expect(buildSchoolExpenseItemData({}).cashAccount).toBeNull();
+    expect(() => buildSchoolExpenseItemData({ cashAccount: '9999' })).toThrow(
+      BadRequestException,
+    );
   });
 });

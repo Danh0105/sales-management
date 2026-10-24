@@ -83,6 +83,14 @@ export class UpdateRevenueItemDto {
   invoiceCashAccount?: string;
 
   @IsOptional()
+  @IsIn(['IN', 'OUT', ''])
+  invoiceCashDirection?: string;
+
+  @IsOptional()
+  @IsNumber()
+  invoiceCashAmount?: number;
+
+  @IsOptional()
   @IsString()
   @MaxLength(500)
   invoiceNote?: string;

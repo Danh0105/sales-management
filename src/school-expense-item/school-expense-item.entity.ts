@@ -152,6 +152,14 @@ export class SchoolExpenseItem {
   })
   paymentType!: string | null;
 
+  /** Nguồn chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1111"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  cashAccount!: string | null;
+
   @Column({
     nullable: true,
   })
