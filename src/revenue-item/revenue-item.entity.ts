@@ -71,7 +71,7 @@ export class RevenueItem {
   @Column({
     type: 'decimal',
     precision: 15,
-    scale: 2,
+    scale: 4,
     default: 1,
   })
   monthsCount!: number;
@@ -139,6 +139,49 @@ export class RevenueItem {
     nullable: true,
   })
   invoiceUnit!: string | null;
+
+  /** Ngày chi (cột "Ngày chi" bảng Hóa Đơn). */
+  @Column({
+    type: 'date',
+    nullable: true,
+  })
+  invoicePaymentDate!: Date | null;
+
+  /** Khoản thu/chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1121"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  invoiceCashAccount!: string | null;
+
+  /**
+   * Khoản ở cột "Khoản thu/chi" là thu vào ('IN') hay chi ra ('OUT') khỏi tài
+   * khoản đó — tuỳ dòng, kế toán chọn.
+   */
+  @Column({
+    type: 'varchar',
+    length: 3,
+    nullable: true,
+  })
+  invoiceCashDirection!: 'IN' | 'OUT' | null;
+
+  /** Số tiền thực thu/chi qua tài khoản ở cột "Khoản thu/chi" (kế toán nhập). */
+  @Column({
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+  })
+  invoiceCashAmount!: number | null;
+
+  /** Ghi chú (cột "Ghi chú" bảng Hóa Đơn). */
+  @Column({
+    type: 'varchar',
+    length: 500,
+    nullable: true,
+  })
+  invoiceNote!: string | null;
 
   /** Đã bấm "Xuất hóa đơn" — khóa dòng, không được thêm dòng doanh thu (trừ kế toán trưởng). */
   @Column({

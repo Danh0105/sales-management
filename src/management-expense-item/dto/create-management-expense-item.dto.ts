@@ -4,10 +4,12 @@ import {
   IsOptional,
   IsNumber,
   IsDateString,
+  IsIn,
   IsString,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { INVOICE_CASH_ACCOUNT_CODES } from '../../revenue-item/invoice-cash-account';
 import { ManagementExpenseOtherCostDto } from './management-expense-other-cost.dto';
 
 export class CreateManagementExpenseItemDto {
@@ -87,6 +89,11 @@ export class CreateManagementExpenseItemDto {
   @IsOptional()
   @IsString()
   payer?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(INVOICE_CASH_ACCOUNT_CODES)
+  cashAccount?: string;
 
   @IsOptional()
   @IsString()

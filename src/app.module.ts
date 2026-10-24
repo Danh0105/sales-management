@@ -46,6 +46,7 @@ import { ActivityLogModule } from './activity-log/activity-log.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { RecruitmentModule } from './recruitment/recruitment.module';
+import { CashflowReportModule } from './cashflow-report/cashflow-report.module';
 import { resolveDatabaseOptions } from './database/database-options';
 
 @Module({
@@ -103,6 +104,7 @@ import { resolveDatabaseOptions } from './database/database-options';
     WarehouseModule,
     PayrollModule,
     RecruitmentModule,
+    CashflowReportModule,
   ],
 })
 export class AppModule {}

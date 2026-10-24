@@ -58,7 +58,7 @@ export class SchoolExpenseItem {
   @Column({
     type: 'decimal',
     precision: 15,
-    scale: 2,
+    scale: 4,
     default: 1,
   })
   monthsCount!: number;
@@ -151,6 +151,14 @@ export class SchoolExpenseItem {
     nullable: true,
   })
   paymentType!: string | null;
+
+  /** Nguồn chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1111"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  cashAccount!: string | null;
 
   @Column({
     nullable: true,

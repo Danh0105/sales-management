@@ -1,5 +1,6 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
+import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto';
 import { CreateSuggestDto } from './dto/create-suggest.dto';
 import { SuggestService } from './suggest.service';
 import { ExpenseRole } from './constants/expense-roles';
@@ -320,5 +321,81 @@ describe('Expense request school mapping', () => {
     });
     expect(qb.skip).toHaveBeenCalledWith(100);
     expect(qb.take).toHaveBeenCalledWith(100);
+  });
+});
+
+describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
+  const pipe = new ValidationPipe({ whitelist: true, transform: true });
+  const metadata = {
+    type: 'body' as const,
+    metatype: ConfirmCashReleasedDto,
+    data: '',
+  };
+
+  it('DTO nhận số hiệu tài khoản Nguồn thu chi, từ chối mã nhóm/mã lạ', async () => {
+    await expect(pipe.transform({ cashAccount: '1121' }, metadata)).resolves.toMatchObject({
+      cashAccount: '1121',
+    });
+    await expect(pipe.transform({ cashAccount: '112' }, metadata)).rejects.toBeDefined();
+    await expect(pipe.transform({ cashAccount: '9999' }, metadata)).rejects.toBeDefined();
+  });
+
+  function makeService() {
+    const manager = { update: jest.fn() };
+    const service = Object.create(SuggestService.prototype) as SuggestService;
+    const calls: { transition?: any; notify?: any } = {};
+    (service as any).expenseTransition = jest.fn(async (opts: any) => {
+      calls.transition = opts;
+      const s = { id: 5, code: 'DX-202610-0001', createdBy: 9, status: 'CASH_RELEASED' };
+      await opts.extra(manager, s);
+      return s;
+    });
+    (service as any).saveExpenseAttachments = jest.fn();
+    (service as any).notifyExpense = jest.fn(async (payload: any) => {
+      calls.notify = payload;
+    });
+    return { service, manager, calls };
+  }
+
+  it('chọn Nguồn chi 1113 → lưu tài khoản, nhóm tiền mặt, ghi log và báo đúng tên tài khoản', async () => {
+    const { service, manager, calls } = makeService();
+
+    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, '1113');
+
+    expect(calls.transition.logData()).toEqual({ fundSource: 'COMPANY_CASH', cashAccount: '1113' });
+    expect(manager.update).toHaveBeenCalledWith(
+      expect.anything(),
+      { suggestId: 5 },
+      { fundSource: 'COMPANY_CASH', cashAccount: '1113' },
+    );
+    expect(calls.notify.message).toContain('từ 1113 - Tiền mặt - Anh Trung,');
+    expect(calls.notify.meta).toMatchObject({ fundSource: 'COMPANY_CASH', cashAccount: '1113' });
+  });
+
+  it('tài khoản 112x suy ra nhóm Tài khoản ngân hàng', async () => {
+    const { service, manager } = makeService();
+
+    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, '11212');
+
+    expect(manager.update.mock.calls[0][2]).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: '11212' });
+  });
+
+  it('client cũ chỉ gửi fundSource → vẫn chạy, cashAccount = null', async () => {
+    const { service, manager, calls } = makeService();
+
+    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], 'BANK_ACCOUNT' as any);
+
+    expect(calls.transition.logData()).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: null });
+    expect(manager.update.mock.calls[0][2]).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: null });
+    expect(calls.notify.message).toContain('từ tài khoản ngân hàng,');
+  });
+
+  it('không chọn nguồn chi thì báo lỗi, không chuyển trạng thái', async () => {
+    const { service, calls } = makeService();
+
+    await expect(
+      service.confirmCashReleased(5, { id: 3 } as any, undefined, []),
+    ).rejects.toThrow(BadRequestException);
+    expect(calls.transition).toBeUndefined();
   });
 });

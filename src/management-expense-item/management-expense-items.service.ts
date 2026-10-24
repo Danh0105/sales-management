@@ -278,6 +278,7 @@ export class ManagementExpenseItemsService {
       expenseDate: data.expenseDate,
       paidAmount: data.paidAmount,
       payer: data.payer,
+      cashAccount: data.cashAccount,
       note: data.note,
       ...body,
     };

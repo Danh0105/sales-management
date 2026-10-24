@@ -65,6 +65,10 @@ export class SuggestPaymentOrder {
     })
     fundSource!: FundSource | null;
 
+    /** Nguồn chi thủ quỹ chọn khi xuất tiền — số hiệu tài khoản Nguồn thu chi (vd "1121"). */
+    @Column({ type: 'varchar', length: 20, nullable: true })
+    cashAccount!: string | null;
+
     @Column({ type: 'text', nullable: true })
     note?: string | null;
 

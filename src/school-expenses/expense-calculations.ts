@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
+import { INVOICE_CASH_ACCOUNT_CODES } from '../revenue-item/invoice-cash-account';
 import {
   normalizeRevenueInvoiceStatus,
   normalizeRevenueInvoiceType,
@@ -163,6 +164,63 @@ export function normalizePaymentMethod(value: unknown): string | null {
   throw new BadRequestException('Invalid paymentMethod');
 }
 
+/**
+ * Số hiệu tài khoản trong danh mục Nguồn thu chi — "Khoản thu/chi" (Hóa Đơn),
+ * "Nguồn chi" (Chi Ngoài).
+ */
+export function normalizeCashAccount(
+  value: unknown,
+  field: string,
+): string | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const code = String(value).trim();
+
+  if (INVOICE_CASH_ACCOUNT_CODES.includes(code)) {
+    return code;
+  }
+
+  throw new BadRequestException(`Invalid ${field}`);
+}
+
+/** Hướng của khoản ở cột "Khoản thu/chi" (Hóa Đơn): 'IN' thu vào, 'OUT' chi ra. */
+export function normalizeCashDirection(value: unknown): 'IN' | 'OUT' | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  if (value === 'IN' || value === 'OUT') {
+    return value;
+  }
+
+  throw new BadRequestException('Invalid invoiceCashDirection');
+}
+
+/**
+ * Số tiền thu/chi do kế toán nhập (vd "Số tiền" của Hóa Đơn): để trống → null
+ * (chưa nhập, khác 0); không âm; tối đa 2 chữ số thập phân như cột numeric(15,2).
+ */
+export function normalizeCashAmount(
+  value: unknown,
+  field: string,
+): number | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const amount = toStrictNumber(value, field);
+
+  assertNonNegative({ [field]: amount });
+
+  if (Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6) {
+    throw new BadRequestException(`${field} tối đa 2 chữ số thập phân`);
+  }
+
+  return amount;
+}
+
 /** Hình thức chi của dòng Chi trường. */
 export function normalizeSchoolPaymentType(value: unknown): string | null {
   if (value === undefined || value === null || value === '') {
@@ -273,6 +331,20 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
       String(item?.invoiceUnit ?? '')
         .trim()
         .slice(0, 50) || null,
+    invoicePaymentDate: item?.invoicePaymentDate || null,
+    invoiceCashAccount: normalizeCashAccount(
+      item?.invoiceCashAccount,
+      'invoiceCashAccount',
+    ),
+    invoiceCashDirection: normalizeCashDirection(item?.invoiceCashDirection),
+    invoiceCashAmount: normalizeCashAmount(
+      item?.invoiceCashAmount,
+      'invoiceCashAmount',
+    ),
+    invoiceNote:
+      String(item?.invoiceNote ?? '')
+        .trim()
+        .slice(0, 500) || null,
     invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),
@@ -317,6 +389,7 @@ export function buildSchoolExpenseItemData(
     paidAmount,
     remaining: schoolExpenseAmount - paidAmount,
     paymentType: normalizeSchoolPaymentType(item?.paymentType),
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
     payer: item?.payer || null,
     note: item?.note || null,
   };
@@ -382,6 +455,7 @@ export function buildManagementExpenseItemData(
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer || null,
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
     note: item?.note || null,
   };
 }

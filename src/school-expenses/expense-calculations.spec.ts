@@ -6,6 +6,8 @@ import {
   buildRevenueItemData,
   buildSchoolExpenseItemData,
   computeOtherCostRows,
+  normalizeCashDirection,
+  normalizeCashAmount,
 } from './expense-calculations';
 
 describe('computeOtherCostRows', () => {
@@ -239,6 +241,22 @@ describe('buildManagementExpenseItemData (fold Chi khác vào totalOutside/remai
     expect(data.totalOutside).toBe(5110000 + 3219300); // 8329300
     expect(data.remaining).toBe(0);
   });
+
+  it('lưu Nguồn chi (số hiệu tài khoản trong danh mục Nguồn thu chi)', () => {
+    expect(
+      buildManagementExpenseItemData({ cashAccount: ' 1112 ' }).cashAccount,
+    ).toBe('1112');
+    expect(
+      buildManagementExpenseItemData({ cashAccount: '' }).cashAccount,
+    ).toBeNull();
+    expect(buildManagementExpenseItemData({}).cashAccount).toBeNull();
+  });
+
+  it('Nguồn chi không có trong danh mục Nguồn thu chi thì báo lỗi', () => {
+    expect(() =>
+      buildManagementExpenseItemData({ cashAccount: '111' }),
+    ).toThrow(BadRequestException);
+  });
 });
 
 describe('buildSchoolExpenseItemData — Hình thức chi (paymentType)', () => {
@@ -312,6 +330,57 @@ describe('buildRevenueItemData — tính doanh thu', () => {
     expect(locked('false')).toBe(false);
     expect(buildRevenueItemData(base).invoiceLocked).toBe(false);
   });
+
+  it('lưu Ngày chi và Khoản thu/chi của bảng Hóa Đơn', () => {
+    const data = buildRevenueItemData({
+      ...base,
+      invoicePaymentDate: '2026-10-20',
+      invoiceCashAccount: ' 11210 ',
+    });
+
+    expect(data.invoicePaymentDate).toBe('2026-10-20');
+    expect(data.invoiceCashAccount).toBe('11210');
+  });
+
+  it('Ngày chi / Khoản thu/chi để trống thì lưu null', () => {
+    const data = buildRevenueItemData({
+      ...base,
+      invoicePaymentDate: '',
+      invoiceCashAccount: '',
+    });
+
+    expect(data.invoicePaymentDate).toBeNull();
+    expect(data.invoiceCashAccount).toBeNull();
+    expect(buildRevenueItemData(base).invoiceCashAccount).toBeNull();
+  });
+
+  it('Khoản thu/chi không có trong danh mục Nguồn thu chi thì báo lỗi', () => {
+    expect(() =>
+      buildRevenueItemData({ ...base, invoiceCashAccount: '9999' }),
+    ).toThrow(BadRequestException);
+    // Nhóm 111/112 chỉ là tiêu đề, không chọn được.
+    expect(() =>
+      buildRevenueItemData({ ...base, invoiceCashAccount: '112' }),
+    ).toThrow(BadRequestException);
+  });
+
+  it('lưu Ghi chú của bảng Hóa Đơn (bỏ khoảng trắng đầu/cuối, tối đa 500 ký tự)', () => {
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: '  Thu tiền mặt  ' })
+        .invoiceNote,
+    ).toBe('Thu tiền mặt');
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: 'a'.repeat(600) })
+        .invoiceNote,
+    ).toBe('a'.repeat(500));
+  });
+
+  it('Ghi chú để trống hoặc không gửi thì lưu null (bản ghi cũ)', () => {
+    expect(
+      buildRevenueItemData({ ...base, invoiceNote: '   ' }).invoiceNote,
+    ).toBeNull();
+    expect(buildRevenueItemData(base).invoiceNote).toBeNull();
+  });
 });
 
 describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
@@ -324,5 +393,42 @@ describe('assertNotFinalized — kỳ thu chi đã "Kết thúc"', () => {
   it('cho qua khi chưa kết thúc', () => {
     expect(() => assertNotFinalized({ finalized: false })).not.toThrow();
     expect(() => assertNotFinalized(null)).not.toThrow();
+  });
+});
+
+describe('khoản thu/chi trên Hóa Đơn + Nguồn chi của Chi Trường', () => {
+  it('Thu/Chi chỉ nhận IN | OUT; để trống là null', () => {
+    expect(normalizeCashDirection('IN')).toBe('IN');
+    expect(normalizeCashDirection('OUT')).toBe('OUT');
+    expect(normalizeCashDirection('')).toBeNull();
+    expect(() => normalizeCashDirection('in')).toThrow(BadRequestException);
+  });
+
+  it('số tiền: trống → null (chưa nhập), không âm, tối đa 2 số lẻ, nhận chuỗi numeric của DB', () => {
+    expect(normalizeCashAmount(undefined, 'x')).toBeNull();
+    expect(normalizeCashAmount('', 'x')).toBeNull();
+    expect(normalizeCashAmount('87100000.00', 'x')).toBe(87100000);
+    expect(normalizeCashAmount(0.1, 'x')).toBe(0.1);
+    expect(normalizeCashAmount(0, 'x')).toBe(0);
+    expect(() => normalizeCashAmount(-1, 'x')).toThrow(BadRequestException);
+    expect(() => normalizeCashAmount(1.005, 'x')).toThrow(BadRequestException);
+    expect(() => normalizeCashAmount('abc', 'x')).toThrow(BadRequestException);
+  });
+
+  it('dòng doanh thu giữ Thu/Chi + Số tiền; dòng Chi Trường giữ Nguồn chi và từ chối mã lạ', () => {
+    const revenue = buildRevenueItemData({
+      invoiceCashDirection: 'OUT',
+      invoiceCashAmount: '5000000',
+      invoiceCashAccount: '1111',
+    });
+    expect(revenue.invoiceCashDirection).toBe('OUT');
+    expect(revenue.invoiceCashAmount).toBe(5000000);
+    expect(
+      buildSchoolExpenseItemData({ cashAccount: '1121' }).cashAccount,
+    ).toBe('1121');
+    expect(buildSchoolExpenseItemData({}).cashAccount).toBeNull();
+    expect(() => buildSchoolExpenseItemData({ cashAccount: '9999' })).toThrow(
+      BadRequestException,
+    );
   });
 });

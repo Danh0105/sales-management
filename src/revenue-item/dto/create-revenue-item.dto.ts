@@ -13,6 +13,7 @@ import {
   REVENUE_INVOICE_STATUSES,
   REVENUE_INVOICE_TYPES,
 } from '../revenue-invoice-status.enum';
+import { INVOICE_CASH_ACCOUNT_CODES } from '../invoice-cash-account';
 
 export class CreateRevenueItemDto {
   @Type(() => Number)
@@ -78,6 +79,28 @@ export class CreateRevenueItemDto {
   @IsString()
   @MaxLength(50)
   invoiceUnit?: string;
+
+  @IsOptional()
+  @IsDateString()
+  invoicePaymentDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(INVOICE_CASH_ACCOUNT_CODES)
+  invoiceCashAccount?: string;
+
+  @IsOptional()
+  @IsIn(['IN', 'OUT', ''])
+  invoiceCashDirection?: string;
+
+  @IsOptional()
+  @IsNumber()
+  invoiceCashAmount?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  invoiceNote?: string;
 
   @IsOptional()
   @IsDateString()
