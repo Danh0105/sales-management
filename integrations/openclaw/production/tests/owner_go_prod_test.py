@@ -2,7 +2,7 @@
 
     G8_PG_CONTAINER=g8-prod-pg G8_PG_DB=g8prod python3 -I owner_go_prod_test.py
 
-DB tạm: schema production (pg_dump -s) + g8-production-outbound-ledger-up.sql + g8-production-go-prod-up.sql.
+DB tạm: schema production + outbound-ledger + GO-PROD + recipient-window SQL.
 Nạp công cụ thật; chỉ thay: psql → container tạm, kiểm TTY/input → kịch bản, GO_DIR / ledger / env / dist /
 releases → thư mục tạm. Xoá (TRUNCATE) dữ liệu recruitment của DB tạm. Không gọi Zalo.
 """
@@ -50,7 +50,8 @@ def load_tool():
 answers = []
 builtins.input = lambda prompt='': answers.pop(0) if answers else ''
 os.ttyname = lambda fd: '/dev/pts/test'
-LIMITS = dict(rd=3, d=20, bd=0, bm=0, iw=48, fw=48)
+LIMITS = dict(rw=25, wh=5, rd=25, d=100, bd=0, bm=0, iw=48, fw=48,
+              aih=6, aid=25, ai=100)
 
 
 def write_env(**over):
@@ -59,9 +60,12 @@ def write_env(**over):
     open(f'{S}/oa.env', 'w').write(f'RECRUITMENT_ZALO_OA_ID={OA}\n')
     body = ('RECRUITMENT_PRODUCTION_MODE=true\nRECRUITMENT_PILOT_MODE=false\nRECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=false\n'
             'RECRUITMENT_ZALO_OUTBOUND_ENABLED=true\nRECRUITMENT_AI_ENABLED=true\nRECRUITMENT_WORKER_ENABLED=true\n'
+            f"RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW={lim['rw']}\nRECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS={lim['wh']}\n"
             f"RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY={lim['rd']}\nRECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY={lim['d']}\n"
             f"RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND={lim['bd']}\nRECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND={lim['bm']}\n"
             f"RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS={lim['iw']}\nRECRUITMENT_ZALO_FREE_WINDOW_HOURS={lim['fw']}\n"
+            f"RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR={lim['aih']}\n"
+            f"RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY={lim['aid']}\nRECRUITMENT_AI_MAX_TURNS_PER_DAY={lim['ai']}\n"
             'RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND=500\nRECRUITMENT_ZALO_OA_BLOCKING_ERRORS=-224\n'
             'RECRUITMENT_HR_MESSAGE_TTL_MINUTES=60\n')
     fd = os.open(f'{S}/prod.env', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -104,9 +108,10 @@ def check(name, cond, detail=''):
 
 
 def approve(g, rollback='rollback-test', outbox='1', tag=None):
-    tag = tag or 'HAN MUC 3/20/0'
+    tag = tag or 'HAN MUC 25/5H/25/100/0'
     ok, out = run(g.approve_prod, ans=['Owner Test', rollback, outbox, 'Gói Tăng trưởng hết hạn 31/12/2026',
-                                       'OA ICHI SKILL CO QUYEN OPENAPI', tag, 'TOI PHE DUYET PROD'])
+                                       'OA ICHI SKILL CO QUYEN OPENAPI', tag, 'HAN MUC AI 6/25/100',
+                                       'TOI PHE DUYET PROD'])
     code = next((w for w in out.split() if w.startswith('G8-PROD-')), None)
     return ok, out, code
 
@@ -135,7 +140,7 @@ def main():
     seed()
     ok, out, _ = approve(g, rollback='khong-co')
     check('approve prod bị từ chối khi không có release rollback', not ok and 'rollback' in out, out)
-    ok, out, _ = approve(g, tag='HAN MUC 3/50/0')
+    ok, out, _ = approve(g, tag='HAN MUC 25/5H/25/50/0')
     check('gõ sai hạn mức → không cấp GO', not ok and not os.listdir(f'{S}/go') == [], out)
     rejects = db("select count(*) from activity_log where method = 'OWNER_DISPATCH_REJECT' and context->>'action' = 'approve-prod'")
     check('mỗi lần từ chối có audit OWNER_DISPATCH_REJECT', int(rejects) >= 4, rejects)
@@ -145,8 +150,10 @@ def main():
     check('approve prod cấp GO G8-PROD-…', ok and code, out)
     rec, state, why = g.status(code)
     check('GO PROD VALID, gắn hạn mức + dist + outbox nghiệm thu', state == 'VALID' and rec['limits'] ==
-          {'max_requests_per_recipient_day': 3, 'max_requests_per_day': 20, 'daily_cost_budget_vnd': 0,
-           'monthly_cost_budget_vnd': 0, 'interaction_window_hours': 48, 'free_window_hours': 48}
+          {'max_requests_per_recipient_window': 25, 'recipient_window_hours': 5,
+           'max_requests_per_recipient_day': 25, 'max_requests_per_day': 100, 'daily_cost_budget_vnd': 0,
+           'monthly_cost_budget_vnd': 0, 'interaction_window_hours': 48, 'free_window_hours': 48,
+           'ai_max_turns_per_sender_hour': 6, 'ai_max_turns_per_sender_day': 25, 'ai_max_turns_per_day': 100}
           and rec['verification_outbox_id'] == 1 and len(rec['dist_hash']) == 16, json.dumps(rec)[:300])
     check('audit OWNER_GO_PROD_APPROVE không chứa mã GO',
           db("select count(*) from activity_log where method='OWNER_GO_PROD_APPROVE' and context::text not like '%G8-PROD-%'") == '1')
@@ -164,7 +171,7 @@ def main():
 
     # 4. authorize thành công
     ok, out = run(g.authorize_prod, code, '/tmp/log')
-    check('authorize-prod tạo uỷ quyền ACTIVE', ok and db("select count(*) from recruitment_production_authorizations where status='ACTIVE' and max_requests_per_day=20 and max_requests_per_recipient_day=3 and daily_cost_budget_vnd=0 and free_window_hours=48") == '1', out)
+    check('authorize-prod tạo uỷ quyền ACTIVE', ok and db("select count(*) from recruitment_production_authorizations where status='ACTIVE' and max_requests_per_recipient_window=25 and recipient_window_hours=5 and max_requests_per_day=100 and max_requests_per_recipient_day=25 and daily_cost_budget_vnd=0 and free_window_hours=48") == '1', out)
     check('GO PROD → USED (DB là nguồn sự thật)', g.status(code)[1] == 'USED')
     ok, out = run(g.authorize_prod, code)
     check('dùng lại GO PROD bị từ chối', not ok and 'không còn hiệu lực' in out, out)

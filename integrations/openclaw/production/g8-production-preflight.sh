@@ -31,11 +31,16 @@ q() { runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d "$DB" -c "SET defau
 for key in \
   RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS \
   RECRUITMENT_ZALO_FREE_WINDOW_HOURS \
+  RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW \
+  RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS \
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY \
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY \
   RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND \
   RECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND \
-  RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND; do
+  RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND \
+  RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR \
+  RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY \
+  RECRUITMENT_AI_MAX_TURNS_PER_DAY; do
   is_uint "$(v "$key")" || die "$key phải là số nguyên tường minh"
 done
 [ "$(v RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND)" -gt 0 ] \
@@ -47,6 +52,16 @@ done
 [ "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY)" -ge 1 ] \
   && [ "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY)" -le "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY)" ] \
   || die "quota recipient phải 1..quota toàn hệ thống"
+[ "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW)" -ge 1 ] \
+  && [ "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW)" -le "$(v RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY)" ] \
+  || die "quota recipient/cửa sổ phải 1..quota recipient/ngày"
+[ "$(v RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS)" -ge 1 ] \
+  && [ "$(v RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS)" -le 24 ] \
+  || die "cửa sổ quota recipient phải 1–24 giờ"
+[ "$(v RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR)" -ge 1 ] \
+  && [ "$(v RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR)" -le "$(v RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY)" ] \
+  && [ "$(v RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY)" -le "$(v RECRUITMENT_AI_MAX_TURNS_PER_DAY)" ] \
+  || die "trần AI phải thoả max/người/giờ <= max/người/ngày <= max hệ thống/ngày"
 [ "$(v RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND)" -le "$(v RECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND)" ] \
   || die "budget ngày không được lớn hơn budget tháng"
 TTL=$(v RECRUITMENT_HR_MESSAGE_TTL_MINUTES)
@@ -66,6 +81,9 @@ OA=$(value RECRUITMENT_ZALO_OA_ID "$OA_ENV")
 [ "$(q "select count(*) from migrations where timestamp=1793300000000 and name='AddRecruitmentProductionAuthorizations1793300000000'")" = 1 ] \
   && [ "$(q "select to_regclass('public.recruitment_production_authorizations') is not null")" = t ] \
   || die "chưa có migration GO PROD 1793300000000"
+[ "$(q "select count(*) from migrations where timestamp=1794000000000 and name='AddRecruitmentRecipientRollingQuota1794000000000'")" = 1 ] \
+  && [ "$(q "select count(*) from information_schema.columns where table_schema='public' and table_name='recruitment_production_authorizations' and column_name in ('max_requests_per_recipient_window','recipient_window_hours')")" = 2 ] \
+  || die "chưa có migration quota trượt 1794000000000"
 [ "$(q "select has_table_privilege('sales_app','public.recruitment_outbound_attempts','INSERT') and not has_table_privilege('sales_app','public.recruitment_outbound_attempts','DELETE') and not has_table_privilege('sales_app','public.recruitment_production_authorizations','INSERT')")" = t ] \
   || die "quyền sales_app trên bảng ledger / uỷ quyền sai"
 [ "$(q "select count(*) from recruitment_jobs where status='ACTIVE' and published_at is null")" = 0 ] \

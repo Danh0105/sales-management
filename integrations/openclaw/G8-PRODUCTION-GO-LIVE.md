@@ -49,7 +49,8 @@ Zalo user_send_text (chữ ký hợp lệ) → inbox bền → worker → OpenCl
 → claim (chỉ khi có uỷ quyền GO PROD ACTIVE)
 → cửa dispatch, MỘT transaction: dừng khẩn · điều khiển hội thoại · bản duyệt khớp nội dung/OA/người nhận/version
    · TTL tin HR · uỷ quyền GO PROD (khoá chia sẻ) · tương tác user_send_text ≤ cửa sổ · vị trí đã công bố (tin AI)
-   · quota ứng viên/ngày + toàn hệ thống/ngày + ngân sách (ledger bền, khoá toàn cục, giờ Việt Nam)
+   · quota ứng viên/cửa sổ trượt + ứng viên/ngày + toàn hệ thống/ngày + ngân sách
+     (ledger bền, khoá toàn cục, ngày theo giờ Việt Nam)
    → ghi dispatched_at + 1 dòng ledger DISPATCHING
 → kiểm dừng khẩn lần cuối → Send API → SENT | RETRY (chắc chắn chưa đi) | UNKNOWN (có thể đã đi, không tự gửi lại) | DEAD_LETTER
 ```
@@ -60,20 +61,21 @@ Zalo user_send_text (chữ ký hợp lệ) → inbox bền → worker → OpenCl
   chỉ mở lại thủ công.
 - Trạng thái trên giao diện: Đã gửi / Gửi lại / Chưa rõ — cần đối soát / Gửi lỗi (kèm lý do) / Đã huỷ.
 
-## 4. Hạn mức ngày đầu (SYSTEM OWNER F)
+## 4. Hạn mức production đã xác nhận
 
 `/opt/kido-recruiter-prod/3010-production.env` (600 root, không secret) — mẫu: `production/3010-production.env.example`.
 
 | Hạn mức | Giá trị |
 |---|---|
-| Tin / ứng viên / ngày | 3 |
-| Tin / toàn hệ thống / ngày | 20 |
+| Tin / ứng viên / cửa sổ trượt | 25 / 5 giờ |
+| Tin / ứng viên / ngày | 25 |
+| Tin / toàn hệ thống / ngày | 100 |
 | Ngân sách tin tính phí | 0 VND (ngày + tháng) |
 | Cửa sổ tương tác = cửa sổ miễn phí | 48 giờ (chỉ Tin Tư vấn miễn phí) |
 | TTL tin HR / bản duyệt AI | 60 / 30 phút |
-| AI | giữ trần lượt/token hiện có; OpenAI hard limit 100 USD |
+| AI | 6 lượt/ứng viên/giờ; 25/ứng viên/ngày; 100/toàn hệ thống/ngày; trần token giữ nguyên |
 
-Nâng lên 50 tin/ngày hoặc mở ngân sách tính phí: GO PROD mới (thay uỷ quyền cũ), sau 24 giờ ổn định.
+Mọi lần nâng tiếp hoặc mở ngân sách tính phí đều cần GO PROD mới thay uỷ quyền cũ.
 
 ## 5. Điều kiện trước khi phục vụ ứng viên thật
 
@@ -117,6 +119,7 @@ cp -a /root/.pm2/dump.pm2 $B/dump.pm2.bak; sha256sum $B/* > $B/SHA256SUMS; chmod
 ```bash
 runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db < $P/sql/g8-production-outbound-ledger-up.sql
 runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db < $P/sql/g8-production-go-prod-up.sql
+runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d sales_db < $P/sql/g8-production-recipient-window-up.sql
 ```
 
 **S3 — Deploy backend + frontend, vẫn pilot + dừng khẩn** (1 restart 3010, ~10–20 s; FE không downtime):
@@ -164,8 +167,9 @@ Lượt thật đầu tiên chỉ phát sinh từ ứng viên đã nhắn OA, AI
 
 **S8 — PM2 persistence** (mục 9) — chỉ sau khi xác nhận cờ/hạn mức/dừng khẩn đúng.
 
-Downtime: S3 và S6 mỗi bước 1 restart 3010 (~10–20 s API tuyển dụng + các API khác của 3010). Migration không
-khoá bảng hiện có. Gateway OpenClaw và FE (nginx tĩnh) không gián đoạn.
+Downtime: S3 và S6 mỗi bước 1 restart 3010 (~10–20 s API tuyển dụng + các API khác của 3010).
+Migration quota lấy khoá ngắn trên bảng uỷ quyền (lock timeout 5 giây), nên chỉ chạy khi OUTBOUND đang dừng.
+Gateway OpenClaw và FE (nginx tĩnh) không gián đoạn.
 
 ## 7. Theo dõi 24 giờ đầu
 

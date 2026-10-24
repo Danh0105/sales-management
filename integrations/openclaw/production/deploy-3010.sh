@@ -12,7 +12,7 @@
 #
 # Deploy khi đang ở C2 pilot (AI + WORKER + OUTBOUND bật, single dispatch guard): ALLOW_C2=1 — chỉ chấp nhận khi
 # dừng khẩn "Gửi Zalo" đang bật, PILOT=true + GRANT_REQUIRED=true, không có grant dispatch hay uỷ quyền production
-# ACTIVE, và migration production (1793200000000 + 1793300000000) đã áp. Sau restart phải thấy sender báo
+# ACTIVE, và migration production (1793200000000 + 1793300000000 + 1794000000000) đã áp. Sau restart phải thấy sender báo
 # dispatchGuard=on; cờ env + dừng khẩn giữ nguyên. Không mở được đường gửi nào: guard đòi grant, outbound dừng.
 set -Eeuo pipefail
 REL="${REL:-/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed}"
@@ -51,8 +51,8 @@ if [ "$ALLOW_C2" = 1 ]; then
   [ "$(envflag RECRUITMENT_PILOT_MODE)/$(envflag RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED)" = "true/true" ] \
     || die "ALLOW_C2 cần PILOT=true + GRANT_REQUIRED=true (single dispatch guard)"
   [ "$(q1 "select count(*) from recruitment_outbound_dispatch_grants where status='ACTIVE'")" = 0 ] || die "còn grant dispatch ACTIVE"
-  [ "$(q1 "select count(*) from migrations where timestamp in (1793200000000, 1793300000000)")" = 2 ] \
-    || die "chưa áp migration production (g8-production-outbound-ledger-up.sql + g8-production-go-prod-up.sql)"
+  [ "$(q1 "select count(*) from migrations where timestamp in (1793200000000, 1793300000000, 1794000000000)")" = 3 ] \
+    || die "chưa áp đủ migration production (ledger + GO PROD + recipient rolling window)"
   [ "$(q1 "select count(*) from recruitment_production_authorizations where status='ACTIVE'")" = 0 ] || die "đang có uỷ quyền production ACTIVE"
 elif [ "$ALLOW_C1" = 1 ]; then
   case "$FLAGS" in "true true -"|"true true false") ;; *) die "ALLOW_C1 chỉ cho AI=true WORKER=true OUTBOUND≠true (hiện $FLAGS)";; esac

@@ -638,12 +638,19 @@ AUTH_TABLE = "recruitment_production_authorizations"
 APP_DIST = "/var/www/sales-management/dist"
 RELEASES = "/opt/kido-recruiter/releases"
 PROD_LIMITS = (  # khoá env → cột uỷ quyền; giá trị phải khớp ràng buộc CHK_prod_auth_limits
+    ("RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW", "max_requests_per_recipient_window", 1, 1000),
+    ("RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS", "recipient_window_hours", 1, 24),
     ("RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY", "max_requests_per_recipient_day", 1, 1000),
     ("RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY", "max_requests_per_day", 1, 1_000_000),
     ("RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND", "daily_cost_budget_vnd", 0, 2_000_000_000),
     ("RECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND", "monthly_cost_budget_vnd", 0, 2_000_000_000),
     ("RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS", "interaction_window_hours", 1, 168),
     ("RECRUITMENT_ZALO_FREE_WINDOW_HOURS", "free_window_hours", 1, 168),
+)
+PROD_AI_LIMITS = (  # được khoá trong GO + env; dịch vụ AI dùng trực tiếp từ env
+    ("RECRUITMENT_AI_MAX_TURNS_PER_SENDER_HOUR", "ai_max_turns_per_sender_hour", 1, 1000),
+    ("RECRUITMENT_AI_MAX_TURNS_PER_SENDER_DAY", "ai_max_turns_per_sender_day", 1, 10_000),
+    ("RECRUITMENT_AI_MAX_TURNS_PER_DAY", "ai_max_turns_per_day", 1, 1_000_000),
 )
 PROD_FLAGS = {"RECRUITMENT_PRODUCTION_MODE": "true", "RECRUITMENT_PILOT_MODE": "false",
               "RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED": "false", "RECRUITMENT_ZALO_OUTBOUND_ENABLED": "true",
@@ -676,19 +683,25 @@ def prod_config():
     conf = read_env(PROD_CONF)
     problems = [f"{k} phải {v}" for k, v in PROD_FLAGS.items() if conf.get(k) != v]
     limits = {}
-    for key, column, low, high in PROD_LIMITS:
+    for key, column, low, high in PROD_LIMITS + PROD_AI_LIMITS:
         raw = conf.get(key, "")
         if not re.fullmatch(r"\d{1,10}", raw) or not low <= int(raw) <= high:
             problems.append(f"{key} phải là số nguyên {low}–{high}")
             continue
         limits[column] = int(raw)
-    if len(limits) == len(PROD_LIMITS):
+    if len(limits) == len(PROD_LIMITS) + len(PROD_AI_LIMITS):
+        if limits["max_requests_per_recipient_window"] > limits["max_requests_per_recipient_day"]:
+            problems.append("hạn mức ứng viên/cửa sổ lớn hơn hạn mức ứng viên/ngày")
         if limits["max_requests_per_recipient_day"] > limits["max_requests_per_day"]:
             problems.append("hạn mức ứng viên/ngày lớn hơn toàn hệ thống/ngày")
         if limits["monthly_cost_budget_vnd"] < limits["daily_cost_budget_vnd"]:
             problems.append("ngân sách tháng nhỏ hơn ngân sách ngày")
         if limits["free_window_hours"] > limits["interaction_window_hours"]:
             problems.append("cửa sổ miễn phí lớn hơn cửa sổ tương tác")
+        if limits["ai_max_turns_per_sender_hour"] > limits["ai_max_turns_per_sender_day"]:
+            problems.append("trần AI ứng viên/giờ lớn hơn trần AI ứng viên/ngày")
+        if limits["ai_max_turns_per_sender_day"] > limits["ai_max_turns_per_day"]:
+            problems.append("trần AI ứng viên/ngày lớn hơn trần AI toàn hệ thống/ngày")
     est = conf.get("RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND", "")
     if not re.fullmatch(r"[1-9]\d{0,7}", est):
         problems.append("RECRUITMENT_ZALO_ESTIMATED_PAID_MESSAGE_COST_VND phải > 0")
@@ -704,6 +717,8 @@ SELECT json_build_object(
                         AND name = 'AddRecruitmentOutboundAttemptLedger1793200000000'),
   'prod_mig', EXISTS (SELECT 1 FROM migrations WHERE timestamp = 1793300000000
                       AND name = 'AddRecruitmentProductionAuthorizations1793300000000'),
+  'rolling_mig', EXISTS (SELECT 1 FROM migrations WHERE timestamp = 1794000000000
+                         AND name = 'AddRecruitmentRecipientRollingQuota1794000000000'),
   'halted', (SELECT outbound_halted FROM recruitment_runtime_controls WHERE id = 1),
   'failsafe', (SELECT failsafe_halted FROM recruitment_runtime_controls WHERE id = 1),
   'unfinished', (SELECT coalesce(json_agg(json_build_object('id', id, 'source', source_type, 'status', status)
@@ -723,6 +738,7 @@ def prod_problems(facts, limits_ok=True):
     problems = []
     if not facts["ledger_mig"]: problems.append("chưa áp migration ledger 1793200000000")
     if not facts["prod_mig"]: problems.append("chưa áp migration GO PROD 1793300000000")
+    if not facts["rolling_mig"]: problems.append("chưa áp migration quota trượt 1794000000000")
     if facts["halted"] is not True: problems.append("Gửi Zalo phải đang DỪNG KHẨN (HR bật lại sau khi kích hoạt)")
     if facts["failsafe"]: problems.append("failsafe đang bật — xử lý trước")
     if facts["unfinished"]: problems.append(f"còn outbox chưa xong {facts['unfinished']} — HR huỷ/đối soát trước")
@@ -786,10 +802,15 @@ def approve_prod():
                       "ghi tên gói và ngày hết hạn")
         ask("  Gõ OA ICHI SKILL CO QUYEN OPENAPI để xác nhận đúng OA, gói còn hạn, có quyền gửi Tin Tư vấn: ",
             lambda v: v == "OA ICHI SKILL CO QUYEN OPENAPI", "phải gõ đúng: OA ICHI SKILL CO QUYEN OPENAPI")
-        tag = (f"HAN MUC {limits['max_requests_per_recipient_day']}/{limits['max_requests_per_day']}/"
+        tag = (f"HAN MUC {limits['max_requests_per_recipient_window']}/{limits['recipient_window_hours']}H/"
+               f"{limits['max_requests_per_recipient_day']}/{limits['max_requests_per_day']}/"
                f"{limits['daily_cost_budget_vnd']}")
-        ask(f"  Gõ {tag} để xác nhận hạn mức ứng viên/ngày / toàn hệ thống/ngày / ngân sách tin tính phí (VND/ngày): ",
+        ask(f"  Gõ {tag} để xác nhận hạn mức ứng viên/cửa sổ giờ / ứng viên/ngày / toàn hệ thống/ngày / ngân sách tin tính phí (VND/ngày): ",
             lambda v: v == tag, f"phải gõ đúng: {tag}")
+        ai_tag = (f"HAN MUC AI {limits['ai_max_turns_per_sender_hour']}/"
+                  f"{limits['ai_max_turns_per_sender_day']}/{limits['ai_max_turns_per_day']}")
+        ask(f"  Gõ {ai_tag} để xác nhận lượt AI ứng viên/giờ / ứng viên/ngày / toàn hệ thống/ngày: ",
+            lambda v: v == ai_tag, f"phải gõ đúng: {ai_tag}")
         ask("\nGõ TOI PHE DUYET PROD để cấp GO PROD: ", lambda v: v == "TOI PHE DUYET PROD",
             "phải gõ đúng: TOI PHE DUYET PROD")
         at = now()
@@ -851,10 +872,11 @@ BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('{AUTH_TABLE}'));
 UPDATE {AUTH_TABLE} SET status = 'SUPERSEDED', ended_at = now(), ended_by = :'owner', end_reason = :'reason'
  WHERE status = 'ACTIVE' AND channel_account_id = :'oa';
-INSERT INTO {AUTH_TABLE} (go_code_fp, channel_account_id, max_requests_per_recipient_day, max_requests_per_day,
+INSERT INTO {AUTH_TABLE} (go_code_fp, channel_account_id, max_requests_per_recipient_window, recipient_window_hours,
+  max_requests_per_recipient_day, max_requests_per_day,
   daily_cost_budget_vnd, monthly_cost_budget_vnd, interaction_window_hours, free_window_hours,
   release_dist_hash, approved_by, approved_at)
-SELECT :'fp', :'oa', :rd, :d, :bd, :bm, :iw, :fw, :'dist', :'owner', :'approved'::timestamptz
+SELECT :'fp', :'oa', :rw, :wh, :rd, :d, :bd, :bm, :iw, :fw, :'dist', :'owner', :'approved'::timestamptz
 WHERE NOT EXISTS (SELECT 1 FROM {AUTH_TABLE} WHERE go_code_fp = :'fp')
 RETURNING id;
 SELECT (count(*) = 1) AS ok FROM {AUTH_TABLE} WHERE go_code_fp = :'fp' AND status = 'ACTIVE' \\gset
@@ -864,7 +886,8 @@ COMMIT;
 \\else
 ROLLBACK;
 \\endif
-""", fp=code_fp(code), oa=oa, rd=L["max_requests_per_recipient_day"], d=L["max_requests_per_day"],
+""", fp=code_fp(code), oa=oa, rw=L["max_requests_per_recipient_window"], wh=L["recipient_window_hours"],
+            rd=L["max_requests_per_recipient_day"], d=L["max_requests_per_day"],
             bd=L["daily_cost_budget_vnd"], bm=L["monthly_cost_budget_vnd"], iw=L["interaction_window_hours"],
             fw=L["free_window_hours"], dist=record["dist_hash"], owner=owner, approved=record["approved_at"],
             reason=reason, **audit_params)
@@ -932,8 +955,14 @@ def list_prod():
     if psql(f"SELECT to_regclass('public.{AUTH_TABLE}') IS NOT NULL") != "t":
         print("Chưa áp migration GO PROD.")
         return
+    if psql("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+            f"AND table_name='{AUTH_TABLE}' AND column_name IN "
+            "('max_requests_per_recipient_window','recipient_window_hours')") != "2":
+        print("Chưa áp migration quota trượt.")
+        return
     out = psql(f"""SELECT id || ' · ' || status || ' · OA …' || right(channel_account_id, 4)
-  || ' · ' || max_requests_per_recipient_day || '/' || max_requests_per_day || ' tin · ngân sách '
+  || ' · ' || max_requests_per_recipient_window || '/' || recipient_window_hours || 'h · '
+  || max_requests_per_recipient_day || '/' || max_requests_per_day || ' tin/ngày · ngân sách '
   || daily_cost_budget_vnd || '/' || monthly_cost_budget_vnd || ' VND · cửa sổ ' || free_window_hours || '/'
   || interaction_window_hours || 'h · dist ' || release_dist_hash || ' · duyệt ' || approved_by
   || ' · bật ' || to_char(activated_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'DD/MM HH24:MI')
