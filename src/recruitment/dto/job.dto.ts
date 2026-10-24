@@ -79,6 +79,13 @@ export class ScreeningCriteriaDto {
 }
 
 export class CreateJobDto {
+  // Optional ở DTO để PATCH vị trí cũ vẫn tương thích; create bắt buộc ở service.
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(50)
+  positionRole?: string;
+
   /** Mã vị trí do HR đặt, vd. `SALES-CM-01`. Lưu chữ hoa. */
   @UpperTrim()
   @IsString()

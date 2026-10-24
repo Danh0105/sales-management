@@ -1,5 +1,7 @@
 # Recruitment — rà soát và bổ sung chức năng ngày 24/10/2026
 
+Đợt bổ sung tiếp theo theo yêu cầu: [Chọn chức danh hệ thống và tự tạo tài khoản khi HR tuyển thành công](RECRUITMENT-HIRE-ACCOUNTS-2026-10-24.md). Đã kiểm thử riêng, chưa triển khai production.
+
 ## Changes
 
 Phạm vi: luồng HR Recruitment, API Recruitment, giao diện quản trị và vận hành Zalo hiện có.

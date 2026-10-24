@@ -21,6 +21,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { AvatarUploadFilter } from '../teaching/avatar-upload.filter';
 import { EmployeeService } from './employee.service';
+import { EMPLOYEE_POSITIONS } from './employee-positions';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { CreateFaceDto } from './dto/create-face.dto';
@@ -78,6 +79,12 @@ export class EmployeeController {
   @Get('sales')
   findSalesEmployees(@Req() req: Request) {
     return this.service.findSalesEmployees(req.user!);
+  }
+
+  @Get('positions')
+  @Roles(...EMPLOYEE_ADMIN_ROLES)
+  positions() {
+    return EMPLOYEE_POSITIONS;
   }
 
   @Get('/getbyid/:id')

@@ -9,6 +9,7 @@ import {
   Matches,
   MaxLength,
   Min,
+  MinLength,
 } from 'class-validator';
 
 import {
@@ -104,6 +105,22 @@ export class QueryApplicationDto extends PaginationQueryDto {
 }
 
 export class UpdateApplicationStatusDto {
+  /** Chỉ dùng lúc HIRED. Không trim mật khẩu, không lưu vào audit/response. */
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(72)
+  password?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  confirmAccountRole?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  accountPositionRole?: string;
+
   @IsEnum(ApplicationStatus)
   status!: ApplicationStatus;
 

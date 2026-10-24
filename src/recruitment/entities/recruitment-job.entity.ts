@@ -26,6 +26,15 @@ import type { ScreeningCriteria } from '../screening/screening.types';
   '("salary_min" IS NULL OR "salary_min" >= 0) AND ("salary_max" IS NULL OR "salary_max" >= 0) AND ("salary_min" IS NULL OR "salary_max" IS NULL OR "salary_min" <= "salary_max")',
 )
 export class RecruitmentJob {
+  /** Chức danh/quyền tài khoản khi HR tuyển thành công; null cho vị trí cũ chưa map. */
+  @Column({
+    name: 'position_role',
+    type: 'varchar',
+    length: 50,
+    nullable: true,
+  })
+  positionRole!: string | null;
+
   @PrimaryGeneratedColumn({ primaryKeyConstraintName: 'PK_recruitment_jobs' })
   id!: number;
 
