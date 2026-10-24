@@ -11,8 +11,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Mọi cột thêm vào bảng cũ đều nullable, không default → chỉ đổi metadata,
  * bản ghi cũ nhận NULL. `IF NOT EXISTS` / `ON CONFLICT` để chạy lại an toàn.
  */
-export class AddCashflowReport1794000000000 implements MigrationInterface {
-  name = 'AddCashflowReport1794000000000';
+export class AddCashflowReport1794100000000 implements MigrationInterface {
+  name = 'AddCashflowReport1794100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

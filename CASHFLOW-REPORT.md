@@ -32,7 +32,7 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
 
 ## 2. Danh mục tài khoản và số dư gốc
 
-Bảng `cash_accounts` (migration `1794000000000`) gồm mã (định danh ổn định), tên,
+Bảng `cash_accounts` (migration `1794100000000`) gồm mã (định danh ổn định), tên,
 nhóm `111` / `112`, thứ tự, trạng thái sử dụng, và số dư gốc kèm ngày đối chiếu. Migration
 seed 13 tài khoản từ `INVOICE_CASH_ACCOUNTS`, số dư gốc để NULL.
 
@@ -95,7 +95,7 @@ Khi có `search`, dòng "Cộng" chỉ tính chứng từ khớp, còn dư đầ
 
 ## 6. Migration và rollback
 
-`1794000000000-add-cashflow-report`: tạo `cash_accounts` (seed 13 tài khoản), thêm
+`1794100000000-add-cashflow-report`: tạo `cash_accounts` (seed 13 tài khoản), thêm
 `revenue_items."invoiceCashDirection"`, `"invoiceCashAmount"`,
 `school_expense_items."cashAccount"`. Mọi cột đều nullable và không default (chỉ đổi
 metadata, dữ liệu cũ nhận NULL), chạy lại an toàn.
