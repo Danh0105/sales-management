@@ -69,23 +69,47 @@ export class RecruitmentOutboxOperationsService {
       : null;
     const env = read && 'config' in read ? read.config : null;
     // Hạn mức hiệu lực = min(env, uỷ quyền GO PROD ACTIVE) — đúng như cửa dispatch áp.
-    const [authorization]: Array<Record<string, number | string>> = (
-      (await this.dataSource.query(
-        `SELECT to_regclass('public.recruitment_production_authorizations') IS NOT NULL AS ready`,
-      )) as Array<{ ready: boolean }>
-    )[0]?.ready
-      ? await this.dataSource.query(
-          `SELECT id, max_requests_per_recipient_day, max_requests_per_day, daily_cost_budget_vnd,
+    const [authSchema] = await this.dataSource.query<Array<{ ready: boolean }>>(
+      `SELECT to_regclass('public.recruitment_production_authorizations') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'recruitment_production_authorizations'
+              AND column_name = 'max_requests_per_recipient_window'
+          )
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'recruitment_production_authorizations'
+              AND column_name = 'recipient_window_hours'
+          ) AS ready`,
+    );
+    const [authorization]: Array<Record<string, number | string>> =
+      authSchema?.ready
+        ? await this.dataSource.query(
+            `SELECT id, max_requests_per_recipient_window, recipient_window_hours,
+                  max_requests_per_recipient_day, max_requests_per_day, daily_cost_budget_vnd,
                   monthly_cost_budget_vnd, interaction_window_hours, free_window_hours
            FROM "recruitment_production_authorizations" WHERE status = 'ACTIVE'
            ORDER BY id DESC LIMIT 1`,
-        )
-      : [];
+          )
+        : [];
     const cap = (value: number, column: string) =>
       authorization ? Math.min(value, Number(authorization[column])) : value;
     const limits = env
       ? {
           ...env,
+          maxRequestsPerRecipientWindow: cap(
+            env.maxRequestsPerRecipientWindow,
+            'max_requests_per_recipient_window',
+          ),
+          // Cửa sổ dài hơn chặt hơn; env không được rút ngắn cửa sổ Owner đã duyệt.
+          recipientWindowHours: authorization
+            ? Math.max(
+                env.recipientWindowHours,
+                Number(authorization.recipient_window_hours),
+              )
+            : env.recipientWindowHours,
           maxRequestsPerRecipientDay: cap(
             env.maxRequestsPerRecipientDay,
             'max_requests_per_recipient_day',
@@ -157,6 +181,8 @@ export class RecruitmentOutboxOperationsService {
       },
       limits: limits
         ? {
+            maxRequestsPerRecipientWindow: limits.maxRequestsPerRecipientWindow,
+            recipientWindowHours: limits.recipientWindowHours,
             maxRequestsPerRecipientDay: limits.maxRequestsPerRecipientDay,
             maxRequestsPerDay: limits.maxRequestsPerDay,
             dailyCostBudgetVnd: limits.dailyCostBudgetVnd,

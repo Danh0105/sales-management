@@ -34,6 +34,8 @@ export const PRODUCTION_AUTHORIZATION_TABLE =
 /** Uỷ quyền production đang hiệu lực (hạn mức trần do Owner duyệt). */
 export interface ProductionAuthorization {
   id: number;
+  maxRequestsPerRecipientWindow: number;
+  recipientWindowHours: number;
   maxRequestsPerRecipientDay: number;
   maxRequestsPerDay: number;
   dailyCostBudgetVnd: number;
@@ -42,7 +44,8 @@ export interface ProductionAuthorization {
   freeWindowHours: number;
 }
 
-const AUTHORIZATION_COLUMNS = `id, max_requests_per_recipient_day, max_requests_per_day,
+const AUTHORIZATION_COLUMNS = `id, max_requests_per_recipient_window, recipient_window_hours,
+  max_requests_per_recipient_day, max_requests_per_day,
   daily_cost_budget_vnd, monthly_cost_budget_vnd, interaction_window_hours, free_window_hours`;
 
 function authorizationOf(
@@ -50,6 +53,10 @@ function authorizationOf(
 ): ProductionAuthorization {
   return {
     id: Number(row.id),
+    maxRequestsPerRecipientWindow: Number(
+      row.max_requests_per_recipient_window,
+    ),
+    recipientWindowHours: Number(row.recipient_window_hours),
     maxRequestsPerRecipientDay: Number(row.max_requests_per_recipient_day),
     maxRequestsPerDay: Number(row.max_requests_per_day),
     dailyCostBudgetVnd: Number(row.daily_cost_budget_vnd),
@@ -567,6 +574,15 @@ export class RecruitmentChannelOutboxQueue {
     // Env chỉ được hạ thấp hạn mức Owner đã duyệt, không nâng được.
     limits = {
       ...limits,
+      maxRequestsPerRecipientWindow: Math.min(
+        limits.maxRequestsPerRecipientWindow,
+        auth.maxRequestsPerRecipientWindow,
+      ),
+      // Với cùng số tin, cửa sổ dài hơn chặt hơn; env chỉ được siết, không nới GO.
+      recipientWindowHours: Math.max(
+        limits.recipientWindowHours,
+        auth.recipientWindowHours,
+      ),
       maxRequestsPerRecipientDay: Math.min(
         limits.maxRequestsPerRecipientDay,
         auth.maxRequestsPerRecipientDay,
@@ -671,12 +687,18 @@ export class RecruitmentChannelOutboxQueue {
       row.externalRecipientId,
     );
     const [usage]: Array<{
+      recipient_window: number | string;
       recipient_day: number | string;
       total_day: number | string;
       cost_day: number | string;
       cost_month: number | string;
     }> = await em.query(
       `SELECT
+         count(*) FILTER (
+           WHERE channel_account_id = $1 AND recipient_fingerprint = $2
+             AND started_at > $7::timestamptz - ($8::int * interval '1 hour')
+             AND started_at <= $7::timestamptz
+         ) AS recipient_window,
          count(*) FILTER (
            WHERE channel_account_id = $1 AND recipient_fingerprint = $2
              AND started_at >= $3::timestamptz AND started_at < $4::timestamptz
@@ -698,8 +720,15 @@ export class RecruitmentChannelOutboxQueue {
         clock.next_day,
         clock.month_start,
         clock.next_month,
+        clock.at,
+        limits.recipientWindowHours,
       ],
     );
+    if (
+      Number(usage.recipient_window) >= limits.maxRequestsPerRecipientWindow
+    ) {
+      return { denied: 'OUTBOUND_RECIPIENT_WINDOW_LIMIT' };
+    }
     if (Number(usage.recipient_day) >= limits.maxRequestsPerRecipientDay) {
       return { denied: 'OUTBOUND_RECIPIENT_DAILY_LIMIT' };
     }
@@ -808,7 +837,19 @@ export class RecruitmentChannelOutboxQueue {
   async productionSafetyReady(): Promise<boolean> {
     const [row]: Array<{ ready: boolean }> = await this.dataSource.query(
       `SELECT to_regclass('public.recruitment_outbound_attempts') IS NOT NULL
-          AND to_regclass('public.${PRODUCTION_AUTHORIZATION_TABLE}') IS NOT NULL AS ready`,
+          AND to_regclass('public.${PRODUCTION_AUTHORIZATION_TABLE}') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = '${PRODUCTION_AUTHORIZATION_TABLE}'
+              AND column_name = 'max_requests_per_recipient_window'
+          )
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = '${PRODUCTION_AUTHORIZATION_TABLE}'
+              AND column_name = 'recipient_window_hours'
+          ) AS ready`,
     );
     return row?.ready === true;
   }

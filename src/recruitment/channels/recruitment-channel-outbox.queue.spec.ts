@@ -372,6 +372,8 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
     productionMode: true,
     interactionWindowHours: 168,
     freeWindowHours: 48,
+    maxRequestsPerRecipientWindow: 5,
+    recipientWindowHours: 5,
     maxRequestsPerRecipientDay: 5,
     maxRequestsPerDay: 100,
     dailyCostBudgetVnd: 100_000,
@@ -386,6 +388,7 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
       jobPublishedAt?: Date | null;
       interactionAt?: Date | null;
       ageSeconds?: number;
+      recipientWindow?: number;
       recipientDay?: number;
       totalDay?: number;
       costDay?: number;
@@ -417,6 +420,8 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
           return Promise.resolve([
             {
               id: 1,
+              max_requests_per_recipient_window: 1000,
+              recipient_window_hours: 24,
               max_requests_per_recipient_day: 1000,
               max_requests_per_day: 1_000_000,
               daily_cost_budget_vnd: 2_000_000_000,
@@ -462,6 +467,7 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
         if (/AS recipient_day/.test(sql)) {
           return Promise.resolve([
             {
+              recipient_window: patch.recipientWindow ?? 0,
               recipient_day: patch.recipientDay ?? 0,
               total_day: patch.totalDay ?? 0,
               cost_day: patch.costDay ?? 0,
@@ -565,6 +571,11 @@ describe('RecruitmentChannelOutboxQueue — production admission + quota ledger'
   });
 
   it.each([
+    [
+      'ứng viên/cửa sổ trượt',
+      { recipientWindow: 5 },
+      'OUTBOUND_RECIPIENT_WINDOW_LIMIT',
+    ],
     ['ứng viên/ngày', { recipientDay: 5 }, 'OUTBOUND_RECIPIENT_DAILY_LIMIT'],
     ['toàn hệ thống/ngày', { totalDay: 100 }, 'OUTBOUND_DAILY_LIMIT'],
   ])(
@@ -623,6 +634,8 @@ describe('RecruitmentChannelOutboxQueue — GO PROD (uỷ quyền production c�
     productionMode: true,
     interactionWindowHours: 168,
     freeWindowHours: 48,
+    maxRequestsPerRecipientWindow: 50,
+    recipientWindowHours: 5,
     maxRequestsPerRecipientDay: 50,
     maxRequestsPerDay: 1000,
     dailyCostBudgetVnd: 100_000,
@@ -676,6 +689,7 @@ describe('RecruitmentChannelOutboxQueue — GO PROD (uỷ quyền production c�
         if (/AS recipient_day/.test(sql)) {
           return Promise.resolve([
             {
+              recipient_window: 0,
               recipient_day: 0,
               total_day: 0,
               cost_day: 0,
@@ -704,6 +718,8 @@ describe('RecruitmentChannelOutboxQueue — GO PROD (uỷ quyền production c�
   }
   const auth = {
     id: 3,
+    max_requests_per_recipient_window: 3,
+    recipient_window_hours: 5,
     max_requests_per_recipient_day: 3,
     max_requests_per_day: 20,
     daily_cost_budget_vnd: 0,

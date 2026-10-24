@@ -9,6 +9,8 @@ export interface RecruitmentOutboundSafetyConfig {
   productionMode: boolean;
   interactionWindowHours: number;
   freeWindowHours: number;
+  maxRequestsPerRecipientWindow: number;
+  recipientWindowHours: number;
   maxRequestsPerRecipientDay: number;
   maxRequestsPerDay: number;
   dailyCostBudgetVnd: number;
@@ -22,6 +24,8 @@ export const OUTBOUND_SAFETY_CONFIG_ERROR =
 const REQUIRED_LIMITS = {
   RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS: [1, 168],
   RECRUITMENT_ZALO_FREE_WINDOW_HOURS: [1, 168],
+  RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW: [1, 1_000],
+  RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS: [1, 24],
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY: [1, 1_000],
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY: [1, 1_000_000],
   RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND: [0, 2_000_000_000],
@@ -78,6 +82,14 @@ export function readOutboundSafetyConfig(
       168,
     ),
     freeWindowHours: readRequiredInt('RECRUITMENT_ZALO_FREE_WINDOW_HOURS', 48),
+    maxRequestsPerRecipientWindow: readRequiredInt(
+      'RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW',
+      5,
+    ),
+    recipientWindowHours: readRequiredInt(
+      'RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS',
+      24,
+    ),
     maxRequestsPerRecipientDay: readRequiredInt(
       'RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY',
       5,
@@ -105,6 +117,11 @@ export function readOutboundSafetyConfig(
   }
   if (config.maxRequestsPerRecipientDay > config.maxRequestsPerDay) {
     invalid.push('RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY');
+  }
+  if (
+    config.maxRequestsPerRecipientWindow > config.maxRequestsPerRecipientDay
+  ) {
+    invalid.push('RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW');
   }
   if (config.monthlyCostBudgetVnd < config.dailyCostBudgetVnd) {
     invalid.push('RECRUITMENT_ZALO_MONTHLY_COST_BUDGET_VND');

@@ -11,6 +11,8 @@ const production = {
   RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED: 'false',
   RECRUITMENT_ZALO_INTERACTION_WINDOW_HOURS: '168',
   RECRUITMENT_ZALO_FREE_WINDOW_HOURS: '48',
+  RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW: '5',
+  RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS: '5',
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY: '8',
   RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY: '200',
   RECRUITMENT_ZALO_DAILY_COST_BUDGET_VND: '100000',
@@ -27,6 +29,8 @@ describe('recruitment outbound production safety config', () => {
         productionMode: true,
         interactionWindowHours: 168,
         freeWindowHours: 48,
+        maxRequestsPerRecipientWindow: 5,
+        recipientWindowHours: 5,
         maxRequestsPerRecipientDay: 8,
         maxRequestsPerDay: 200,
         dailyCostBudgetVnd: 100000,
@@ -65,6 +69,17 @@ describe('recruitment outbound production safety config', () => {
     expect(() => assertOutboundSafetyConfig(read(env))).toThrow(
       /RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY/,
     );
+  });
+
+  it('quota cửa sổ trượt không được lớn hơn quota ngày', () => {
+    expect(() =>
+      assertOutboundSafetyConfig(
+        read({
+          ...production,
+          RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW: '9',
+        }),
+      ),
+    ).toThrow(/RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW/);
   });
 
   it('budget 0 là chế độ chặn tin tính phí, nhưng đơn giá ước lượng phải dương', () => {

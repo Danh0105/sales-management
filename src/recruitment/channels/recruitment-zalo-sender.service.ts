@@ -157,7 +157,7 @@ export class RecruitmentZaloSender
       if (!ready) {
         this.running = false;
         this.logger.error(
-          'sender KHÔNG chạy: production mode thiếu bảng recruitment_outbound_attempts / recruitment_production_authorizations',
+          'sender KHÔNG chạy: production mode thiếu ledger / uỷ quyền / schema quota trượt',
         );
         return;
       }
@@ -171,7 +171,7 @@ export class RecruitmentZaloSender
           config.oaId,
         );
         authorization = auth
-          ? `${auth.id} limits=${auth.maxRequestsPerRecipientDay}/${auth.maxRequestsPerDay} budget=${auth.dailyCostBudgetVnd}/${auth.monthlyCostBudgetVnd}`
+          ? `${auth.id} limits=${auth.maxRequestsPerRecipientWindow}/${auth.recipientWindowHours}h,${auth.maxRequestsPerRecipientDay}/${auth.maxRequestsPerDay} budget=${auth.dailyCostBudgetVnd}/${auth.monthlyCostBudgetVnd}`
           : 'none';
       } catch (error) {
         authorization = `error:${errorCode(error)}`;

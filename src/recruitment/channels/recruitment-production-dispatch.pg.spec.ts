@@ -41,6 +41,8 @@ const ENV: RecruitmentOutboundSafetyConfig = {
   productionMode: true,
   interactionWindowHours: 168,
   freeWindowHours: 48,
+  maxRequestsPerRecipientWindow: 50,
+  recipientWindowHours: 5,
   maxRequestsPerRecipientDay: 50,
   maxRequestsPerDay: 1000,
   dailyCostBudgetVnd: 0,
@@ -113,16 +115,20 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
       VALUES (1, false, false, false, false)`);
   });
 
-  /** Uỷ quyền GO PROD do Owner (superuser) tạo — ngày đầu: 3/ứng viên, 20/ngày, ngân sách 0, 48 giờ. */
+  /** Uỷ quyền GO PROD do Owner tạo — mặc định test: 3/5h, 3/ngày, 20/ngày, ngân sách 0. */
   async function authorize(patch: Record<string, number> = {}) {
-    const l = { rd: 3, d: 20, iw: 48, fw: 48, ...patch };
+    const l = { rw: 3, wh: 5, rd: 3, d: 20, iw: 48, fw: 48, ...patch };
+    if (patch.rd !== undefined && patch.rw === undefined) {
+      l.rw = Math.min(l.rw, l.rd);
+    }
     const [row] = await owner.query(
       `INSERT INTO "recruitment_production_authorizations" (go_code_fp, channel_account_id,
+         max_requests_per_recipient_window, recipient_window_hours,
          max_requests_per_recipient_day, max_requests_per_day, daily_cost_budget_vnd, monthly_cost_budget_vnd,
          interaction_window_hours, free_window_hours, release_dist_hash, approved_by, approved_at)
-       VALUES (md5(random()::text) || md5(random()::text), $1, $2, $3, 0, 0, $4, $5, 'test', 'Owner test', now())
+       VALUES (md5(random()::text) || md5(random()::text), $1, $2, $3, $4, $5, 0, 0, $6, $7, 'test', 'Owner test', now())
        RETURNING id`,
-      [OA, l.rd, l.d, l.iw, l.fw],
+      [OA, l.rw, l.wh, l.rd, l.d, l.iw, l.fw],
     );
     return Number(row.id);
   }
@@ -192,6 +198,38 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
     owner.query(
       `SELECT outbox_id, request_no, outcome, result_code, estimated_cost_vnd FROM "recruitment_outbound_attempts" ORDER BY id`,
     );
+
+  async function backfillAttempts(
+    conv: number,
+    recipient: string,
+    at: string,
+    n: number,
+  ) {
+    const out = await hrMessage(conv, recipient);
+    await owner.query(
+      `ALTER TABLE "recruitment_outbound_attempts" DISABLE TRIGGER "TRG_outbound_attempt_guard"`,
+    );
+    try {
+      for (let i = 1; i <= n; i++) {
+        await owner.query(
+          `INSERT INTO "recruitment_outbound_attempts" (outbox_id, request_no, lease_owner, source_type, channel_account_id,
+             recipient_fingerprint, interaction_at, outcome, started_at, completed_at)
+           VALUES ($1, $2, 'old', 'HR_MESSAGE', $3::varchar,
+                   left(encode(sha256(convert_to($3::text || ':' || $4::text, 'UTF8')), 'hex'), 16),
+                   now(), 'SENT', $5::timestamptz, $5::timestamptz)`,
+          [out, i, OA, recipient, at],
+        );
+      }
+    } finally {
+      await owner.query(
+        `ALTER TABLE "recruitment_outbound_attempts" ENABLE TRIGGER "TRG_outbound_attempt_guard"`,
+      );
+    }
+    await owner.query(
+      `UPDATE "recruitment_channel_outbox" SET status = 'SENT', message_text = NULL WHERE id = $1`,
+      [out],
+    );
+  }
 
   it('không có uỷ quyền GO PROD → không claim; có uỷ quyền → dispatch ghi ledger DISPATCHING trước mạng, SENT ghi cả hai', async () => {
     const conv = await conversation(A);
@@ -269,7 +307,7 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
     }
   });
 
-  it('quota ứng viên/ngày = 3 (uỷ quyền thắng env 50): tin thứ 4 → INVALID + DEAD_LETTER, không ledger', async () => {
+  it('quota ứng viên/5h = 3 (uỷ quyền thắng env 50): tin thứ 4 → INVALID + DEAD_LETTER, không ledger', async () => {
     await authorize();
     const conv = await conversation(A);
     for (let i = 0; i < 3; i++) {
@@ -279,7 +317,7 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
     }
     await expect(sendOne(A, conv)).resolves.toEqual({
       outcome: 'INVALID',
-      code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+      code: 'OUTBOUND_RECIPIENT_WINDOW_LIMIT',
     });
     expect(await ledger()).toHaveLength(3);
     const statuses = await owner.query(
@@ -287,11 +325,31 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
     );
     expect(statuses.at(-1)).toEqual({
       status: 'DEAD_LETTER',
-      last_error_code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+      last_error_code: 'OUTBOUND_RECIPIENT_WINDOW_LIMIT',
     });
     // người khác vẫn gửi được
     await expect(sendOne(B, await conversation(B))).resolves.toEqual({
       outcome: 'DISPATCHED',
+    });
+  });
+
+  it('cửa sổ trượt 5h: request đúng biên 5h được loại; request nằm trong 5h bị tính', async () => {
+    await authorize({ rw: 1, wh: 5, rd: 25, d: 100 });
+    const conv = await conversation(A);
+    const [{ boundary, inside }] = await owner.query(
+      `SELECT (clock_timestamp() - interval '5 hours')::text AS boundary,
+              (clock_timestamp() - interval '4 hours 59 minutes')::text AS inside`,
+    );
+    await backfillAttempts(conv, A, boundary, 1);
+    await expect(sendOne(A, conv)).resolves.toEqual({ outcome: 'DISPATCHED' });
+
+    await owner.query(
+      `TRUNCATE "recruitment_outbound_attempts" RESTART IDENTITY CASCADE`,
+    );
+    await backfillAttempts(conv, A, inside, 1);
+    await expect(sendOne(A, conv)).resolves.toEqual({
+      outcome: 'INVALID',
+      code: 'OUTBOUND_RECIPIENT_WINDOW_LIMIT',
     });
   });
 
@@ -301,37 +359,18 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
     const [{ day_start }] = await owner.query(
       `SELECT date_trunc('day', clock_timestamp() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS day_start`,
     );
-    const backfill = async (at: string, n: number) => {
-      const out = await hrMessage(conv, A);
-      await owner.query(
-        `ALTER TABLE "recruitment_outbound_attempts" DISABLE TRIGGER "TRG_outbound_attempt_guard"`,
-      );
-      for (let i = 1; i <= n; i++) {
-        await owner.query(
-          `INSERT INTO "recruitment_outbound_attempts" (outbox_id, request_no, lease_owner, source_type, channel_account_id,
-             recipient_fingerprint, interaction_at, outcome, started_at, completed_at)
-           VALUES ($1, $2, 'old', 'HR_MESSAGE', $3::varchar,
-                   left(encode(sha256(convert_to($3::text || ':' || $4::text, 'UTF8')), 'hex'), 16),
-                   now(), 'SENT', $5::timestamptz, $5::timestamptz)`,
-          [out, i, OA, A, at],
-        );
-      }
-      await owner.query(
-        `ALTER TABLE "recruitment_outbound_attempts" ENABLE TRIGGER "TRG_outbound_attempt_guard"`,
-      );
-      await owner.query(
-        `UPDATE "recruitment_channel_outbox" SET status = 'SENT', message_text = NULL WHERE id = $1`,
-        [out],
-      );
-    };
     // 3 request lúc 23:59 hôm qua (giờ VN) — UTC đã là "hôm nay" nếu tính sai múi giờ
-    await backfill(
+    await backfillAttempts(
+      conv,
+      A,
       new Date(new Date(day_start).getTime() - 60_000).toISOString(),
       3,
     );
     await expect(sendOne(A, conv)).resolves.toEqual({ outcome: 'DISPATCHED' });
     // 2 request lúc 00:01 hôm nay → cộng 1 vừa gửi = 3 → tin tiếp bị chặn
-    await backfill(
+    await backfillAttempts(
+      conv,
+      A,
       new Date(new Date(day_start).getTime() + 60_000).toISOString(),
       2,
     );
@@ -372,7 +411,7 @@ suite('production dispatch — PostgreSQL thật (G8 go-live)', () => {
         q.dispatch(c.row, c.owner, false, null, null, ENV, 60),
       ).resolves.toEqual({
         outcome: 'INVALID',
-        code: 'OUTBOUND_RECIPIENT_DAILY_LIMIT',
+        code: 'OUTBOUND_RECIPIENT_WINDOW_LIMIT',
       });
     } finally {
       await fresh.destroy();
