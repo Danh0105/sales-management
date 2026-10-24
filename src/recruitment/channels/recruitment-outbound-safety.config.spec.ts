@@ -71,6 +71,21 @@ describe('recruitment outbound production safety config', () => {
     );
   });
 
+  it('rollout artifact trước GO mới: thiếu 2 biến rolling thì giữ quota ngày trong 24h', () => {
+    const legacy = { ...production };
+    delete (legacy as Partial<typeof production>)
+      .RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW;
+    delete (legacy as Partial<typeof production>)
+      .RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS;
+    expect(readOutboundSafetyConfig(read(legacy))).toMatchObject({
+      config: {
+        maxRequestsPerRecipientWindow: 8,
+        recipientWindowHours: 24,
+        maxRequestsPerRecipientDay: 8,
+      },
+    });
+  });
+
   it('quota cửa sổ trượt không được lớn hơn quota ngày', () => {
     expect(() =>
       assertOutboundSafetyConfig(

@@ -63,9 +63,11 @@ export function readOutboundSafetyConfig(
   const readRequiredInt = (
     key: keyof typeof REQUIRED_LIMITS,
     fallback: number,
+    allowMissingDuringRollingUpgrade = false,
   ) => {
     const raw = get(key)?.trim() ?? '';
-    if (!productionMode && !raw) return fallback;
+    if (!raw && (!productionMode || allowMissingDuringRollingUpgrade))
+      return fallback;
     const [min, max] = REQUIRED_LIMITS[key];
     const value = Number(raw);
     if (!raw || !Number.isSafeInteger(value) || value < min || value > max) {
@@ -75,6 +77,10 @@ export function readOutboundSafetyConfig(
     return value;
   };
 
+  const maxRequestsPerRecipientDay = readRequiredInt(
+    'RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY',
+    5,
+  );
   const config: RecruitmentOutboundSafetyConfig = {
     productionMode,
     interactionWindowHours: readRequiredInt(
@@ -84,16 +90,15 @@ export function readOutboundSafetyConfig(
     freeWindowHours: readRequiredInt('RECRUITMENT_ZALO_FREE_WINDOW_HOURS', 48),
     maxRequestsPerRecipientWindow: readRequiredInt(
       'RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_WINDOW',
-      5,
+      maxRequestsPerRecipientDay,
+      true,
     ),
     recipientWindowHours: readRequiredInt(
       'RECRUITMENT_ZALO_RECIPIENT_WINDOW_HOURS',
       24,
+      true,
     ),
-    maxRequestsPerRecipientDay: readRequiredInt(
-      'RECRUITMENT_ZALO_MAX_REQUESTS_PER_RECIPIENT_DAY',
-      5,
-    ),
+    maxRequestsPerRecipientDay,
     maxRequestsPerDay: readRequiredInt(
       'RECRUITMENT_ZALO_MAX_REQUESTS_PER_DAY',
       100,
