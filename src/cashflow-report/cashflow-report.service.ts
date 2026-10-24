@@ -7,6 +7,11 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { AuthUser } from '../type/auth-user.type';
 import { CashAccount } from './cash-account.entity';
+import {
+  buildCashflowWorkbook,
+  cashflowFileName,
+  ExcelLedger,
+} from './cashflow-excel';
 import { Cents, centsToString, toCents } from './cashflow-money';
 import {
   AccountBalance,
@@ -300,6 +305,36 @@ export class CashflowReportService {
       page,
       limit,
       totalRows,
+    };
+  }
+
+  /**
+   * Excel 3 sheet theo file mẫu, từ CÙNG dữ liệu tổng hợp với giao diện; toàn
+   * bộ kết quả theo bộ lọc, không theo trang. Nhóm ngoài phạm vi "Loại tài
+   * khoản" vẫn có sheet (đủ 3 sheet) nhưng không có cột tài khoản.
+   */
+  async exportExcel(
+    query: CashflowQueryDto,
+  ): Promise<{ buffer: Buffer; fileName: string }> {
+    const dataset = await this.buildDataset(query);
+    const groups = scopeGroups(query.accountType);
+    const ledgerFor = (group: CashGroup): ExcelLedger =>
+      groups.includes(group)
+        ? { group, ...this.buildLedger(dataset, group, query) }
+        : { group, accounts: [], rows: [], totals: new Map() };
+
+    const workbook = buildCashflowWorkbook({
+      range: dataset.range,
+      accounts: dataset.accounts,
+      balances: dataset.balances,
+      cash: ledgerFor('111'),
+      bank: ledgerFor('112'),
+      search: query.search,
+    });
+
+    return {
+      buffer: Buffer.from(await workbook.xlsx.writeBuffer()),
+      fileName: cashflowFileName(dataset.range),
     };
   }
 

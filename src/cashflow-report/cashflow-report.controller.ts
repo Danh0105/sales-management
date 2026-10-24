@@ -6,10 +6,12 @@ import {
   Patch,
   Query,
   Req,
+  Res,
   UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
@@ -64,6 +66,22 @@ export class CashflowReportController {
   @Get('issues')
   issues(@Query() query: CashflowQueryDto) {
     return this.cashflowReportService.getIssues(query);
+  }
+
+  /** Excel 3 sheet theo file mẫu: DANH MỤC CÁC TK, Tiền mặt, Tiền gửi ngân hàng. */
+  @Get('export')
+  async export(@Query() query: CashflowQueryDto, @Res() res: Response) {
+    const { buffer, fileName } =
+      await this.cashflowReportService.exportExcel(query);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+    res.send(buffer);
   }
 
   @Patch('accounts/:code')

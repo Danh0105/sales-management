@@ -87,7 +87,7 @@ Sửa danh mục: `ketoan_truong`, `director`.
 | GET | `cash`, `bank` | sổ chi tiết nhóm 111 / 112; `page`, `limit` ≤ 500; tổng không phụ thuộc trang |
 | GET | `issues` | chứng từ chưa phân loại / cảnh báo |
 | PATCH | `accounts/:code` | `openingBalance` + `openingBalanceDate` (đi theo cặp), `isActive`, `note` |
-| GET | `export` | Excel 3 sheet theo file mẫu — **chưa làm, chờ file mẫu** |
+| GET | `export` | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
 
 Tham số chung: `from`, `to` (YYYY-MM-DD, bắt buộc), `accountType` (`all|cash|bank`),
 `accountCode`, `search` (số CT, số HĐ, diễn giải, mã/tên đối tượng; không phân biệt dấu).
@@ -106,3 +106,42 @@ Phụ thuộc: các migration `1793600000000`, `1793700000000`, `1793800000000` 
 
 Rollback: `down()` xoá 3 cột và bảng `cash_accounts`. Làm vậy sẽ mất các số dư gốc và các
 giá trị Thu/Chi, Số tiền, Nguồn chi đã nhập, nên phải backup trước.
+
+## 7. Xuất Excel (`cashflow-excel.ts`)
+
+Dựng theo file mẫu TỔNG HỢP THU CHI.xlsx của kế toán. File mẫu không nằm trong repo vì có
+tên người và nhà cung cấp thật. Số liệu lấy từ cùng `buildDataset` / `buildLedger` với
+giao diện.
+
+- **DANH MỤC CÁC TK**: C5 "NGUỒN THU CHI"; tiêu đề hàng 7 "Số hiệu tài khoản / Tên tài
+  khoản / Số dư"; nhãn nhóm `111-Tiền mặt`, `112-Tiền Gửi Ngân Hàng` ở cột B, tổng nhóm ở
+  cột E; viền cả khối B7:E…; Times New Roman 11. "Số dư" là số dư cuối ngày "Đến ngày".
+  Tổng nhóm là công thức `SUM` khi mọi tài khoản trong nhóm đã có số dư gốc, ngược lại ghi
+  "Chưa xác minh".
+- **Tiền mặt / Tiền gửi ngân hàng**:
+  - Hàng 1 "SỔ CHI TIẾT THU CHI" (Arial 16, gộp), hàng 2 "TK 111: …" / "TK 112: …".
+  - Hàng 4 là Thu/Chi, hàng 5 là `mã-tên` tài khoản gộp từng cặp (nền BFBFBF), giống mẫu.
+  - Hàng 6 Số dư đầu kỳ, rồi các chứng từ, "Cộng" (`SUM`), "Số dư cuối kỳ"
+    (`=Thu đầu kỳ + Cộng Thu − Cộng Chi`, nền D8D8D8).
+  - Định dạng số `#,##0 ;(#,##0)`, ngày `dd/mm/yyyy`; khổ A4 ngang, lề 1 cm.
+  - Số cặp cột theo danh mục.
+- Mọi công thức đều ghi sẵn kết quả, nên file mở ra có số ngay. Ô tiền là kiểu số, ngày là
+  kiểu ngày; số chứng từ, số hóa đơn và mã đối tượng là chữ (giữ số 0 ở đầu).
+
+Khác mẫu có chủ đích:
+
+- Tiêu đề cột lấy từ danh mục, không theo mẫu. Mẫu ghi "11210-TK Techcombank - Kido" cho
+  cột của 1129 (trùng mã 11210) và viết tắt "TK Techcombank - CĐS", "TK MB Bank ST".
+- Dư đầu / dư cuối luôn nằm ở cột Thu. Mẫu đặt của 1113, 1114 ở cột Chi.
+- Ô tiền của tài khoản khác để trống. Mẫu điền 0 rải rác.
+- Ngày luôn là kiểu ngày. Mẫu lẫn chuỗi "02/01/2026".
+- Thêm dòng kỳ báo cáo (hàng 3 của sổ, C6 của danh mục). Gộp 2 hàng tiêu đề cho các cột
+  chứng từ và đối tượng. Cố định khung ở F6, lặp hàng 4–5 khi in.
+- Tài khoản chưa có số dư gốc ghi "Chưa xác minh" thay vì để trống hoặc 0, và không dùng
+  công thức ở ô đó (tránh `#VALUE!`).
+- Khi lọc theo từ khoá: "Cộng" chỉ tính chứng từ khớp, "Số dư cuối kỳ" ghi số dư thật thay
+  vì công thức, kèm ghi chú dưới bảng.
+- Nhóm ngoài phạm vi "Loại tài khoản" vẫn có sheet (đủ 3 sheet) và ghi "Không có tài khoản
+  nào theo bộ lọc hiện tại".
+- Tên sheet danh mục bỏ dấu cách thừa ở cuối của mẫu ("DANH MỤC CÁC TK ").
+
