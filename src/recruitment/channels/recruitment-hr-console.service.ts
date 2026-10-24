@@ -73,11 +73,17 @@ export class RecruitmentHrConsoleService {
   ): Promise<Paginated<Row>> {
     const { page, limit } = query;
     const keyword = query.keyword ? likePattern(query.keyword) : null;
-    const params = [keyword, query.mode ?? null, query.pendingOnly === true];
+    const params = [
+      keyword,
+      query.mode ?? null,
+      query.pendingOnly === true,
+      query.candidateId ?? null,
+    ];
     const where = `
       WHERE ($1::text IS NULL OR cand.full_name ILIKE $1 OR cand.phone ILIKE $1)
         AND ($2::text IS NULL OR c.control_mode::text = $2)
-        AND ($3::boolean IS NOT TRUE OR coalesce(pa.n, 0) > 0)`;
+        AND ($3::boolean IS NOT TRUE OR coalesce(pa.n, 0) > 0)
+        AND ($4::int IS NULL OR c.candidate_id = $4)`;
     const from = `
       FROM "recruitment_conversations" c
       JOIN "recruitment_candidates" cand ON cand.id = c.candidate_id
@@ -102,7 +108,7 @@ export class RecruitmentHrConsoleService {
                 coalesce(pa.n, 0)::int AS "pendingApprovals"
          ${from} ${where}
          ORDER BY coalesce(c.last_message_at, c.created_at) DESC, c.id DESC
-         LIMIT $4 OFFSET $5`,
+         LIMIT $5 OFFSET $6`,
         [...params, limit, (page - 1) * limit],
       ),
       this.dataSource.query<Array<{ total: number }>>(

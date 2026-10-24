@@ -17,6 +17,12 @@ import { PaginationQueryDto, Trim } from './common.dto';
 /** Màn "Hội thoại Zalo" của HR. */
 export class ConversationListQueryDto extends PaginationQueryDto {
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  candidateId?: number;
+
+  @IsOptional()
   @Trim()
   @IsString()
   @MaxLength(100)
