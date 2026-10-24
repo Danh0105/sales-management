@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -47,7 +48,11 @@ import {
   RecruitmentJobStatus,
   TERMINAL_APPLICATION_STATUSES,
 } from '../recruitment.enums';
-import { AI_ACTOR, type RecruitmentActor } from '../recruitment.roles';
+import {
+  AI_ACTOR,
+  RECRUITMENT_MANAGE_ROLES,
+  type RecruitmentActor,
+} from '../recruitment.roles';
 import {
   isUniqueViolation,
   likePattern,
@@ -59,6 +64,7 @@ import {
   vnDayStart,
 } from '../recruitment.views';
 import { requiredCandidateFields } from '../screening/screening-engine';
+import { createHireAccount } from './recruitment-hire-account';
 import {
   INTERVIEW_SLOT_PROVIDER,
   type InterviewSlotProvider,
@@ -247,50 +253,126 @@ export class RecruitmentApplicationService {
     dto: UpdateApplicationStatusDto,
     actor: RecruitmentActor,
   ) {
-    const application = await this.getOrThrow(id);
-    const before = { ...application };
-
+    if (
+      dto.status === ApplicationStatus.HIRED &&
+      (actor.type !== RecruitmentActorType.HR ||
+        !actor.employeeId ||
+        !actor.roles.some((role) => RECRUITMENT_MANAGE_ROLES.includes(role)))
+    ) {
+      throw new ForbiddenException(
+        'Chỉ Nhân sự được xác nhận tuyển và cấp tài khoản',
+      );
+    }
     if (dto.status === ApplicationStatus.REJECTED && !dto.rejectedReason) {
       throw new BadRequestException({
         code: 'REJECTED_REASON_REQUIRED',
         message: 'Phải nhập lý do khi loại hồ sơ',
       });
     }
-    assertApplicationTransition(application.status, dto.status, actor.type);
-
-    const now = new Date();
-    application.status = dto.status;
-    application.hrReviewedAt = now;
-    application.reviewedBy = actor.employeeId;
-    if (dto.status === ApplicationStatus.REJECTED)
-      application.rejectedReason = dto.rejectedReason!;
-
-    const terminal = TERMINAL_APPLICATION_STATUSES.includes(dto.status);
-    const saved = await this.dataSource.transaction(async (em) => {
-      const result = await em
-        .getRepository(RecruitmentApplication)
-        .save(application);
-      if (terminal) {
-        await this.closeOpenWork(
-          em,
-          id,
+    if (
+      dto.status !== ApplicationStatus.HIRED &&
+      (dto.password !== undefined ||
+        dto.confirmAccountRole !== undefined ||
+        dto.accountPositionRole !== undefined)
+    ) {
+      throw new BadRequestException(
+        'Thông tin cấp tài khoản chỉ dùng khi xác nhận Đã tuyển',
+      );
+    }
+    try {
+      await this.dataSource.transaction(async (em) => {
+        const repo = em.getRepository(RecruitmentApplication);
+        const application = await repo.findOne({
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!application) throw this.notFound(id);
+        // Retry cùng hồ sơ không tạo lại tài khoản hoặc đổi mật khẩu.
+        if (
+          application.status === ApplicationStatus.HIRED &&
+          dto.status === ApplicationStatus.HIRED &&
+          application.employeeId
+        )
+          return;
+        const before = { ...application };
+        if (dto.status === ApplicationStatus.HIRED) {
+          if (application.status === ApplicationStatus.HIRED) {
+            throw new ConflictException({
+              code: 'LEGACY_HIRE_ACCOUNT_REQUIRED',
+              message:
+                'Hồ sơ Đã tuyển cũ chưa có liên kết tài khoản; HR cần đối soát, không tự cấp hồi tố.',
+            });
+          }
+          assertApplicationTransition(
+            application.status,
+            dto.status,
+            actor.type,
+          );
+          application.employeeId = await createHireAccount(
+            em,
+            application.candidateId,
+            application.jobId,
+            dto,
+            actor,
+          );
+          await this.audit.recordMandatory(em, {
+            actor,
+            action: 'APPLICATION_ACCOUNT_CREATE',
+            entity: 'applications',
+            entityId: id,
+            context: {
+              employeeId: application.employeeId,
+              candidateId: application.candidateId,
+              positionRole: dto.accountPositionRole,
+            },
+          });
+        }
+        if (dto.status !== ApplicationStatus.HIRED)
+          assertApplicationTransition(
+            application.status,
+            dto.status,
+            actor.type,
+          );
+        const now = new Date();
+        application.status = dto.status;
+        application.hrReviewedAt = now;
+        application.reviewedBy = actor.employeeId;
+        if (dto.status === ApplicationStatus.REJECTED)
+          application.rejectedReason = dto.rejectedReason!;
+        const result = await repo.save(application);
+        if (TERMINAL_APPLICATION_STATUSES.includes(dto.status)) {
+          await this.closeOpenWork(
+            em,
+            id,
+            actor,
+            `Hồ sơ kết thúc (${dto.status})`,
+            now,
+          );
+        }
+        await this.audit.recordMandatory(em, {
           actor,
-          `Hồ sơ kết thúc (${dto.status})`,
-          now,
-        );
+          action: 'APPLICATION_STATUS_CHANGE',
+          entity: 'applications',
+          entityId: id,
+          before,
+          after: result,
+          context: {
+            from: before.status,
+            to: dto.status,
+            note: dto.note ?? null,
+          },
+        });
+      });
+    } catch (error) {
+      if (dto.status === ApplicationStatus.HIRED && isUniqueViolation(error)) {
+        throw new ConflictException({
+          code: 'HIRE_ACCOUNT_CONFLICT',
+          message:
+            'Liên hệ vừa được dùng cho tài khoản/hồ sơ khác. Chưa tuyển thành công; HR cần đối soát.',
+        });
       }
-      return result;
-    });
-
-    await this.audit.record({
-      actor,
-      action: 'APPLICATION_STATUS_CHANGE',
-      entity: 'applications',
-      entityId: id,
-      before,
-      after: saved,
-      context: { from: before.status, to: dto.status, note: dto.note ?? null },
-    });
+      throw error;
+    }
     return this.findOne(id);
   }
 

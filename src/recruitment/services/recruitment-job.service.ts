@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { Department } from '../../department/department.entity';
+import { employeePosition } from '../../employee/employee-positions';
 import type { Paginated } from '../dto/common.dto';
 import type {
   CreateJobDto,
@@ -75,13 +76,15 @@ export class RecruitmentJobService {
   ) {}
 
   async create(dto: CreateJobDto, actor: RecruitmentActor) {
+    const position = this.assertPosition(dto.positionRole);
     this.assertSalaryRange(dto.salaryMin ?? null, dto.salaryMax ?? null);
     await this.assertDepartment(dto.departmentId);
     await this.assertCodeFree(dto.code);
 
     const job = this.jobRepo.create({
       code: dto.code,
-      title: dto.title,
+      title: dto.title?.trim() || position.label,
+      positionRole: position.value,
       description: dto.description ?? null,
       departmentId: dto.departmentId ?? null,
       location: dto.location ?? null,
@@ -159,6 +162,9 @@ export class RecruitmentJobService {
       });
     }
     const before = { ...job };
+    if (dto.positionRole !== undefined) {
+      job.positionRole = this.assertPosition(dto.positionRole).value;
+    }
 
     const salaryMin =
       dto.salaryMin !== undefined ? dto.salaryMin : job.salaryMin;
@@ -215,6 +221,17 @@ export class RecruitmentJobService {
 
   publish(id: number, actor: RecruitmentActor) {
     return this.changeStatus(id, 'publish', actor);
+  }
+
+  private assertPosition(role?: string) {
+    const position = employeePosition(role);
+    if (!position) {
+      throw new BadRequestException({
+        code: 'POSITION_REQUIRED',
+        message: 'Vui lòng chọn chức danh có sẵn trong hệ thống',
+      });
+    }
+    return position;
   }
 
   pause(id: number, actor: RecruitmentActor) {

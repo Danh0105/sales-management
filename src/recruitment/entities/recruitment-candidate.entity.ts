@@ -38,6 +38,10 @@ import { CandidateSource } from '../recruitment.enums';
   '"expected_salary" IS NULL OR "expected_salary" >= 0',
 )
 export class RecruitmentCandidate {
+  /** Chỉ HR tuyển thành công mới gắn tài khoản, không suy ra từ email/SĐT. */
+  @Column({ name: 'employee_id', type: 'int', nullable: true, unique: true })
+  employeeId!: number | null;
+
   @PrimaryGeneratedColumn({
     primaryKeyConstraintName: 'PK_recruitment_candidates',
   })

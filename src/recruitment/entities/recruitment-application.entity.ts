@@ -30,10 +30,17 @@ import { RecruitmentJob } from './recruitment-job.entity';
   where: `"status" NOT IN ('REJECTED', 'WITHDRAWN')`,
 })
 @Check(
+  'chk_recruitment_hired_account_status',
+  '"employee_id" IS NULL OR "status" = \'HIRED\'',
+)
+@Check(
   'CHK_recruitment_applications_score',
   '"ai_match_score" IS NULL OR ("ai_match_score" >= 0 AND "ai_match_score" <= 100)',
 )
 export class RecruitmentApplication {
+  @Column({ name: 'employee_id', type: 'int', nullable: true, unique: true })
+  employeeId!: number | null;
+
   @PrimaryGeneratedColumn({
     primaryKeyConstraintName: 'PK_recruitment_applications',
   })
