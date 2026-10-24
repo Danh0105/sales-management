@@ -11,13 +11,13 @@ Giao diện và file Excel cùng gọi một bộ hàm tổng hợp ở backend
 Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo đọc thẳng các nghiệp vụ
 đang có, không tạo bảng giao dịch song song.
 
-| Nguồn | Bảng | Bút toán | Ngày hạch toán | Tài khoản | Số tiền |
-|---|---|---|---|---|---|
-| Hóa Đơn | `revenue_items` | Thu (`IN`) hoặc Chi (`OUT`) | `invoicePaymentDate` ("Ngày chi") | `invoiceCashAccount` ("Khoản thu/chi") | `invoiceCashAmount` ("Số tiền thu/chi", kế toán nhập) |
-| Chi Trường | `school_expense_items` | Chi | `expenseDate` | `cashAccount` ("Nguồn chi") | `paidAmount` ("Đã chi") |
-| Chi Ngoài | `management_expense_items` | Chi | `expenseDate` | `cashAccount` ("Nguồn chi") | `paidAmount` ("Đã chi") |
-| Đề xuất chi: xuất tiền | `suggest_history` (`CONFIRM_CASH_RELEASED`) | Chi | ngày của sự kiện | `data.cashAccount`; lần xuất cuối cùng lấy thêm từ `suggest_payment_order.cashAccount` | snapshot lệnh chi gần nhất trước lần xuất (`CREATE_PAYMENT_ORDER.data.paymentOrder.amount`), nếu không có thì lấy số tiền lệnh chi hiện tại |
-| Đề xuất chi: nhận lại quỹ | `suggest_history` (`CONFIRM_FUND_RETURNED`) | Thu | ngày của sự kiện | cùng tài khoản với lần xuất đang mở | cùng số tiền với lần xuất đang mở |
+| Nguồn                     | Bảng                                        | Bút toán                    | Ngày hạch toán                    | Tài khoản                                                                              | Số tiền                                                                                                                                     |
+| ------------------------- | ------------------------------------------- | --------------------------- | --------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hóa Đơn                   | `revenue_items`                             | Thu (`IN`) hoặc Chi (`OUT`) | `invoicePaymentDate` ("Ngày chi") | `invoiceCashAccount` ("Khoản thu/chi")                                                 | `invoiceCashAmount` ("Số tiền thu/chi", kế toán nhập)                                                                                       |
+| Chi Trường                | `school_expense_items`                      | Chi                         | `expenseDate`                     | `cashAccount` ("Nguồn chi")                                                            | `paidAmount` ("Đã chi")                                                                                                                     |
+| Chi Ngoài                 | `management_expense_items`                  | Chi                         | `expenseDate`                     | `cashAccount` ("Nguồn chi")                                                            | `paidAmount` ("Đã chi")                                                                                                                     |
+| Đề xuất chi: xuất tiền    | `suggest_history` (`CONFIRM_CASH_RELEASED`) | Chi                         | ngày của sự kiện                  | `data.cashAccount`; lần xuất cuối cùng lấy thêm từ `suggest_payment_order.cashAccount` | snapshot lệnh chi gần nhất trước lần xuất (`CREATE_PAYMENT_ORDER.data.paymentOrder.amount`), nếu không có thì lấy số tiền lệnh chi hiện tại |
+| Đề xuất chi: nhận lại quỹ | `suggest_history` (`CONFIRM_FUND_RETURNED`) | Thu                         | ngày của sự kiện                  | cùng tài khoản với lần xuất đang mở                                                    | cùng số tiền với lần xuất đang mở                                                                                                           |
 
 - "Đã thu" (`revenue_items.paidAmount`) **không** được cộng thẳng vào sổ: chỉ khoản ở
   Hóa Đơn được tính, để không ghi trùng. Dòng có Đã thu mà chưa có khoản Thu ở Hóa Đơn sẽ
@@ -32,7 +32,7 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
 
 ## 2. Danh mục tài khoản và số dư gốc
 
-Bảng `cash_accounts` (migration `1794100000000`) gồm mã (định danh ổn định), tên,
+Bảng `cash_accounts` (migration `1794200000000`) gồm mã (định danh ổn định), tên,
 nhóm `111` / `112`, thứ tự, trạng thái sử dụng, và số dư gốc kèm ngày đối chiếu. Migration
 seed 13 tài khoản từ `INVOICE_CASH_ACCOUNTS`, số dư gốc để NULL.
 
@@ -61,15 +61,15 @@ thực. Mọi tổng tính trên toàn bộ bút toán đã lọc, không tính 
 
 ## 4. Chống trùng, bỏ sót và dữ liệu lỗi
 
-| Mã | Mức | Ý nghĩa |
-|---|---|---|
-| `MISSING_ACCOUNT` / `MISSING_DATE` / `MISSING_AMOUNT` / `MISSING_DIRECTION` | Lỗi | Chứng từ có tiền nhưng thiếu thông tin; không vào sổ |
-| `UNKNOWN_ACCOUNT` | Lỗi | Mã tài khoản không có trong danh mục |
-| `GROUP_ONLY` | Lỗi | Xuất tiền trước khi có cột tài khoản: chỉ biết "Tiền mặt / Ngân hàng"; không đoán tài khoản |
-| `DUPLICATE` | Lỗi | Hai bút toán cùng định danh, chỉ tính một |
-| `RECEIPT_NOT_POSTED` | Cảnh báo | Có Đã thu nhưng Hóa Đơn chưa ghi khoản Thu |
-| `SUPERSEDED_RELEASE` | Cảnh báo | Lệnh chi bị sửa sau khi đã xuất tiền rồi xác nhận lại (không hoàn quỹ xen giữa): chỉ tính lần sau |
-| `SUSPICIOUS_AMOUNT` | Cảnh báo | Một khoản ≥ 10 tỷ đồng |
+| Mã                                                                          | Mức      | Ý nghĩa                                                                                           |
+| --------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `MISSING_ACCOUNT` / `MISSING_DATE` / `MISSING_AMOUNT` / `MISSING_DIRECTION` | Lỗi      | Chứng từ có tiền nhưng thiếu thông tin; không vào sổ                                              |
+| `UNKNOWN_ACCOUNT`                                                           | Lỗi      | Mã tài khoản không có trong danh mục                                                              |
+| `GROUP_ONLY`                                                                | Lỗi      | Xuất tiền trước khi có cột tài khoản: chỉ biết "Tiền mặt / Ngân hàng"; không đoán tài khoản       |
+| `DUPLICATE`                                                                 | Lỗi      | Hai bút toán cùng định danh, chỉ tính một                                                         |
+| `RECEIPT_NOT_POSTED`                                                        | Cảnh báo | Có Đã thu nhưng Hóa Đơn chưa ghi khoản Thu                                                        |
+| `SUPERSEDED_RELEASE`                                                        | Cảnh báo | Lệnh chi bị sửa sau khi đã xuất tiền rồi xác nhận lại (không hoàn quỹ xen giữa): chỉ tính lần sau |
+| `SUSPICIOUS_AMOUNT`                                                         | Cảnh báo | Một khoản ≥ 10 tỷ đồng                                                                            |
 
 Chuyển tiền nội bộ: hệ thống chưa có nghiệp vụ này. Bút toán đã có cờ
 `isInternalTransfer` để sau này bổ sung (hai chân liên kết cùng số chứng từ, tổng thu chi
@@ -80,14 +80,14 @@ thực tế không nhân đôi); hiện cờ luôn là `false`.
 Xem: `accountant`, `ketoan_congno`, `ketoan_truong`, `thuquy`, `troly_gd`, `director`.
 Sửa danh mục: `ketoan_truong`, `director`.
 
-| Method | Đường dẫn | Ghi chú |
-|---|---|---|
-| GET | `summary` | 5 chỉ số; `excludeInternal=true` để loại chuyển nội bộ |
-| GET | `accounts` | danh mục + dư đầu / thu / chi / dư cuối từng tài khoản, cộng theo nhóm |
-| GET | `cash`, `bank` | sổ chi tiết nhóm 111 / 112; `page`, `limit` ≤ 500; tổng không phụ thuộc trang |
-| GET | `issues` | chứng từ chưa phân loại / cảnh báo |
-| PATCH | `accounts/:code` | `openingBalance` + `openingBalanceDate` (đi theo cặp), `isActive`, `note` |
-| GET | `export` | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
+| Method | Đường dẫn        | Ghi chú                                                                                                           |
+| ------ | ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| GET    | `summary`        | 5 chỉ số; `excludeInternal=true` để loại chuyển nội bộ                                                            |
+| GET    | `accounts`       | danh mục + dư đầu / thu / chi / dư cuối từng tài khoản, cộng theo nhóm                                            |
+| GET    | `cash`, `bank`   | sổ chi tiết nhóm 111 / 112; `page`, `limit` ≤ 500; tổng không phụ thuộc trang                                     |
+| GET    | `issues`         | chứng từ chưa phân loại / cảnh báo                                                                                |
+| PATCH  | `accounts/:code` | `openingBalance` + `openingBalanceDate` (đi theo cặp), `isActive`, `note`                                         |
+| GET    | `export`         | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
 
 Tham số chung: `from`, `to` (YYYY-MM-DD, bắt buộc), `accountType` (`all|cash|bank`),
 `accountCode`, `search` (số CT, số HĐ, diễn giải, mã/tên đối tượng; không phân biệt dấu).
@@ -95,7 +95,7 @@ Khi có `search`, dòng "Cộng" chỉ tính chứng từ khớp, còn dư đầ
 
 ## 6. Migration và rollback
 
-`1794100000000-add-cashflow-report`: tạo `cash_accounts` (seed 13 tài khoản), thêm
+`1794200000000-add-cashflow-report`: tạo `cash_accounts` (seed 13 tài khoản), thêm
 `revenue_items."invoiceCashDirection"`, `"invoiceCashAmount"`,
 `school_expense_items."cashAccount"`. Mọi cột đều nullable và không default (chỉ đổi
 metadata, dữ liệu cũ nhận NULL), chạy lại an toàn.
@@ -144,4 +144,3 @@ Khác mẫu có chủ đích:
 - Nhóm ngoài phạm vi "Loại tài khoản" vẫn có sheet (đủ 3 sheet) và ghi "Không có tài khoản
   nào theo bộ lọc hiện tại".
 - Tên sheet danh mục bỏ dấu cách thừa ở cuối của mẫu ("DANH MỤC CÁC TK ").
-

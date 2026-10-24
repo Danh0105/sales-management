@@ -6,6 +6,7 @@ import { SuggestService } from './suggest.service';
 import { ExpenseRole } from './constants/expense-roles';
 import { SuggestType } from './enums/suggest-type.enum';
 import { SuggestStatus } from './SuggestStatus.enum';
+import { currentSchoolYear } from './utils/vn-date';
 
 describe('Expense request school mapping', () => {
   const validBody = {
@@ -83,21 +84,53 @@ describe('Expense request school mapping', () => {
       roles: [ExpenseRole.SALES, ExpenseRole.TREASURER],
     } as any;
 
-    it('có schoolId thì bắt buộc schoolYear', async () => {
-      const service = makeService({});
+    it('có schoolId thì tự điền năm học hiện tại khi chưa truyền schoolYear', async () => {
+      const school = { id: 445, name: 'TH ABC' };
+      let createdSuggest: any;
+      const manager = {
+        findOne: jest.fn().mockResolvedValue(school),
+        count: jest.fn().mockResolvedValue(1),
+        create: jest.fn((_entity, data) => {
+          createdSuggest = data;
+          return data;
+        }),
+        save: jest
+          .fn()
+          .mockImplementation(async (data) => ({ ...data, id: 123 })),
+      };
+      const service = makeService(manager);
+      (service as any).generateCode = jest
+        .fn()
+        .mockResolvedValue('DX-209909-0001');
+      (service as any).writeExpenseLog = jest.fn();
+      (service as any).notifyExpense = jest.fn();
+      (service as any).findOneExpense = jest
+        .fn()
+        .mockResolvedValue({ id: 123 });
 
-      await expect(
-        service.create(
-          {
-            content: 'Mua thiết bị',
-            expectedPaymentDate: '2099-09-15',
-            schoolId: 445,
-            type: SuggestType.EXPENSE_REQUEST,
-          },
-          undefined,
-          user,
-        ),
-      ).rejects.toThrow('Thiếu năm học');
+      await service.create(
+        {
+          content: 'Mua thiết bị',
+          expectedPaymentDate: '2099-09-15',
+          schoolId: 445,
+          type: SuggestType.EXPENSE_REQUEST,
+        },
+        undefined,
+        user,
+      );
+
+      expect(createdSuggest).toEqual(
+        expect.objectContaining({
+          schoolId: 445,
+          schoolYear: currentSchoolYear(),
+        }),
+      );
+      expect(manager.count).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          where: { schoolId: 445, schoolYear: currentSchoolYear() },
+        }),
+      );
     });
 
     it('không có schoolId thì bắt buộc wardId', async () => {
@@ -125,13 +158,19 @@ describe('Expense request school mapping', () => {
           createdSuggest = data;
           return data;
         }),
-        save: jest.fn().mockImplementation(async (data) => ({ ...data, id: 123 })),
+        save: jest
+          .fn()
+          .mockImplementation(async (data) => ({ ...data, id: 123 })),
       };
       const service = makeService(manager);
-      (service as any).generateCode = jest.fn().mockResolvedValue('DX-209909-0001');
+      (service as any).generateCode = jest
+        .fn()
+        .mockResolvedValue('DX-209909-0001');
       (service as any).writeExpenseLog = jest.fn();
       (service as any).notifyExpense = jest.fn();
-      (service as any).findOneExpense = jest.fn().mockResolvedValue({ id: 123 });
+      (service as any).findOneExpense = jest
+        .fn()
+        .mockResolvedValue({ id: 123 });
 
       await service.create(
         {
@@ -261,13 +300,19 @@ describe('Expense request school mapping', () => {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
         create: jest.fn((_entity, data) => data),
-        save: jest.fn().mockImplementation(async (data) => ({ ...data, id: 124 })),
+        save: jest
+          .fn()
+          .mockImplementation(async (data) => ({ ...data, id: 124 })),
       };
       const service = makeService(manager);
-      (service as any).generateCode = jest.fn().mockResolvedValue('DX-209909-0002');
+      (service as any).generateCode = jest
+        .fn()
+        .mockResolvedValue('DX-209909-0002');
       (service as any).writeExpenseLog = jest.fn();
       (service as any).notifyExpense = jest.fn();
-      (service as any).findOneExpense = jest.fn().mockResolvedValue({ id: 124 });
+      (service as any).findOneExpense = jest
+        .fn()
+        .mockResolvedValue({ id: 124 });
 
       await expect(
         service.create(
@@ -333,11 +378,17 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
   };
 
   it('DTO nhận số hiệu tài khoản Nguồn thu chi, từ chối mã nhóm/mã lạ', async () => {
-    await expect(pipe.transform({ cashAccount: '1121' }, metadata)).resolves.toMatchObject({
+    await expect(
+      pipe.transform({ cashAccount: '1121' }, metadata),
+    ).resolves.toMatchObject({
       cashAccount: '1121',
     });
-    await expect(pipe.transform({ cashAccount: '112' }, metadata)).rejects.toBeDefined();
-    await expect(pipe.transform({ cashAccount: '9999' }, metadata)).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ cashAccount: '112' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ cashAccount: '9999' }, metadata),
+    ).rejects.toBeDefined();
   });
 
   function makeService() {
@@ -346,7 +397,12 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
     const calls: { transition?: any; notify?: any } = {};
     (service as any).expenseTransition = jest.fn(async (opts: any) => {
       calls.transition = opts;
-      const s = { id: 5, code: 'DX-202610-0001', createdBy: 9, status: 'CASH_RELEASED' };
+      const s = {
+        id: 5,
+        code: 'DX-202610-0001',
+        createdBy: 9,
+        status: 'CASH_RELEASED',
+      };
       await opts.extra(manager, s);
       return s;
     });
@@ -360,33 +416,68 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
   it('chọn Nguồn chi 1113 → lưu tài khoản, nhóm tiền mặt, ghi log và báo đúng tên tài khoản', async () => {
     const { service, manager, calls } = makeService();
 
-    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, '1113');
+    await service.confirmCashReleased(
+      5,
+      { id: 3 } as any,
+      undefined,
+      [],
+      undefined,
+      '1113',
+    );
 
-    expect(calls.transition.logData()).toEqual({ fundSource: 'COMPANY_CASH', cashAccount: '1113' });
+    expect(calls.transition.logData()).toEqual({
+      fundSource: 'COMPANY_CASH',
+      cashAccount: '1113',
+    });
     expect(manager.update).toHaveBeenCalledWith(
       expect.anything(),
       { suggestId: 5 },
       { fundSource: 'COMPANY_CASH', cashAccount: '1113' },
     );
     expect(calls.notify.message).toContain('từ 1113 - Tiền mặt - Anh Trung,');
-    expect(calls.notify.meta).toMatchObject({ fundSource: 'COMPANY_CASH', cashAccount: '1113' });
+    expect(calls.notify.meta).toMatchObject({
+      fundSource: 'COMPANY_CASH',
+      cashAccount: '1113',
+    });
   });
 
   it('tài khoản 112x suy ra nhóm Tài khoản ngân hàng', async () => {
     const { service, manager } = makeService();
 
-    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, '11212');
+    await service.confirmCashReleased(
+      5,
+      { id: 3 } as any,
+      undefined,
+      [],
+      undefined,
+      '11212',
+    );
 
-    expect(manager.update.mock.calls[0][2]).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: '11212' });
+    expect(manager.update.mock.calls[0][2]).toEqual({
+      fundSource: 'BANK_ACCOUNT',
+      cashAccount: '11212',
+    });
   });
 
   it('client cũ chỉ gửi fundSource → vẫn chạy, cashAccount = null', async () => {
     const { service, manager, calls } = makeService();
 
-    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], 'BANK_ACCOUNT' as any);
+    await service.confirmCashReleased(
+      5,
+      { id: 3 } as any,
+      undefined,
+      [],
+      'BANK_ACCOUNT' as any,
+    );
 
-    expect(calls.transition.logData()).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: null });
-    expect(manager.update.mock.calls[0][2]).toEqual({ fundSource: 'BANK_ACCOUNT', cashAccount: null });
+    expect(calls.transition.logData()).toEqual({
+      fundSource: 'BANK_ACCOUNT',
+      cashAccount: null,
+    });
+    expect(manager.update.mock.calls[0][2]).toEqual({
+      fundSource: 'BANK_ACCOUNT',
+      cashAccount: null,
+    });
     expect(calls.notify.message).toContain('từ tài khoản ngân hàng,');
   });
 
