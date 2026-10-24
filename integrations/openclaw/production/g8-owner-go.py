@@ -666,9 +666,10 @@ def prod_count_for_go(code):
 def dist_hash(path=None):
     """Cùng cách tính với deploy-3010.sh (h): sha256 của danh sách sha256 từng file, 16 ký tự."""
     path = path or APP_DIST
+    stable_env = dict(os.environ, LC_ALL="en_US.utf8")
     out = subprocess.run(["bash", "-c", "cd \"$1\" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | "
                           "xargs -0 sha256sum | sha256sum | cut -c1-16", "_", path],
-                         capture_output=True, text=True, check=False)
+                         capture_output=True, text=True, check=False, env=stable_env)
     value = out.stdout.strip()
     if out.returncode != 0 or not re.fullmatch(r"[0-9a-f]{16}", value):
         die(f"không tính được hash artifact {path}")

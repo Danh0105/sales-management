@@ -77,6 +77,10 @@ Zalo user_send_text (chữ ký hợp lệ) → inbox bền → worker → OpenCl
 
 Mọi lần nâng tiếp hoặc mở ngân sách tính phí đều cần GO PROD mới thay uỷ quyền cũ.
 
+Nâng quota khi production đang chạy: HR dừng OUTBOUND và xử lý hết outbox chưa xong; backup;
+áp `g8-production-recipient-window-up.sql`; deploy với `ALLOW_PROD=1`; cập nhật file env; Owner cấp GO PROD
+mới; `activate-g8.sh prod`; cuối cùng HR mới mở lại OUTBOUND.
+
 ## 5. Điều kiện trước khi phục vụ ứng viên thật
 
 1. Release deploy + migration (mục 6, S1–S3) — đã có duyệt.

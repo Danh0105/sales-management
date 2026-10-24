@@ -9,7 +9,7 @@ ROLLBACK_EXPECT="${ROLLBACK_EXPECT:-d35c4525df905174}"                    #     
 APP=sales-management
 APP_DIR=/var/www/sales-management
 TS=$(date +%Y%m%d-%H%M%S)
-h() { (cd "$1" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16); }
+h() { (export LC_ALL=en_US.utf8; cd "$1" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16); }
 die() { echo "DỪNG: $*" >&2; exit 1; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
 

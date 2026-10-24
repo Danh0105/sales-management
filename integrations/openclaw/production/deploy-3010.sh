@@ -14,6 +14,10 @@
 # dừng khẩn "Gửi Zalo" đang bật, PILOT=true + GRANT_REQUIRED=true, không có grant dispatch hay uỷ quyền production
 # ACTIVE, và migration production (1793200000000 + 1793300000000 + 1794000000000) đã áp. Sau restart phải thấy sender báo
 # dispatchGuard=on; cờ env + dừng khẩn giữ nguyên. Không mở được đường gửi nào: guard đòi grant, outbound dừng.
+#
+# Hotfix khi đang production: ALLOW_PROD=1 — chỉ khi OUTBOUND runtime đã dừng, mode production đúng,
+# không còn outbox chưa xong, có đúng một uỷ quyền ACTIVE và đã áp migration quota trượt. Restart
+# giữ nguyên env/uỷ quyền cũ; GO PROD mới và HR mở OUTBOUND là hai bước riêng sau deploy.
 set -Eeuo pipefail
 REL="${REL:-/opt/kido-recruiter/releases/g8-hrconsole-fdaa3ed}"
 EXPECT="${EXPECT:-a782a48a1cac837a}"
@@ -21,14 +25,15 @@ ROLLBACK="${ROLLBACK:-/opt/kido-recruiter/releases/rollback-6e79e1b}"
 ROLLBACK_EXPECT="${ROLLBACK_EXPECT:-d35c4525df905174}"
 ALLOW_C1="${ALLOW_C1:-0}"
 ALLOW_C2="${ALLOW_C2:-0}"
-AI_EXPECT=503; { [ "$ALLOW_C1" = 1 ] || [ "$ALLOW_C2" = 1 ]; } && AI_EXPECT=401
+ALLOW_PROD="${ALLOW_PROD:-0}"
+AI_EXPECT=503; { [ "$ALLOW_C1" = 1 ] || [ "$ALLOW_C2" = 1 ] || [ "$ALLOW_PROD" = 1 ]; } && AI_EXPECT=401
 APP=sales-management
 APP_DIR=/var/www/sales-management
 TS=$(date +%Y%m%d-%H%M%S)
 B=/root/backups/g8-release-$TS
 CHECK_ONLY=0; [ "${1:-}" = --check ] && CHECK_ONLY=1
 
-h() { (cd "$1" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16); }
+h() { (export LC_ALL=en_US.utf8; cd "$1" && find . -type f ! -name '*.tsbuildinfo' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16); }
 die() { echo "DỪNG: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
@@ -45,7 +50,20 @@ STATUS=$(pm2_field "p['pm2_env']['status']")
 RUNTIME=$(runuser -u postgres -- psql -XAt -d sales_db -c "select ai_halted||'/'||worker_halted||'/'||outbound_halted from recruitment_runtime_controls")
 q1() { runuser -u postgres -- psql -XAt -d sales_db -c "$1"; }
 envflag() { pm2_field "p['pm2_env'].get('env',{}).get('$1', p['pm2_env'].get('$1','')) or '-'"; }
-if [ "$ALLOW_C2" = 1 ]; then
+if [ "$ALLOW_PROD" = 1 ]; then
+  [ "$FLAGS" = "true true true" ] || die "ALLOW_PROD chỉ cho AI=true WORKER=true OUTBOUND=true (hiện $FLAGS)"
+  [ "${RUNTIME##*/}" = true ] || die "ALLOW_PROD cần dừng khẩn Gửi Zalo đang bật (outbound_halted=true, hiện $RUNTIME)"
+  [ "$(envflag RECRUITMENT_PRODUCTION_MODE)/$(envflag RECRUITMENT_PILOT_MODE)/$(envflag RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED)" = "true/false/false" ] \
+    || die "ALLOW_PROD cần PRODUCTION=true + PILOT=false + GRANT_REQUIRED=false"
+  [ "$(q1 "select count(*) from migrations where timestamp=1794000000000 and name='AddRecruitmentRecipientRollingQuota1794000000000'")" = 1 ] \
+    || die "chưa áp migration quota trượt 1794000000000"
+  [ "$(q1 "select count(*) from information_schema.columns where table_schema='public' and table_name='recruitment_production_authorizations' and column_name in ('max_requests_per_recipient_window','recipient_window_hours')")" = 2 ] \
+    || die "thiếu cột quota trượt"
+  [ "$(q1 "select count(*) from recruitment_production_authorizations where status='ACTIVE'")" = 1 ] \
+    || die "production phải có đúng một uỷ quyền ACTIVE"
+  [ "$(q1 "select count(*) from recruitment_channel_outbox where status in ('PENDING','SENDING','RETRY','UNKNOWN')")" = 0 ] \
+    || die "còn outbox chưa xong — HR huỷ/đối soát trước deploy"
+elif [ "$ALLOW_C2" = 1 ]; then
   [ "$FLAGS" = "true true true" ] || die "ALLOW_C2 chỉ cho AI=true WORKER=true OUTBOUND=true (hiện $FLAGS)"
   [ "${RUNTIME##*/}" = true ] || die "ALLOW_C2 cần dừng khẩn Gửi Zalo đang bật (outbound_halted=true, hiện $RUNTIME)"
   [ "$(envflag RECRUITMENT_PILOT_MODE)/$(envflag RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED)" = "true/true" ] \
@@ -109,6 +127,12 @@ ERR=$(pm2 logs "$APP" --nostream --lines 300 2>&1 | grep -E "RECRUITMENT_AI_SAFE
 if [ "$ALLOW_C2" = 1 ]; then
   SENDER=$(pm2 logs "$APP" --nostream --lines 400 2>/dev/null | grep -E "sender start|sender KHÔNG chạy" | tail -1)
   case "$SENDER" in *"dispatchGuard=on"*) ;; *) rollback "sender không báo dispatchGuard=on (${SENDER:-không thấy dòng sender start})" ;; esac
+elif [ "$ALLOW_PROD" = 1 ]; then
+  SENDER=$(pm2 logs "$APP" --nostream --lines 400 2>/dev/null | grep -E "sender start|sender KHÔNG chạy" | tail -1)
+  case "$SENDER" in
+    *"mode=production dispatchGuard=off authorization="[0-9]*) ;;
+    *) rollback "sender không báo production + uỷ quyền (${SENDER:-không thấy dòng sender start})" ;;
+  esac
 fi
 echo "  OK: 3010 online, API AI $AI_EXPECT, HR console 401 (cần đăng nhập), nginx OK, cờ env giữ $FLAGS, cờ dừng khẩn giữ $RUNTIME"
 echo
