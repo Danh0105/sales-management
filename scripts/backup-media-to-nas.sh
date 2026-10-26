@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Backup cuối ngày ảnh/video check-in/check-out và báo giảng của giáo viên lên NAS.
+# Di chuyển dữ liệu lịch sử còn trên VPS lên NAS.
+# File check-in/check-out/báo giảng submit mới đã được backend ghi
+# thẳng lên NAS, không chờ script này.
 #
 # Nguồn : uploads/lesson-images/          (cả ảnh check-in lẫn minh chứng báo giảng)
 # Đích  : $NAS_ROOT/sales-management/lesson-images/
@@ -137,7 +139,8 @@ fi
 # --- Giải phóng VPS ---------------------------------------------------------
 # Chỉ tới bước này khi rsync xong và số file trên NAS >= nguồn. Xoá bản gốc
 # trên VPS của những file cũ hơn HOT_DAYS ngày, sau khi so checksum từng file
-# với bản trên NAS. thumb/ được giữ lại làm ảnh dự phòng.
+# với bản trên NAS. thumb/ lịch sử được giữ lại cho file cũ;
+# thumbnail submit mới nằm trên NAS.
 # Backend tự tìm sang NAS khi file không còn trên VPS (LessonMediaController).
 HOT_DAYS="${HOT_DAYS:-7}"
 # Backend đang chạy (để kiểm tra nó thật sự đọc được từ NAS trước khi xoá).

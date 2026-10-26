@@ -17,7 +17,7 @@ export class LessonMediaController {
 
   @Get('thumb/:name')
   async thumbnail(@Param('name') name: string, @Res() res: Response) {
-    // Thumb không bao giờ rời VPS; tới đây nghĩa là thật sự không có.
+    // Dữ liệu cũ có thể còn trên VPS; thumbnail submit mới nằm trên NAS.
     const thumb = await this.archive.locateThumbnail(name);
     if (!thumb) return this.notFound(res);
     return res.sendFile(thumb, { maxAge: '7d', immutable: true });
@@ -42,7 +42,9 @@ export class LessonMediaController {
     if (thumb) {
       res.setHeader('X-Lesson-Media-Tier', 'thumbnail-fallback');
       res.setHeader('Cache-Control', 'no-store');
-      return res.status(this.archive.archiveAvailable() ? 404 : 503).sendFile(thumb);
+      return res
+        .status(this.archive.archiveAvailable() ? 404 : 503)
+        .sendFile(thumb);
     }
 
     return this.archive.archiveAvailable()
