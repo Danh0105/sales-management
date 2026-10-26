@@ -95,6 +95,51 @@ describe('LessonMediaArchiveService', () => {
     }
   });
 
+  it('thư mục NAS chưa tồn tại vẫn do mountinfo quyết, không lộ lỗi ENOENT', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const s = make({
+        LESSON_IMAGE_UPLOAD_DIR: local,
+        LESSON_IMAGE_ARCHIVE_DIR: join(archive, 'chua-co'),
+      });
+      await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow(
+        'không nằm trên NAS',
+      );
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it('ghi file lớn được nới hạn theo dung lượng, không ngắt breaker', async () => {
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+      LESSON_IMAGE_ARCHIVE_TIMEOUT_MS: '20',
+    });
+    // 1 MB ở 4 MB/s được thêm ~250ms; ghi mất 100ms > hạn thăm dò 20ms.
+    jest
+      .spyOn(s as never, 'writeToArchive')
+      .mockImplementation(() => new Promise((done) => setTimeout(done, 100)));
+
+    await s.store(NAME, Buffer.alloc(1024 * 1024));
+    expect(s.archiveAvailable()).toBe(true);
+  });
+
+  it('ghi quá cả hạn đã nới → ngắt breaker', async () => {
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+      LESSON_IMAGE_ARCHIVE_TIMEOUT_MS: '20',
+    });
+    jest
+      .spyOn(s as never, 'writeToArchive')
+      .mockImplementation(() => new Promise(() => {}));
+
+    await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow('quá');
+    expect(s.archiveAvailable()).toBe(false);
+  });
+
   it('không cấu hình NAS thì chỉ tra local', async () => {
     await writeFile(join(archive, NAME), 'y');
     const s = make({ LESSON_IMAGE_UPLOAD_DIR: local });

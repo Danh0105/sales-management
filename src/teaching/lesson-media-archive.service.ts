@@ -4,6 +4,12 @@ import { access, mkdir, readFile, stat, unlink, writeFile } from 'fs/promises';
 import { join, resolve, sep } from 'path';
 
 /**
+ * Tốc độ ghi NAS thấp nhất còn coi là bình thường (đo 26/10/2026: ~28 MB/s).
+ * Dùng để nới hạn cho lần ghi file lớn — video báo giảng tới 50 MB.
+ */
+const MIN_WRITE_BYTES_PER_MS = (4 * 1024 * 1024) / 1000;
+
+/**
  * Tầng lưu trữ ảnh/video chấm công & báo giảng.
  *
  *   cũ    : uploads/lesson-images/          trên VPS — chỉ đọc dữ liệu lịch sử
@@ -100,6 +106,7 @@ export class LessonMediaArchiveService {
           thumbnail ? archivedThumbnail : null,
           thumbnail,
         ),
+        this.writeTimeoutMs(content.byteLength + (thumbnail?.byteLength ?? 0)),
       );
       this.failures = 0;
     } catch (error) {
@@ -273,6 +280,16 @@ export class LessonMediaArchiveService {
     }
   }
 
+  /**
+   * Hạn cho một lần ghi = hạn thăm dò + thời gian đẩy dữ liệu ở tốc độ thấp
+   * nhất chấp nhận được. Chỉ dùng `probeTimeoutMs` thì video 50 MB quá hạn
+   * khi vài giáo viên gửi cùng lúc, và breaker ngắt NAS của mọi người dù
+   * NAS vẫn sống. NAS chết thật đã bị bắt ở bước thăm dò mount trước đó.
+   */
+  private writeTimeoutMs(bytes: number): number {
+    return this.probeTimeoutMs + Math.ceil(bytes / MIN_WRITE_BYTES_PER_MS);
+  }
+
   private async writeToArchive(
     archived: string,
     content: Buffer,
@@ -306,6 +323,14 @@ export class LessonMediaArchiveService {
    */
   private async assertNetworkMount(): Promise<void> {
     if (process.env.NODE_ENV === 'test') return;
+    // `/mnt/nas-var` là systemd automount, tự gỡ NFS sau 60s không dùng.
+    // Đọc mountinfo lúc đó chỉ thấy autofs, nên phải đi qua path trước để
+    // kích mount. ENOENT nghĩa là đã đi qua điểm mount; mountinfo quyết tiếp.
+    await this.withTimeout(
+      stat(this.archiveDir).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+      }),
+    );
     const mountInfo = await readFile('/proc/self/mountinfo', 'utf8');
     const networkTypes = new Set(['nfs', 'nfs4', 'cifs', 'smb3']);
     const mounted = mountInfo.split('\n').some((line) => {
@@ -330,13 +355,13 @@ export class LessonMediaArchiveService {
    * chiếm một thread threadpool cho tới khi NFS tự bỏ cuộc — đó là lý do phải
    * có breaker chứ không chỉ timeout.
    */
-  private withTimeout<T>(promise: Promise<T>): Promise<T> {
+  private withTimeout<T>(
+    promise: Promise<T>,
+    ms = this.probeTimeoutMs,
+  ): Promise<T> {
     let timer: NodeJS.Timeout;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`quá ${this.probeTimeoutMs}ms`)),
-        this.probeTimeoutMs,
-      );
+      timer = setTimeout(() => reject(new Error(`quá ${ms}ms`)), ms);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
