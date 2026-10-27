@@ -28,6 +28,8 @@ const WRITE_ROLES = [
 // Sales admin chỉ được xem (đọc) — chỉnh sửa duy nhất bảng "Chi Ngoài" qua
 // ManagementExpenseItemsController.
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
+// Thủ quỹ chỉ được xem trang Quản lý thu chi.
+const VIEWER_ROLES = ['thuquy'];
 
 @Controller('school-expense-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -43,13 +45,13 @@ export class SchoolExpenseItemsController {
   }
 
   @Get()
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES, ...VIEWER_ROLES)
   findAll(@Query() query: any) {
     return this.schoolExpenseItemsService.findAll(query);
   }
 
   @Get(':id')
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES, ...VIEWER_ROLES)
   findOne(@Param('id') id: string) {
     return this.schoolExpenseItemsService.findOne(Number(id));
   }

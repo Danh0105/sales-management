@@ -38,6 +38,12 @@ const WRITE_ROLES = [
  */
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
 
+/**
+ * Thủ quỹ chỉ được XEM trang Quản lý thu chi: role ở class chỉ áp cho các route
+ * đọc, mọi route ghi bên dưới đều có @Roles riêng không chứa role này.
+ */
+const VIEWER_ROLES = ['thuquy'];
+
 @Controller('school-expenses')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(
@@ -47,6 +53,7 @@ const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
   'troly_gd',
   'director',
   ...SALESADMIN_ROLES,
+  ...VIEWER_ROLES,
 )
 export class RealExpensesController {
   constructor(private readonly realExpensesService: RealExpensesService) {}
