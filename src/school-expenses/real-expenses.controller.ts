@@ -29,6 +29,8 @@ const WRITE_ROLES = [
   'ketoan_truong',
   'troly_gd',
   'director',
+  // Thủ quỹ tạo / nhập / sửa thu chi như Kế toán (không có quyền riêng của KTT).
+  'thuquy',
 ];
 
 /**
@@ -38,23 +40,9 @@ const WRITE_ROLES = [
  */
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
 
-/**
- * Thủ quỹ chỉ được XEM trang Quản lý thu chi: role ở class chỉ áp cho các route
- * đọc, mọi route ghi bên dưới đều có @Roles riêng không chứa role này.
- */
-const VIEWER_ROLES = ['thuquy'];
-
 @Controller('school-expenses')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-  ...SALESADMIN_ROLES,
-  ...VIEWER_ROLES,
-)
+@Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
 export class RealExpensesController {
   constructor(private readonly realExpensesService: RealExpensesService) {}
 

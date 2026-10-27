@@ -24,12 +24,12 @@ const WRITE_ROLES = [
   'ketoan_truong',
   'troly_gd',
   'director',
+  // Thủ quỹ tạo / nhập / sửa thu chi như Kế toán (không có quyền riêng của KTT).
+  'thuquy',
 ];
 // Sales admin chỉ được xem (đọc) — chỉnh sửa duy nhất bảng "Chi Ngoài" qua
 // ManagementExpenseItemsController.
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-// Thủ quỹ chỉ được xem trang Quản lý thu chi.
-const VIEWER_ROLES = ['thuquy'];
 
 @Controller('revenue-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -43,13 +43,13 @@ export class RevenueItemsController {
   }
 
   @Get()
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES, ...VIEWER_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   findAll(@Query() query: any) {
     return this.revenueItemsService.findAll(query);
   }
 
   @Get(':id')
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES, ...VIEWER_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   findOne(@Param('id') id: string) {
     return this.revenueItemsService.findOne(Number(id));
   }

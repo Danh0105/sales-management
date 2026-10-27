@@ -23,10 +23,10 @@ const WRITE_ROLES = [
   'ketoan_truong',
   'troly_gd',
   'director',
+  // Thủ quỹ tạo / nhập / sửa thu chi như Kế toán (không có quyền riêng của KTT).
+  'thuquy',
 ];
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-// Thủ quỹ chỉ được xem trang Quản lý thu chi.
-const VIEWER_ROLES = ['thuquy'];
 
 @Controller('school-expenses/:id/subjects/:subjectId/einvoices')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -35,7 +35,7 @@ export class RevenueEInvoicesController {
   constructor(private readonly service: RevenueEInvoicesService) {}
 
   @Get()
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES, ...VIEWER_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   list(
     @Param('id', ParseIntPipe) id: number,
     @Param('subjectId', ParseIntPipe) subjectId: number,

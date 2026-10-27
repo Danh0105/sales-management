@@ -21,20 +21,17 @@ type RequestWithUser = Request & { user: AuthUser };
 /** Sales admin chỉnh sửa duy nhất bảng "Chi Ngoài" này (xem RealExpensesController). */
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
 
-const EDIT_ROLES = [
+@Controller('management-expense-items')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(
   'accountant',
   'ketoan_congno',
   'ketoan_truong',
   'troly_gd',
   'director',
+  'thuquy',
   ...SALESADMIN_ROLES,
-];
-// Thủ quỹ chỉ được xem trang Quản lý thu chi — chỉ thêm ở các route GET.
-const VIEWER_ROLES = ['thuquy'];
-
-@Controller('management-expense-items')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(...EDIT_ROLES)
+)
 export class ManagementExpenseItemsController {
   constructor(
     private readonly managementExpenseItemsService: ManagementExpenseItemsService,
@@ -49,13 +46,11 @@ export class ManagementExpenseItemsController {
   }
 
   @Get()
-  @Roles(...EDIT_ROLES, ...VIEWER_ROLES)
   findAll(@Query() query: any) {
     return this.managementExpenseItemsService.findAll(query);
   }
 
   @Get(':id')
-  @Roles(...EDIT_ROLES, ...VIEWER_ROLES)
   findOne(@Param('id') id: string) {
     return this.managementExpenseItemsService.findOne(Number(id));
   }

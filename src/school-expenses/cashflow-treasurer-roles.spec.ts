@@ -18,10 +18,11 @@ const allows = (controller: any, method: string, roles: string[]) =>
   } as unknown as ExecutionContext);
 
 /**
- * Thủ quỹ chỉ được XEM trang Quản lý thu chi: mọi route đọc màn đó gọi phải
- * mở cho `thuquy`, mọi route ghi thì không.
+ * Thủ quỹ dùng Quản lý thu chi như Kế toán: đọc, tạo bảng, nhập / sửa / xoá,
+ * đẩy hóa đơn nháp — nhưng KHÔNG có các thao tác riêng của Kế toán trưởng
+ * (xác nhận / mở khoá BBCS, kết thúc, mở lại, bỏ liên kết hóa đơn).
  */
-describe('Quản lý thu chi — quyền xem của thủ quỹ', () => {
+describe('Quản lý thu chi — quyền của thủ quỹ', () => {
   const reads: [any, string][] = [
     [RealExpensesController, 'checkExisted'],
     [RealExpensesController, 'findAll'],
@@ -43,10 +44,6 @@ describe('Quản lý thu chi — quyền xem của thủ quỹ', () => {
     [RealExpensesController, 'update'],
     [RealExpensesController, 'remove'],
     [RealExpensesController, 'saveAll'],
-    [RealExpensesController, 'confirmManagementExpense'],
-    [RealExpensesController, 'unconfirmManagementExpense'],
-    [RealExpensesController, 'finalize'],
-    [RealExpensesController, 'reopen'],
     [RevenueItemsController, 'create'],
     [RevenueItemsController, 'update'],
     [RevenueItemsController, 'remove'],
@@ -57,6 +54,13 @@ describe('Quản lý thu chi — quyền xem của thủ quỹ', () => {
     [ManagementExpenseItemsController, 'update'],
     [ManagementExpenseItemsController, 'remove'],
     [RevenueEInvoicesController, 'exportDrafts'],
+  ];
+
+  const chiefOnly: [any, string][] = [
+    [RealExpensesController, 'confirmManagementExpense'],
+    [RealExpensesController, 'unconfirmManagementExpense'],
+    [RealExpensesController, 'finalize'],
+    [RealExpensesController, 'reopen'],
     [RevenueEInvoicesController, 'unlink'],
   ];
 
@@ -68,15 +72,21 @@ describe('Quản lý thu chi — quyền xem của thủ quỹ', () => {
     expect(allows(controller, method, ['thuquy'])).toBe(true);
   });
 
-  it.each(named(writes))('%s.%s KHÔNG mở cho thuquy', (_, method, controller) => {
+  it.each(named(writes))('%s.%s mở cho thuquy (như accountant)', (_, method, controller) => {
     expect(typeof controller.prototype[method]).toBe('function');
-    expect(allows(controller, method, ['thuquy'])).toBe(false);
+    expect(allows(controller, method, ['thuquy'])).toBe(true);
+    expect(allows(controller, method, ['accountant'])).toBe(true);
   });
 
-  it('thủ quỹ kiêm kế toán công nợ vẫn ghi được', () => {
-    expect(
-      allows(RealExpensesController, 'saveAll', ['thuquy', 'ketoan_congno']),
-    ).toBe(true);
+  it.each(named(chiefOnly))('%s.%s KHÔNG mở cho thuquy', (_, method, controller) => {
+    expect(typeof controller.prototype[method]).toBe('function');
+    expect(allows(controller, method, ['thuquy'])).toBe(false);
+    expect(allows(controller, method, ['ketoan_truong'])).toBe(true);
+  });
+
+  it('role khác (sales) vẫn bị chặn', () => {
+    expect(allows(RealExpensesController, 'findAll', ['sales'])).toBe(false);
+    expect(allows(RealExpensesController, 'saveAll', ['sales'])).toBe(false);
   });
 
   it('sales admin vẫn sửa được Chi Ngoài, kế toán vẫn đọc được', () => {
