@@ -22,8 +22,10 @@ import { Subject } from '../subject/subject.entity';
 import {
   assertNotFinalized,
   buildManagementExpenseItemData,
+  buildManagementPaymentData,
   buildRevenueItemData,
   buildSchoolExpenseItemData,
+  canEditLockedManagementPayments,
   computeOtherCostRows,
   normalizeSharedFields,
 } from './expense-calculations';
@@ -385,11 +387,15 @@ export class RealExpensesService {
     }
 
     // Bảng "Chi Ngoài" đã được sales admin xác nhận → khoá, chỉ kế toán
-    // trưởng còn sửa được. Khoá thì bỏ qua phần managementExpenseItems của
-    // body (giữ nguyên dòng cũ), không ảnh hưởng tới doanh thu/chi trường.
+    // trưởng còn sửa được toàn bộ. Khoá thì bỏ qua phần managementExpenseItems
+    // của body (giữ nguyên dòng cũ), không ảnh hưởng tới doanh thu/chi trường.
     const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
     const managementLocked =
       schoolExpense.managementExpenseConfirmed && !isChiefAccountant;
+    // Kế toán / KT công nợ / thủ quỹ: khoá rồi vẫn cập nhật cột chi của các
+    // dòng cũ (Ngày chi, Nguồn chi, Đã chi, Người chi, Ghi chú).
+    const managementPaymentOnly =
+      managementLocked && canEditLockedManagementPayments(user?.roles);
 
     // Sales admin chỉ được sửa DUY NHẤT bảng "Chi Ngoài" — dùng chung endpoint
     // save-all (đỡ phải tách API riêng) nhưng bỏ qua hoàn toàn phần doanh thu
@@ -563,6 +569,35 @@ export class RealExpensesService {
         }
 
         newManagementSnapshot.push({ ...item, rowIndex, otherCosts: otherCostRows });
+      }
+
+      // Bảng đã khoá: chỉ ghi cột chi lên dòng cũ — không thêm / xoá dòng, phần
+      // chính sách (đơn giá, thuế, Chi khác, Chi ngoài) giữ nguyên. Khớp theo
+      // `id` dòng client gửi kèm (không theo vị trí) để xoá dòng Doanh thu làm
+      // lệch thứ tự cũng không ghi nhầm sang dòng khác.
+      if (managementPaymentOnly && Array.isArray(body.managementExpenseItems)) {
+        const bodyById = new Map(
+          body.managementExpenseItems
+            .filter((item: any) => item?.id)
+            .map((item: any) => [Number(item.id), item]),
+        );
+
+        for (const old of oldManagement) {
+          const item = bodyById.get(old.id);
+          if (!item) continue;
+
+          const payment = buildManagementPaymentData(
+            item,
+            Number(old.totalOutside ?? 0),
+          );
+
+          await queryRunner.manager.update(
+            ManagementExpenseItem,
+            { id: old.id },
+            payment,
+          );
+          newManagementSnapshot.push({ rowIndex: old.rowIndex, ...payment });
+        }
       }
 
       await queryRunner.manager.save(SchoolExpenseHistory, {

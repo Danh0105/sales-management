@@ -411,7 +411,6 @@ export function buildManagementExpenseItemData(
     item?.invoiceAmount ?? item?.contractAmount,
     0,
   );
-  const paidAmount = toNumber(item?.paidAmount, 0);
 
   assertNonNegative({
     ql1UnitPrice,
@@ -419,7 +418,6 @@ export function buildManagementExpenseItemData(
     ql1Tax,
     ql2Tax,
     invoiceAmount,
-    paidAmount,
   });
 
   const ql1Amount = ql1UnitPrice * shared.studentCount * shared.monthsCount;
@@ -449,9 +447,37 @@ export function buildManagementExpenseItemData(
     totalTaxAmount,
     totalOutside,
     collectedDate: item?.collectedDate || null,
-    expenseDate: item?.expenseDate || null,
     contractAmount: invoiceAmount,
     invoiceAmount,
+    ...buildManagementPaymentData(item, totalOutside),
+  };
+}
+
+/**
+ * Bảng "Chi Ngoài" đã xác nhận BBCS: ngoài kế toán trưởng, các role này vẫn
+ * nhập được phần chi (xem `buildManagementPaymentData`); role khác bị khoá hẳn.
+ */
+export const LOCKED_MANAGEMENT_PAYMENT_ROLES = [
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+];
+
+export function canEditLockedManagementPayments(roles?: string[] | null) {
+  return (roles ?? []).some((r) => LOCKED_MANAGEMENT_PAYMENT_ROLES.includes(r));
+}
+
+/**
+ * Cột chi của một dòng "Chi Ngoài": Ngày chi, Nguồn chi, Đã chi, Người chi,
+ * Ghi chú (+ Còn lại = Chi ngoài − Đã chi).
+ */
+export function buildManagementPaymentData(item: any, totalOutside: number) {
+  const paidAmount = toNumber(item?.paidAmount, 0);
+
+  assertNonNegative({ paidAmount });
+
+  return {
+    expenseDate: item?.expenseDate || null,
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer || null,
