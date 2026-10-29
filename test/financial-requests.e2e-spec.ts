@@ -1,0 +1,1184 @@
+/**
+ * Kiểm thử tích hợp phân hệ Đề nghị tài chính trên Postgres THẬT.
+ *
+ * Chỉ chạy khi đặt `FINANCIAL_IT_DB` = tên một database test riêng (đã chạy
+ * migration 1794500000000). Guard trong test/setup chặn mọi kết nối tới
+ * `sales_db`. Mỗi lần chạy tạo công ty/nhân viên mới có hậu tố riêng nên chạy
+ * lại nhiều lần không đụng nhau. Không dùng dữ liệu thật.
+ *
+ *   FINANCIAL_IT_DB=sales_fin_test DB_USER=... DB_PASSWORD=... \
+ *     npx jest --config ./test/jest-e2e.json test/financial-requests.e2e-spec.ts
+ */
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
+import { Test, TestingModule } from '@nestjs/testing';
+import { getDataSourceToken, TypeOrmModule } from '@nestjs/typeorm';
+import * as ExcelJS from 'exceljs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { DataSource } from 'typeorm';
+
+import { CashAccount } from '../src/cashflow-report/cash-account.entity';
+import { Department } from '../src/department/department.entity';
+import { Employee } from '../src/employee/employee.entity';
+import { FinancialAdvanceAllocation } from '../src/financial-request/entities/financial-advance-allocation.entity';
+import { FinancialApprovalDelegation } from '../src/financial-request/entities/financial-approval-delegation.entity';
+import { FinancialApprovalStep } from '../src/financial-request/entities/financial-approval-step.entity';
+import { FinancialApprovalWorkflow } from '../src/financial-request/entities/financial-approval-workflow.entity';
+import { FinancialAuditLog } from '../src/financial-request/entities/financial-audit-log.entity';
+import { FinancialCompany } from '../src/financial-request/entities/financial-company.entity';
+import { FinancialDocumentSequence } from '../src/financial-request/entities/financial-document-sequence.entity';
+import { FinancialExpenseCategory } from '../src/financial-request/entities/financial-expense-category.entity';
+import { FinancialPayment } from '../src/financial-request/entities/financial-payment.entity';
+import { FinancialPolicy } from '../src/financial-request/entities/financial-policy.entity';
+import { FinancialRefund } from '../src/financial-request/entities/financial-refund.entity';
+import { FinancialRequestAttachment } from '../src/financial-request/entities/financial-request-attachment.entity';
+import { FinancialRequestItem } from '../src/financial-request/entities/financial-request-item.entity';
+import { FinancialRequest } from '../src/financial-request/entities/financial-request.entity';
+import { FinancialRoleAssignment } from '../src/financial-request/entities/financial-role-assignment.entity';
+import { FinancialSalaryAdvanceDeduction } from '../src/financial-request/entities/financial-salary-advance-deduction.entity';
+import { FinancialWorkflowStep } from '../src/financial-request/entities/financial-workflow-step.entity';
+import { FinancialAccessService } from '../src/financial-request/financial-access.service';
+import { FinancialConfigService } from '../src/financial-request/financial-config.service';
+import { FinancialLedgerService } from '../src/financial-request/financial-ledger.service';
+import { FinancialNotifyService } from '../src/financial-request/financial-notify.service';
+import { FinancialPdfService } from '../src/financial-request/financial-pdf.service';
+import { FinancialReportService } from '../src/financial-request/financial-report.service';
+import {
+  ApprovalStatus,
+  AttachmentKind,
+  DeductionStatus,
+  FinanceRole,
+  FinancialRequestType,
+  PaymentMethod,
+  PaymentStatus,
+  RecoveryStatus,
+  SelfApprovalMode,
+  SettlementStatus,
+  StepStatus,
+} from '../src/financial-request/financial-request.constants';
+import { FinancialRequestService } from '../src/financial-request/financial-request.service';
+import { NotificationService } from '../src/notifications/services/notification.service';
+import { Payroll } from '../src/payroll/entities/payroll.entity';
+import { AuthUser } from '../src/type/auth-user.type';
+
+const DB = process.env.FINANCIAL_IT_DB;
+const suite = DB ? describe : describe.skip;
+
+jest.setTimeout(120_000);
+
+const ENTITIES = [
+  FinancialCompany,
+  FinancialExpenseCategory,
+  FinancialApprovalWorkflow,
+  FinancialWorkflowStep,
+  FinancialRoleAssignment,
+  FinancialApprovalDelegation,
+  FinancialPolicy,
+  FinancialDocumentSequence,
+  FinancialRequest,
+  FinancialRequestItem,
+  FinancialApprovalStep,
+  FinancialPayment,
+  FinancialRefund,
+  FinancialRequestAttachment,
+  FinancialAdvanceAllocation,
+  FinancialSalaryAdvanceDeduction,
+  FinancialAuditLog,
+  Employee,
+  Department,
+  Payroll,
+  CashAccount,
+];
+
+const PDF_BYTES = Buffer.from(
+  '%PDF-1.4\n%âãÏÓ\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n',
+  'latin1',
+);
+const PNG_BYTES = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
+]);
+
+function file(name: string, buffer: Buffer): Express.Multer.File {
+  return {
+    originalname: name,
+    buffer,
+    size: buffer.length,
+  } as Express.Multer.File;
+}
+
+suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
+  let moduleRef: TestingModule;
+  let ds: DataSource;
+  let requests: FinancialRequestService;
+  let ledger: FinancialLedgerService;
+  let config: FinancialConfigService;
+  let reports: FinancialReportService;
+  let pdf: FinancialPdfService;
+  const notification = { create: jest.fn().mockResolvedValue({}) };
+  const run = Date.now().toString(36);
+  const storageDir = mkdtempSync(join(tmpdir(), 'fin-it-'));
+  let key = 0;
+  const idem = () => `it-${run}-${++key}`;
+
+  const U: Record<string, AuthUser> = {};
+  let companyX = 0;
+  let companyY = 0;
+  let dept1 = 0;
+
+  async function employee(
+    label: string,
+    roles: string[],
+    departmentId: number,
+  ) {
+    const [row] = await ds.query(
+      `INSERT INTO employee (name, phone, roles, department_id, bank_account_number, bank_name)
+       VALUES ($1, $2, $3, $4, $5, 'MB Bank') RETURNING id`,
+      [
+        `${label} ${run}`,
+        `09${run}${label}`.slice(0, 20),
+        roles,
+        departmentId,
+        `99${run}${label.length}`,
+      ],
+    );
+    U[label] = { id: row.id, roles, name: `${label} ${run}` };
+  }
+
+  const byId = (id: number) => Object.values(U).find((u) => u.id === id);
+
+  /** Đặt FIN_IT_PDF_DIR để lưu PDF mẫu ra xem bằng mắt. */
+  async function dumpPdf(name: string, id: number) {
+    if (!process.env.FIN_IT_PDF_DIR) return;
+    const { buffer } = await pdf.render(U.A, id);
+    writeFileSync(join(process.env.FIN_IT_PDF_DIR, `${name}.pdf`), buffer);
+  }
+
+  /** Duyệt hết các bước còn chờ bằng người duyệt hợp lệ đầu tiên của mỗi bước. */
+  async function approveAll(id: number, comment = 'Đồng ý') {
+    for (let guard = 0; guard < 10; guard += 1) {
+      const detail = await requests.detail(U.D, id);
+      if (detail.approvalStatus !== ApprovalStatus.PENDING) return detail;
+      const step = detail.steps.find(
+        (s) =>
+          s.round === detail.currentRound && s.status === StepStatus.PENDING,
+      )!;
+      const approver = step.candidates.map((c) => byId(c.id)).find(Boolean);
+      if (!approver)
+        throw new Error(`Không có người duyệt test cho bước ${step.name}`);
+      await requests.approve(approver, id, { stepId: step.id, comment });
+    }
+    throw new Error('Quá số vòng duyệt');
+  }
+
+  async function newAdvance(
+    amount: number,
+    requester = U.A,
+    companyId = companyX,
+  ) {
+    return requests.create(requester, {
+      type: FinancialRequestType.ADVANCE,
+      companyId,
+      title: 'Tạm ứng đi công tác',
+      directManagerId: companyId === companyX ? U.M.id : undefined,
+      paymentMethod: PaymentMethod.BANK_TRANSFER,
+      bankName: 'MB Bank',
+      bankAccountNumber: '0123456789',
+      items: [
+        {
+          description: 'Chi phí công tác',
+          quantity: '1',
+          unitPrice: String(amount),
+        },
+      ],
+    });
+  }
+
+  async function paidAdvance(amount: number) {
+    const advance = await newAdvance(amount);
+    await requests.submit(U.A, advance.id);
+    await approveAll(advance.id);
+    await ledger.recordPayment(
+      advance.id,
+      {
+        amount,
+        date: '2026-10-01',
+        method: PaymentMethod.CASH,
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    return advance;
+  }
+
+  async function newSettlement(
+    advanceId: number,
+    allocation: number,
+    expense: number,
+  ) {
+    return requests.create(U.A, {
+      type: FinancialRequestType.SETTLEMENT,
+      companyId: companyX,
+      title: 'Hoàn ứng công tác',
+      directManagerId: U.M.id,
+      paymentMethod: PaymentMethod.CASH,
+      items: [
+        {
+          description: 'Chi phí thực tế',
+          quantity: '1',
+          unitPrice: String(expense),
+        },
+      ],
+      allocations: [{ advanceId, amount: allocation }],
+    });
+  }
+
+  beforeAll(async () => {
+    process.env.FINANCIAL_STORAGE_DIR = storageDir;
+    moduleRef = await Test.createTestingModule({
+      imports: [
+        TypeOrmModule.forRoot({
+          type: 'postgres',
+          host: process.env.DB_HOST || 'localhost',
+          port: Number(process.env.DB_PORT || 5432),
+          username: process.env.DB_USER,
+          password: process.env.DB_PASSWORD,
+          database: DB,
+          entities: [join(__dirname, '../src/**/*.entity.ts')],
+          synchronize: false,
+        }),
+        TypeOrmModule.forFeature(ENTITIES),
+      ],
+      providers: [
+        FinancialAccessService,
+        FinancialNotifyService,
+        FinancialLedgerService,
+        FinancialRequestService,
+        FinancialConfigService,
+        FinancialReportService,
+        FinancialPdfService,
+        { provide: NotificationService, useValue: notification },
+      ],
+    }).compile();
+    ds = moduleRef.get(getDataSourceToken());
+    requests = moduleRef.get(FinancialRequestService);
+    ledger = moduleRef.get(FinancialLedgerService);
+    config = moduleRef.get(FinancialConfigService);
+    reports = moduleRef.get(FinancialReportService);
+    pdf = moduleRef.get(FinancialPdfService);
+
+    [{ id: dept1 }] = await ds.query(
+      `INSERT INTO department (name) VALUES ($1) RETURNING id`,
+      [`FIN-IT ${run} Kinh doanh`],
+    );
+    await employee('A', ['sales'], dept1); // người đề nghị
+    await employee('B', ['sales'], dept1); // người đề nghị khác
+    await employee('M', ['sales'], dept1); // quản lý trực tiếp
+    await employee('C', ['accountant'], dept1); // kiểm soát
+    await employee('K', ['accountant'], dept1); // kế toán công ty X
+    await employee('K2', ['accountant'], dept1); // kế toán công ty Y
+    await employee('D', ['director'], dept1); // BGĐ — quản trị ngầm định
+    await employee('T', ['thuquy'], dept1); // thủ quỹ — ngầm định
+    await employee('O', ['sales'], dept1); // người ngoài
+    await ds.query(
+      `INSERT INTO cash_accounts (code, name, "groupCode") VALUES ('1111', 'Tiền mặt tại quỹ', '111')
+       ON CONFLICT (code) DO NOTHING`,
+    );
+    await ds.query(
+      `INSERT INTO payrolls (employee_id, employee_name, month, year, base_salary, net_salary, created_by_id)
+       VALUES ($1, $2, 9, 2026, 10000000, 9000000, $1)`,
+      [U.A.id, U.A.name],
+    );
+
+    companyX = (
+      await config.createCompany(U.D, {
+        code: `X${run}`.slice(0, 30),
+        name: 'Công ty Thử nghiệm X',
+        taxCode: '0101234567',
+        address: 'Số 1 Đường Thử, Quận 1, TP.HCM',
+        formCodes: { ADVANCE: 'BM-TC01', SETTLEMENT: 'BM-TC03' },
+      })
+    ).id;
+    companyY = (
+      await config.createCompany(U.D, {
+        code: `Y${run}`.slice(0, 30),
+        name: 'Công ty Thử nghiệm Y',
+      })
+    ).id;
+    const assign = (
+      label: string,
+      role: FinanceRole,
+      companyId: number,
+      departmentId?: number,
+    ) =>
+      config.createAssignment(U.D, {
+        employeeId: U[label].id,
+        role,
+        companyId,
+        departmentId,
+      });
+    await assign('M', FinanceRole.MANAGER, companyX, dept1);
+    await assign('C', FinanceRole.CONTROLLER, companyX);
+    await assign('K', FinanceRole.ACCOUNTANT, companyX);
+    await assign('M', FinanceRole.MANAGER, companyY, dept1);
+    await assign('C', FinanceRole.CONTROLLER, companyY);
+    await assign('K2', FinanceRole.ACCOUNTANT, companyY);
+    await config.savePolicy(U.D, {
+      companyId: companyX,
+      salaryAdvanceMaxPerMonth: 1,
+      salaryAdvanceMaxPercent: 50,
+      maxDeductionPeriods: 3,
+      advanceDueDays: 15,
+    });
+  });
+
+  afterAll(async () => {
+    await moduleRef?.close();
+    rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  let advanceId = 0;
+
+  it('1. Nhân viên tạo đề nghị tạm ứng (nháp, số tiền do backend tính)', async () => {
+    const created = await requests.create(U.A, {
+      type: FinancialRequestType.ADVANCE,
+      companyId: companyX,
+      title: 'Tạm ứng mua vật tư sự kiện',
+      directManagerId: U.M.id,
+      paymentMethod: PaymentMethod.BANK_TRANSFER,
+      bankName: 'MB Bank',
+      bankAccountNumber: '0123456789',
+      items: [
+        {
+          description: 'Băng rôn',
+          unit: 'cái',
+          quantity: '2',
+          unitPrice: '1500000',
+        },
+        {
+          description: 'Nước uống',
+          unit: 'thùng',
+          quantity: '1.5',
+          unitPrice: '33333.33',
+        },
+      ],
+    });
+    advanceId = created.id;
+    expect(created.code).toMatch(/^TU-\d{4}-\d{5}$/);
+    expect(created.approvalStatus).toBe(ApprovalStatus.DRAFT);
+    expect(created.items.map((i) => i.amount)).toEqual([3_000_000, 50_000]); // 19. làm tròn
+    expect(created.totalAmount).toBe(3_050_000);
+    expect(created.summary.amountInWords).toBe(
+      'Ba triệu không trăm năm mươi nghìn đồng',
+    );
+    expect(created.directManagerName).toBe(U.M.name);
+  });
+
+  it('2. Lưu nháp rồi chỉnh sửa (khoá lạc quan theo version)', async () => {
+    const before = await requests.detail(U.A, advanceId);
+    const updated = await requests.update(U.A, advanceId, {
+      version: before.version,
+      title: 'Tạm ứng mua vật tư sự kiện tháng 11',
+      items: [
+        {
+          id: before.items[0].id,
+          description: 'Băng rôn',
+          unit: 'cái',
+          quantity: '2',
+          unitPrice: '2000000',
+        },
+      ],
+    });
+    expect(updated.totalAmount).toBe(4_000_000);
+    expect(updated.items).toHaveLength(1);
+    await expect(
+      requests.update(U.A, advanceId, {
+        version: before.version,
+        title: 'Bản cũ',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    await expect(
+      requests.update(U.O, advanceId, {
+        version: updated.version,
+        title: 'Người ngoài sửa',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('3 + 5. Gửi duyệt qua nhiều cấp, đúng thứ tự, người không có quyền bị chặn', async () => {
+    const submitted = await requests.submit(U.A, advanceId);
+    expect(submitted.approvalStatus).toBe(ApprovalStatus.PENDING);
+    expect(submitted.settlementDueDate).toBeTruthy(); // hạn mặc định theo chính sách
+    const round = submitted.steps.filter(
+      (s) => s.round === submitted.currentRound,
+    );
+    expect(round.map((s) => s.status)).toEqual([
+      StepStatus.PENDING,
+      StepStatus.WAITING,
+      StepStatus.WAITING,
+      StepStatus.WAITING,
+    ]);
+    expect(notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        receiverId: U.M.id,
+        meta: expect.objectContaining({
+          route: `/finance/requests/${advanceId}`,
+        }),
+      }),
+    );
+
+    // Duyệt sai thứ tự: kế toán bấm bước 3 khi bước 1 chưa xong.
+    await expect(
+      requests.approve(U.K, advanceId, { stepId: round[2].id }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    // Người ngoài / chính người đề nghị không duyệt được.
+    await expect(
+      requests.approve(U.O, advanceId, { stepId: round[0].id }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      requests.approve(U.A, advanceId, { stepId: round[0].id }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    // Quản lý trực tiếp thấy phiếu ở "Chờ tôi duyệt".
+    const inbox = await requests.list(U.M, { scope: 'approvals' });
+    expect(inbox.data.map((r) => r.id)).toContain(advanceId);
+
+    await requests.approve(U.M, advanceId, {
+      stepId: round[0].id,
+      comment: 'OK',
+    });
+    // Bấm lặp cùng bước → từ chối, không duyệt hai lần.
+    await expect(
+      requests.approve(U.M, advanceId, { stepId: round[0].id }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    // Kiểm soát điều chỉnh số chấp nhận (bắt buộc lý do khi khác số kê khai).
+    const atControl = await requests.detail(U.C, advanceId);
+    const controlStep = atControl.steps.find((s) => s.id === round[1].id)!;
+    expect(controlStep.status).toBe(StepStatus.PENDING);
+    await expect(
+      requests.approve(U.C, advanceId, {
+        stepId: controlStep.id,
+        adjustments: [
+          { itemId: atControl.items[0].id, approvedAmount: 3_500_000 },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await requests.approve(U.C, advanceId, {
+      stepId: controlStep.id,
+      adjustments: [
+        {
+          itemId: atControl.items[0].id,
+          approvedAmount: 3_500_000,
+          reason: 'Theo báo giá',
+        },
+      ],
+    });
+    const approved = await approveAll(advanceId);
+    expect(approved.approvalStatus).toBe(ApprovalStatus.APPROVED);
+    expect(approved.approvedAmount).toBe(3_500_000);
+    expect(approved.paymentStatus).toBe(PaymentStatus.UNPAID);
+    expect(approved.settlementStatus).toBe(SettlementStatus.NONE); // chưa chi thì chưa có công nợ
+  });
+
+  it('4. Từ chối và yêu cầu bổ sung (vòng duyệt mới, lịch sử giữ nguyên)', async () => {
+    const returned = await newAdvance(1_000_000);
+    await requests.submit(U.A, returned.id);
+    let d = await requests.detail(U.M, returned.id);
+    await expect(
+      requests.returnForChanges(U.M, returned.id, {
+        stepId: d.permissions.actionableStepId!,
+        comment: '',
+      } as never),
+    ).rejects.toBeTruthy();
+    await requests.returnForChanges(U.M, returned.id, {
+      stepId: d.permissions.actionableStepId!,
+      comment: 'Bổ sung báo giá',
+    });
+    d = await requests.detail(U.A, returned.id);
+    expect(d.approvalStatus).toBe(ApprovalStatus.RETURNED);
+    expect(d.permissions.canEdit).toBe(true);
+    await requests.update(U.A, returned.id, {
+      version: d.version,
+      purpose: 'Đã bổ sung báo giá',
+    });
+    const resubmitted = await requests.submit(U.A, returned.id);
+    expect(resubmitted.currentRound).toBe(2);
+    expect(
+      resubmitted.steps.filter((s) => s.round === 1).map((s) => s.status),
+    ).toEqual([
+      StepStatus.RETURNED,
+      StepStatus.CANCELLED,
+      StepStatus.CANCELLED,
+      StepStatus.CANCELLED,
+    ]);
+
+    await requests.reject(U.M, returned.id, {
+      stepId:
+        resubmitted.permissions.actionableStepId ??
+        resubmitted.steps.find(
+          (s) => s.round === 2 && s.status === StepStatus.PENDING,
+        )!.id,
+      comment: 'Không cần thiết',
+    });
+    const rejected = await requests.detail(U.A, returned.id);
+    expect(rejected.approvalStatus).toBe(ApprovalStatus.REJECTED);
+    expect(rejected.permissions.canEdit).toBe(false);
+    expect(rejected.audit.map((a) => a.action)).toEqual(
+      expect.arrayContaining([
+        'CREATED',
+        'SUBMITTED',
+        'RETURNED',
+        'UPDATED',
+        'REJECTED',
+      ]),
+    );
+  });
+
+  it('Thu hồi khi chưa duyệt xong → về nháp', async () => {
+    const draft = await newAdvance(500_000);
+    await requests.submit(U.A, draft.id);
+    const withdrawn = await requests.withdraw(U.A, draft.id, {
+      reason: 'Nhập nhầm',
+    });
+    expect(withdrawn.approvalStatus).toBe(ApprovalStatus.DRAFT);
+    expect(
+      withdrawn.steps.every((s) => s.status === StepStatus.CANCELLED),
+    ).toBe(true);
+    await requests.remove(U.A, draft.id);
+    await expect(requests.detail(U.A, draft.id)).rejects.toBeTruthy();
+  });
+
+  it('6 + 13. Chi một phần rồi toàn bộ; gửi lặp không chi trùng', async () => {
+    // Quản lý trực tiếp không có quyền chi.
+    await expect(
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1,
+          date: '2026-10-02',
+          method: PaymentMethod.CASH,
+          idempotencyKey: idem(),
+        },
+        U.M,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    const key1 = idem();
+    const first = await ledger.recordPayment(
+      advanceId,
+      {
+        amount: 2_000_000,
+        date: '2026-10-02',
+        method: PaymentMethod.CASH,
+        cashAccountCode: '1111',
+        idempotencyKey: key1,
+      },
+      U.T,
+    );
+    const replay = await ledger.recordPayment(
+      advanceId,
+      {
+        amount: 2_000_000,
+        date: '2026-10-02',
+        method: PaymentMethod.CASH,
+        idempotencyKey: key1,
+      },
+      U.T,
+    );
+    expect(replay.id).toBe(first.id);
+    let d = await requests.detail(U.A, advanceId);
+    expect(d.paidAmount).toBe(2_000_000);
+    expect(d.paymentStatus).toBe(PaymentStatus.PARTIALLY_PAID);
+    expect(d.settlementStatus).toBe(SettlementStatus.NOT_SETTLED);
+
+    // Hai yêu cầu đồng thời, mỗi cái đúng bằng số còn lại → chỉ một cái được ghi.
+    const results = await Promise.allSettled([
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1_500_000,
+          date: '2026-10-03',
+          method: PaymentMethod.BANK_TRANSFER,
+          transactionRef: 'FT1',
+          idempotencyKey: idem(),
+        },
+        U.T,
+      ),
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1_500_000,
+          date: '2026-10-03',
+          method: PaymentMethod.BANK_TRANSFER,
+          transactionRef: 'FT2',
+          idempotencyKey: idem(),
+        },
+        U.K,
+      ),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    d = await requests.detail(U.A, advanceId);
+    expect(d.paidAmount).toBe(3_500_000);
+    expect(d.paymentStatus).toBe(PaymentStatus.PAID);
+    await expect(
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1,
+          date: '2026-10-03',
+          method: PaymentMethod.CASH,
+          idempotencyKey: idem(),
+        },
+        U.T,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('7 + 8. Hoàn ứng chi phí LỚN hơn tạm ứng → công ty trả thêm rồi mới quyết toán xong', async () => {
+    const settlement = await newSettlement(advanceId, 3_500_000, 4_200_000);
+    expect(settlement.code).toMatch(/^HU-/);
+    expect(settlement.offsetAmount).toBe(3_500_000);
+    await requests.submit(U.A, settlement.id);
+    const approved = await approveAll(settlement.id);
+    expect(approved.summary.difference).toBe(700_000);
+    expect(approved.settlementStatus).toBe(SettlementStatus.PENDING_PAYMENT);
+    expect(approved.summary.payableRemaining).toBe(700_000);
+    let advance = await requests.detail(U.A, advanceId);
+    expect(advance.settledAmount).toBe(3_500_000);
+    expect(advance.settlementStatus).toBe(SettlementStatus.SETTLED);
+    expect(advance.settlements.map((s) => s.settlementId)).toContain(
+      settlement.id,
+    );
+
+    await ledger.recordPayment(
+      settlement.id,
+      {
+        amount: 700_000,
+        date: '2026-10-10',
+        method: PaymentMethod.CASH,
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    const done = await requests.detail(U.A, settlement.id);
+    expect(done.settlementStatus).toBe(SettlementStatus.COMPLETED);
+    expect(done.paymentStatus).toBe(PaymentStatus.PAID);
+    advance = await requests.detail(U.A, advanceId);
+    expect(advance.summary.advanceOutstanding).toBe(0);
+  });
+
+  it('9. Hoàn ứng chi phí BẰNG tạm ứng → tất toán ngay khi duyệt', async () => {
+    const adv = await paidAdvance(2_000_000);
+    const settlement = await newSettlement(adv.id, 2_000_000, 2_000_000);
+    await requests.submit(U.A, settlement.id);
+    const approved = await approveAll(settlement.id);
+    expect(approved.summary.difference).toBe(0);
+    expect(approved.settlementStatus).toBe(SettlementStatus.COMPLETED);
+    expect(approved.paymentStatus).toBe(PaymentStatus.NONE);
+    expect((await requests.detail(U.A, adv.id)).settlementStatus).toBe(
+      SettlementStatus.SETTLED,
+    );
+  });
+
+  it('10. Hoàn ứng chi phí NHỎ hơn tạm ứng → chờ hoàn trả; tạm ứng chỉ tất toán khi thu đủ', async () => {
+    const adv = await paidAdvance(5_000_000);
+    const settlement = await newSettlement(adv.id, 5_000_000, 3_200_000);
+    await requests.submit(U.A, settlement.id);
+    const approved = await approveAll(settlement.id);
+    expect(approved.summary.difference).toBe(-1_800_000);
+    expect(approved.settlementStatus).toBe(SettlementStatus.PENDING_REFUND);
+    expect(approved.recoveryStatus).toBe(RecoveryStatus.PENDING);
+    // Duyệt xong KHÔNG có nghĩa là tạm ứng đã tất toán.
+    expect((await requests.detail(U.A, adv.id)).settlementStatus).toBe(
+      SettlementStatus.PARTIALLY_SETTLED,
+    );
+
+    await ledger.recordRefund(
+      settlement.id,
+      {
+        amount: 800_000,
+        date: '2026-10-11',
+        method: PaymentMethod.CASH,
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    let s = await requests.detail(U.A, settlement.id);
+    expect(s.recoveryStatus).toBe(RecoveryStatus.PARTIAL);
+    expect(s.summary.receivableRemaining).toBe(1_000_000);
+    await expect(
+      ledger.recordRefund(
+        settlement.id,
+        {
+          amount: 1_000_001,
+          date: '2026-10-12',
+          method: PaymentMethod.CASH,
+          idempotencyKey: idem(),
+        },
+        U.T,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await ledger.recordRefund(
+      settlement.id,
+      {
+        amount: 1_000_000,
+        date: '2026-10-12',
+        method: PaymentMethod.CASH,
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    s = await requests.detail(U.A, settlement.id);
+    expect(s.settlementStatus).toBe(SettlementStatus.COMPLETED);
+    await dumpPdf('hoan-ung', settlement.id);
+    expect((await requests.detail(U.A, adv.id)).settlementStatus).toBe(
+      SettlementStatus.SETTLED,
+    );
+  });
+
+  it('11 + 12. Hoàn ứng một phần nhiều lần; không cho đối trừ vượt số dư (kể cả gửi đồng thời)', async () => {
+    const adv = await paidAdvance(6_000_000);
+    const s1 = await newSettlement(adv.id, 2_000_000, 2_000_000);
+    await requests.submit(U.A, s1.id);
+    await approveAll(s1.id);
+    let a = await requests.detail(U.A, adv.id);
+    expect(a.settlementStatus).toBe(SettlementStatus.PARTIALLY_SETTLED);
+    expect(a.summary.advanceOutstanding).toBe(4_000_000);
+
+    const available = await ledger.availableAdvances(U.A, {
+      companyId: companyX,
+    });
+    expect(available.find((x) => x.id === adv.id)?.available).toBe(4_000_000);
+    await expect(
+      newSettlement(adv.id, 4_000_001, 4_000_001),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    // Hai bản nháp cùng muốn đối trừ 4tr còn lại, gửi đồng thời → chỉ một được giữ chỗ.
+    const s2 = await newSettlement(adv.id, 4_000_000, 4_000_000);
+    const s3 = await newSettlement(adv.id, 4_000_000, 4_000_000);
+    const results = await Promise.allSettled([
+      requests.submit(U.A, s2.id),
+      requests.submit(U.A, s3.id),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const winner = results[0].status === 'fulfilled' ? s2.id : s3.id;
+    await approveAll(winner);
+    a = await requests.detail(U.A, adv.id);
+    expect(a.settledAmount).toBe(6_000_000);
+    expect(a.settlementStatus).toBe(SettlementStatus.SETTLED);
+    // Tạm ứng đã được đối trừ thì không huỷ phiếu chi được.
+    await expect(
+      ledger.voidPayment(adv.id, a.payments[0].id, { reason: 'thử' }, U.K),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  let salaryId = 0;
+
+  it('14 + 15. Tạm ứng lương: chính sách, khấu trừ đúng kỳ, không trừ hai lần', async () => {
+    const tooMuch = await requests.create(U.A, {
+      type: FinancialRequestType.SALARY_ADVANCE,
+      companyId: companyX,
+      title: 'Ứng lương',
+      directManagerId: U.M.id,
+      salaryYear: 2026,
+      salaryMonth: 10,
+      requestedAmount: 6_000_000,
+      paymentMethod: PaymentMethod.CASH,
+    });
+    expect(tooMuch.expectedSalary).toBe(10_000_000);
+    await expect(requests.submit(U.A, tooMuch.id)).rejects.toThrow(
+      /50% lương dự kiến/,
+    );
+    await requests.remove(U.A, tooMuch.id);
+
+    const created = await requests.create(U.A, {
+      type: FinancialRequestType.SALARY_ADVANCE,
+      companyId: companyX,
+      title: 'Ứng lương tháng 10',
+      directManagerId: U.M.id,
+      salaryYear: 2026,
+      salaryMonth: 10,
+      requestedAmount: 3_000_001,
+      deductionPeriods: 2,
+      paymentMethod: PaymentMethod.CASH,
+    });
+    salaryId = created.id;
+    expect(created.code).toMatch(/^UL-/);
+    expect(created.items[0].description).toBe('Tạm ứng lương tháng 10/2026');
+    await requests.submit(U.A, salaryId);
+    const approved = await approveAll(salaryId);
+    expect(approved.deductions).toHaveLength(0); // chưa chi → chưa có khấu trừ
+
+    // Chính sách 1 lần/tháng.
+    const second = await requests.create(U.A, {
+      type: FinancialRequestType.SALARY_ADVANCE,
+      companyId: companyX,
+      title: 'Ứng lần 2',
+      directManagerId: U.M.id,
+      salaryYear: 2026,
+      salaryMonth: 10,
+      requestedAmount: 100_000,
+      paymentMethod: PaymentMethod.CASH,
+    });
+    await expect(requests.submit(U.A, second.id)).rejects.toThrow(
+      /tối đa 1 lần\/tháng/,
+    );
+
+    await ledger.recordPayment(
+      salaryId,
+      {
+        amount: 3_000_001,
+        date: '2026-10-05',
+        method: PaymentMethod.CASH,
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    let d = await requests.detail(U.A, salaryId);
+    expect(d.deductionStatus).toBe(DeductionStatus.NOT_DEDUCTED);
+    expect(
+      d.deductions.map((r) => [r.periodMonth, r.plannedAmount, r.status]),
+    ).toEqual([
+      [10, 1_500_000, 'PLANNED'],
+      [11, 1_500_001, 'PLANNED'],
+    ]);
+    const preview = await ledger.payrollPreview(U.K, U.A.id, 2026, 10);
+    expect(preview.plannedAmount).toBe(1_500_000);
+
+    // Người đề nghị không tự ghi nhận khấu trừ cho mình.
+    await expect(
+      ledger.confirmDeduction(
+        salaryId,
+        d.deductions[0].id,
+        { idempotencyKey: idem() },
+        U.A,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const k = idem();
+    await ledger.confirmDeduction(
+      salaryId,
+      d.deductions[0].id,
+      { idempotencyKey: k },
+      U.K,
+    );
+    await ledger.confirmDeduction(
+      salaryId,
+      d.deductions[0].id,
+      { idempotencyKey: k },
+      U.K,
+    ); // gửi lặp
+    await expect(
+      ledger.confirmDeduction(
+        salaryId,
+        d.deductions[0].id,
+        { idempotencyKey: idem() },
+        U.K,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+    d = await requests.detail(U.A, salaryId);
+    expect(d.deductedAmount).toBe(1_500_000);
+    expect(d.deductionStatus).toBe(DeductionStatus.DEDUCTING);
+
+    // Ràng buộc DB: không thể có 2 dòng cùng kỳ cho một khoản ứng.
+    await expect(
+      ds.query(
+        `INSERT INTO financial_salary_advance_deductions (request_id, employee_id, period_year, period_month, planned_amount, status)
+         VALUES ($1, $2, 2026, 10, 1, 'PLANNED')`,
+        [salaryId, U.A.id],
+      ),
+    ).rejects.toThrow(/UQ_financial_salary_advance_deductions_period/);
+
+    await ledger.confirmDeduction(
+      salaryId,
+      d.deductions[1].id,
+      { idempotencyKey: idem() },
+      U.K,
+    );
+    d = await requests.detail(U.A, salaryId);
+    expect(d.deductionStatus).toBe(DeductionStatus.DEDUCTED);
+    expect(d.deductedAmount).toBe(3_000_001);
+  });
+
+  it('16. Xuất PDF tiếng Việt nhiều trang', async () => {
+    const many = await requests.create(U.A, {
+      type: FinancialRequestType.EXPENSE_PAYMENT,
+      companyId: companyX,
+      title: 'Thanh toán công tác phí Đà Nẵng — đoàn kiểm tra',
+      directManagerId: U.M.id,
+      location: 'Đà Nẵng',
+      tripStartDate: '2026-10-01',
+      tripEndDate: '2026-10-05',
+      paymentMethod: PaymentMethod.BANK_TRANSFER,
+      bankName: 'Vietcombank',
+      bankAccountNumber: '0011223344',
+      items: Array.from({ length: 80 }, (_, i) => ({
+        description: `Chi phí ăn uống, đi lại ngày thứ ${i + 1} — hoá đơn GTGT`,
+        unit: 'lần',
+        quantity: '1',
+        unitPrice: String(150_000 + i * 1000),
+        invoiceNumber: `HD${run}${i}`,
+      })),
+    });
+    const { buffer, fileName } = await pdf.render(U.A, many.id);
+    expect(fileName).toBe(`${many.code}.pdf`);
+    expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    const pages = buffer.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? [];
+    expect(pages.length).toBeGreaterThanOrEqual(2);
+    expect(buffer.toString('latin1')).toMatch(/Roboto/); // font Unicode được nhúng
+    await dumpPdf('thanh-toan-80-dong', many.id);
+    await dumpPdf('tam-ung', advanceId);
+  });
+
+  it('17. Xuất Excel đúng số tiền', async () => {
+    const list = await requests.list(U.D, {
+      scope: 'all',
+      companyId: companyX,
+      limit: 200,
+    });
+    const { buffer, count } = await reports.exportList(U.D, {
+      scope: 'all',
+      companyId: companyX,
+    });
+    expect(count).toBe(list.meta.total);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as never);
+    const sheet = workbook.getWorksheet('Đề nghị')!;
+    let sum = 0;
+    sheet.eachRow((row, index) => {
+      if (index === 1 || row.getCell(1).value === 'TỔNG CỘNG') return;
+      sum += Number(row.getCell(8).value);
+    });
+    expect(sum).toBe(list.totals.totalAmount);
+    const totalRow = sheet.getRow(sheet.rowCount);
+    expect(totalRow.getCell(1).value).toBe('TỔNG CỘNG');
+    expect(Number(totalRow.getCell(8).value)).toBe(list.totals.totalAmount);
+  });
+
+  it('18. Phân quyền giữa nhiều công ty', async () => {
+    const y = await requests.create(U.B, {
+      type: FinancialRequestType.ADVANCE,
+      companyId: companyY,
+      title: 'Tạm ứng công ty Y',
+      directManagerId: U.M.id,
+      paymentMethod: PaymentMethod.CASH,
+      items: [{ description: 'Chi phí', quantity: '1', unitPrice: '1000000' }],
+    });
+    await requests.submit(U.B, y.id);
+    await approveAll(y.id);
+    // Kế toán công ty X không xem/chi được phiếu công ty Y.
+    await expect(requests.detail(U.K, y.id)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    await expect(
+      ledger.recordPayment(
+        y.id,
+        {
+          amount: 1,
+          date: '2026-10-05',
+          method: PaymentMethod.CASH,
+          idempotencyKey: idem(),
+        },
+        U.K,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const kList = await requests.list(U.K, { scope: 'all' });
+    expect(kList.data.map((r) => r.id)).not.toContain(y.id);
+    // Kế toán công ty Y thì được; số tài khoản bị che với người không đủ quyền.
+    const asK2 = await requests.detail(U.K2, y.id);
+    expect(asK2.permissions.canRecordPayment).toBe(true);
+    const asOutsider = await requests.list(U.O, { scope: 'all' });
+    expect(asOutsider.data.map((r) => r.id)).not.toContain(y.id);
+  });
+
+  it('20. Tệp đính kèm (kiểm tra loại/quyền), nhật ký và lịch sử duyệt', async () => {
+    const draft = await newAdvance(300_000);
+    await expect(
+      requests.uploadAttachments(
+        U.A,
+        draft.id,
+        [file('hoadon.pdf', Buffer.from('MZ\x90\x00 fake exe'))],
+        {},
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      requests.uploadAttachments(
+        U.A,
+        draft.id,
+        [file('virus.exe', PDF_BYTES)],
+        {},
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      requests.uploadAttachments(
+        U.O,
+        draft.id,
+        [file('hoadon.pdf', PDF_BYTES)],
+        {},
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const withFiles = await requests.uploadAttachments(
+      U.A,
+      draft.id,
+      [file('Hóa đơn tháng 10.pdf', PDF_BYTES), file('anh.png', PNG_BYTES)],
+      {
+        kind: AttachmentKind.INVOICE,
+        itemId: (await requests.detail(U.A, draft.id)).items[0].id,
+      },
+    );
+    expect(withFiles.attachments.map((a) => a.originalName)).toEqual([
+      'Hóa đơn tháng 10.pdf',
+      'anh.png',
+    ]);
+    expect(withFiles.items[0].attachmentCount).toBe(2);
+    const { attachment } = await requests.attachmentFile(
+      U.A,
+      draft.id,
+      withFiles.attachments[0].id,
+    );
+    expect(attachment.sha256).toHaveLength(64);
+    await expect(
+      requests.attachmentFile(U.O, draft.id, withFiles.attachments[0].id),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    // Thủ quỹ thấy mọi phiếu đã gửi, nhưng tệp của bản nháp chưa gửi thì không.
+    await expect(
+      requests.attachmentFile(U.T, draft.id, withFiles.attachments[0].id),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    const history = await requests.detail(U.A, advanceId);
+    expect(history.audit.map((a) => a.action)).toEqual(
+      expect.arrayContaining([
+        'CREATED',
+        'UPDATED',
+        'SUBMITTED',
+        'APPROVED_STEP',
+        'AMOUNTS_ADJUSTED',
+        'APPROVED',
+        'PAYMENT_RECORDED',
+      ]),
+    );
+    const approvedSteps = history.steps.filter(
+      (s) => s.status === StepStatus.APPROVED,
+    );
+    expect(approvedSteps.every((s) => s.actedByName && s.actedAt)).toBe(true);
+    // Nhật ký bất biến ở tầng DB.
+    await expect(
+      ds.query(
+        `UPDATE financial_audit_logs SET action = 'X' WHERE request_id = $1`,
+        [advanceId],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      ds.query(`DELETE FROM financial_audit_logs WHERE request_id = $1`, [
+        advanceId,
+      ]),
+    ).rejects.toThrow();
+  });
+
+  it('Uỷ quyền duyệt có thời hạn và chặn tự phê duyệt', async () => {
+    const req = await newAdvance(200_000, U.B);
+    await requests.submit(U.B, req.id);
+    const now = Date.now();
+    const delegation = await config.createDelegation(U.M, {
+      delegateId: U.O.id,
+      startsAt: new Date(now - 60_000).toISOString(),
+      endsAt: new Date(now + 86_400_000).toISOString(),
+      reason: 'Nghỉ phép',
+    });
+    const inbox = await requests.list(U.O, { scope: 'approvals' });
+    expect(inbox.data.map((r) => r.id)).toContain(req.id);
+    const d = await requests.detail(U.O, req.id);
+    await requests.approve(U.O, req.id, {
+      stepId: d.permissions.actionableStepId!,
+    });
+    const after = await requests.detail(U.D, req.id);
+    const managerStep = after.steps.find((s) => s.stepOrder === 1)!;
+    expect(managerStep.actedByName).toBe(U.O.name);
+    expect(managerStep.onBehalfOfName).toBe(U.M.name);
+    await config.revokeDelegation(U.M, delegation.id);
+    expect(
+      (await requests.list(U.O, { scope: 'approvals' })).data.map((r) => r.id),
+    ).not.toContain(req.id);
+
+    // Kiểm soát viên tự lập phiếu: là người kiểm soát duy nhất → chính sách BLOCK không cho gửi.
+    const own = await requests.create(U.C, {
+      type: FinancialRequestType.EXPENSE_PAYMENT,
+      companyId: companyX,
+      title: 'Thanh toán của kiểm soát viên',
+      directManagerId: U.M.id,
+      paymentMethod: PaymentMethod.CASH,
+      items: [
+        { description: 'Văn phòng phẩm', quantity: '1', unitPrice: '100000' },
+      ],
+    });
+    await expect(requests.submit(U.C, own.id)).rejects.toThrow(
+      /Bộ phận kiểm soát/,
+    );
+    // Quy trình riêng cho công ty X với SKIP_STEP → bỏ qua cấp kiểm soát có ghi lý do.
+    await config.createWorkflow(U.D, {
+      name: `Quy trình X ${run}`,
+      companyId: companyX,
+      requestType: FinancialRequestType.EXPENSE_PAYMENT,
+      selfApprovalMode: SelfApprovalMode.SKIP_STEP,
+      steps: [
+        {
+          name: 'Quản lý trực tiếp',
+          approverType: 'DIRECT_MANAGER' as never,
+          signatureSlot: 'MANAGER' as never,
+        },
+        {
+          name: 'Bộ phận kiểm soát',
+          approverType: 'ROLE' as never,
+          approverRole: FinanceRole.CONTROLLER,
+          signatureSlot: 'CONTROLLER' as never,
+        },
+        {
+          name: 'Kế toán',
+          approverType: 'ROLE' as never,
+          approverRole: FinanceRole.ACCOUNTANT,
+          signatureSlot: 'ACCOUNTANT' as never,
+        },
+      ],
+    });
+    const submitted = await requests.submit(U.C, own.id);
+    expect(submitted.workflowName).toBe(`Quy trình X ${run}`);
+    expect(submitted.steps.find((s) => s.stepOrder === 2)?.status).toBe(
+      StepStatus.SKIPPED,
+    );
+  });
+
+  it('Huỷ phiếu đã duyệt chưa chi (bắt buộc lý do), sao chép tạo phiếu mới, dashboard theo quyền', async () => {
+    const req = await newAdvance(400_000);
+    await requests.submit(U.A, req.id);
+    await approveAll(req.id);
+    await expect(
+      requests.cancel(U.A, req.id, { reason: 'x' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const cancelled = await requests.cancel(U.K, req.id, {
+      reason: 'Sự kiện bị hoãn',
+    });
+    expect(cancelled.approvalStatus).toBe(ApprovalStatus.CANCELLED);
+    expect(cancelled.cancelReason).toBe('Sự kiện bị hoãn');
+
+    const copy = await requests.copy(U.A, req.id);
+    expect(copy.approvalStatus).toBe(ApprovalStatus.DRAFT);
+    expect(copy.copiedFromId).toBe(req.id);
+    expect(copy.totalAmount).toBe(400_000);
+
+    const summary = await reports.summary(U.D, { companyId: companyX });
+    expect(summary.kpis.totalPaid).toBeGreaterThan(0);
+    expect(summary.kpis.salaryAdvanceOutstanding).toBe(0);
+    expect(summary.kpis.receivable).toBe(0);
+    expect(summary.charts.byMonth.length).toBeGreaterThan(0);
+    // Nhân viên chỉ thấy số liệu của chính mình.
+    const mine = await reports.summary(U.B, { companyId: companyX });
+    expect(mine.kpis.totalApproved).toBeLessThan(summary.kpis.totalApproved);
+
+    const balances = await ledger.balances(U.D, { companyId: companyX });
+    const rowA = balances.rows.find((r) => r.employeeId === U.A.id);
+    expect(rowA?.advanceOutstanding ?? 0).toBe(0);
+  });
+});

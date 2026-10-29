@@ -131,6 +131,9 @@ export class NotificationService {
       case NotificationType.TEACHER_ACCOUNT_RESULT:
         return 'teacher-account-result:new';
 
+      case NotificationType.FINANCIAL_REQUEST:
+        return 'financial-request-notification:new';
+
       default:
         return 'notification:new';
     }

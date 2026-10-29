@@ -184,6 +184,9 @@ export const SKIPPED_RESOURCES = [
  */
 export const REDACTED_BODY_PATHS: readonly RegExp[] = [
   /^\/recruitment\/conversations\/\d+\/messages$/,
+  // Đề nghị tài chính: body chứa số tài khoản ngân hàng / số lương. Phân hệ có
+  // nhật ký bất biến riêng (financial_audit_logs) với kiểm soát truy cập.
+  /^\/financial-requests(\/.*)?$/,
 ];
 
 export const LOOKUP_PATH_SUFFIXES = [
