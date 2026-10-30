@@ -24,11 +24,14 @@ import {
 } from './cashflow-ledger';
 import {
   ExpenseRow,
+  FINANCIAL_MOVEMENTS_SQL,
+  FinancialMovementRow,
   flagSuspiciousAmounts,
   INVOICE_ROWS_SQL,
   InvoiceRow,
   MANAGEMENT_EXPENSE_ROWS_SQL,
   mapExpenseRows,
+  mapFinancialMovements,
   mapInvoiceRows,
   mapSuggestEvents,
   SCHOOL_EXPENSE_ROWS_SQL,
@@ -110,21 +113,28 @@ export class CashflowReportService {
     }));
   }
 
-  /** Gom bút toán từ 4 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
+  /** Gom bút toán từ 5 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
   async collect(accounts: CashAccountInfo[]): Promise<CollectedLedger> {
-    const [invoiceRows, schoolRows, managementRows, suggestEvents] =
-      await Promise.all([
-        this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
-        this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
-        this.dataSource.query<ExpenseRow[]>(MANAGEMENT_EXPENSE_ROWS_SQL),
-        this.dataSource.query<SuggestEventRow[]>(SUGGEST_EVENTS_SQL),
-      ]);
+    const [
+      invoiceRows,
+      schoolRows,
+      managementRows,
+      suggestEvents,
+      financialMovements,
+    ] = await Promise.all([
+      this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
+      this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
+      this.dataSource.query<ExpenseRow[]>(MANAGEMENT_EXPENSE_ROWS_SQL),
+      this.dataSource.query<SuggestEventRow[]>(SUGGEST_EVENTS_SQL),
+      this.dataSource.query<FinancialMovementRow[]>(FINANCIAL_MOVEMENTS_SQL),
+    ]);
 
     const parts = [
       mapInvoiceRows(invoiceRows),
       mapExpenseRows(schoolRows, 'SCHOOL_EXPENSE'),
       mapExpenseRows(managementRows, 'MANAGEMENT_EXPENSE'),
       mapSuggestEvents(suggestEvents),
+      mapFinancialMovements(financialMovements),
     ];
 
     return validateLines(

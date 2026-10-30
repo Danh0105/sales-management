@@ -18,6 +18,8 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
 | Chi Ngoài                 | `management_expense_items`                  | Chi                         | `expenseDate`                     | `cashAccount` ("Nguồn chi")                                                            | `paidAmount` ("Đã chi")                                                                                                                     |
 | Đề xuất chi: xuất tiền    | `suggest_history` (`CONFIRM_CASH_RELEASED`) | Chi                         | ngày của sự kiện                  | `data.cashAccount`; lần xuất cuối cùng lấy thêm từ `suggest_payment_order.cashAccount` | snapshot lệnh chi gần nhất trước lần xuất (`CREATE_PAYMENT_ORDER.data.paymentOrder.amount`), nếu không có thì lấy số tiền lệnh chi hiện tại |
 | Đề xuất chi: nhận lại quỹ | `suggest_history` (`CONFIRM_FUND_RETURNED`) | Thu                         | ngày của sự kiện                  | cùng tài khoản với lần xuất đang mở                                                    | cùng số tiền với lần xuất đang mở                                                                                                           |
+| Đề nghị tài chính: chi    | `financial_payments` (`RECORDED`)           | Chi                         | `paid_at`                         | `cash_account_code` của khoản thanh toán                                               | `amount`                                                                                                                                    |
+| Đề nghị tài chính: thu hồi | `financial_refunds` (`RECORDED`)           | Thu                         | `received_at`                     | `cash_account_code` của khoản thu hồi                                                  | `amount`                                                                                                                                    |
 
 - "Đã thu" (`revenue_items.paidAmount`) **không** được cộng thẳng vào sổ: chỉ khoản ở
   Hóa Đơn được tính, để không ghi trùng. Dòng có Đã thu mà chưa có khoản Thu ở Hóa Đơn sẽ
@@ -27,6 +29,11 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
   `HD|CT|CN-<phiếu thu chi>-<môn>-<dòng>`.
 - Đối tượng: trường → `TR<id>`; người đề xuất → `NV<id>`. Trường và nhân viên chưa có cột
   mã riêng.
+- Đề nghị tài chính: số chứng từ = mã phiếu (`TU-…`), đối tượng = mã nhân viên trên phiếu
+  (không có thì `NV<id>`). Khoản đã huỷ (`VOIDED`) không vào sổ. Tài khoản Bộ phận kiểm soát
+  chọn lúc duyệt (`financial_requests.control_cash_account_code`) chỉ điền sẵn khi ghi nhận
+  chi tiền — báo cáo lấy tài khoản thực chi trên từng khoản. Khoản chưa chọn tài khoản →
+  `MISSING_ACCOUNT`.
 - Ngày: tính theo giờ Việt Nam (timezone của DB là `Asia/Ho_Chi_Minh`). Khoảng ngày lọc
   tính cả ngày đầu và ngày cuối.
 

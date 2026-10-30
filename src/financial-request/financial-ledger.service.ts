@@ -418,7 +418,7 @@ export class FinancialLedgerService {
   // Chi tiền / thu hồi
   // ---------------------------------------------------------------------------
 
-  private async assertCashAccount(manager: EntityManager, code?: string) {
+  async assertCashAccount(manager: EntityManager, code?: string) {
     if (!code) return null;
     const account = await manager
       .getRepository(CashAccount)

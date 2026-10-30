@@ -19,7 +19,8 @@ export type LedgerSourceType =
   | 'INVOICE'
   | 'SCHOOL_EXPENSE'
   | 'MANAGEMENT_EXPENSE'
-  | 'EXPENSE_REQUEST';
+  | 'EXPENSE_REQUEST'
+  | 'FINANCIAL_REQUEST';
 
 /** Chỗ mở chứng từ gốc từ báo cáo. */
 export interface LedgerSourceRef {
@@ -28,6 +29,7 @@ export interface LedgerSourceRef {
   subjectId?: number | null;
   rowIndex?: number;
   suggestId?: number;
+  financialRequestId?: number;
 }
 
 /** Một bút toán ghi tăng (thu) hoặc ghi giảm (chi) đúng một tài khoản. */

@@ -70,6 +70,7 @@ import {
   DIRECT_MANAGER_SYSTEM_ROLES,
   FinanceRole,
   FinancialRequestType,
+  isControlStep,
   PaymentMethod,
   PaymentStatus,
   RecoveryStatus,
@@ -676,6 +677,7 @@ export class FinancialRequestService {
       departmentName: request.departmentName,
       directManagerId: request.directManagerId,
       directManagerName: request.directManagerName,
+      controlCashAccountCode: request.controlCashAccountCode,
       requestDate: request.requestDate,
       title: request.title,
       purpose: request.purpose,
@@ -891,6 +893,7 @@ export class FinancialRequestService {
         actionableStepId: actionable?.id ?? null,
         canApprove: !!actionable,
         canAdjust: !!actionable?.canAdjustAmounts,
+        isControlStep: !!actionable && isControlStep(actionable),
         canSkip: ctx.isAdmin && currentPending.some((s) => s.skippable),
         canRecordPayment:
           request.approvalStatus === ApprovalStatus.APPROVED &&
@@ -2154,6 +2157,21 @@ export class FinancialRequestService {
         step,
         dto.adjustments ?? [],
       );
+      const cashAccountCode = dto.cashAccountCode || null;
+      if (cashAccountCode) {
+        if (!isControlStep(step)) {
+          throw new ForbiddenException(
+            'Chỉ cấp Bộ phận kiểm soát được chọn tài khoản tiền',
+          );
+        }
+        request.controlCashAccountCode = await this.ledger.assertCashAccount(
+          manager,
+          cashAccountCode,
+        );
+        await manager
+          .getRepository(FinancialRequest)
+          .update(request.id, { controlCashAccountCode: cashAccountCode });
+      }
       step.status = StepStatus.APPROVED;
       step.actedById = ctx.userId;
       step.actedByName = ctx.name;
@@ -2173,6 +2191,7 @@ export class FinancialRequestService {
           stepOrder: step.stepOrder,
           round: step.round,
           ...(onBehalfOfName ? { onBehalfOf: onBehalfOfName } : {}),
+          ...(cashAccountCode ? { cashAccount: cashAccountCode } : {}),
         },
       });
       const result = await this.advance(manager, ctx, request);
@@ -2510,6 +2529,28 @@ export class FinancialRequestService {
         ) {
           throw new ForbiddenException(
             'Chỉ kế toán/quản trị đính kèm bằng chứng điều chỉnh',
+          );
+        }
+      } else if (kind === AttachmentKind.CONTROL_EVIDENCE) {
+        // Tải lên trước khi bấm duyệt: phải đang là người duyệt cấp kiểm soát.
+        const pending =
+          request.approvalStatus === ApprovalStatus.PENDING
+            ? await manager.getRepository(FinancialApprovalStep).find({
+                where: {
+                  requestId: id,
+                  round: request.currentRound,
+                  status: StepStatus.PENDING,
+                },
+              })
+            : [];
+        const canAttach = pending.some(
+          (step) =>
+            isControlStep(step) &&
+            this.access.eligibility(ctx, request, step).eligible,
+        );
+        if (!canAttach) {
+          throw new ForbiddenException(
+            'Chỉ người duyệt cấp Bộ phận kiểm soát đính kèm chứng từ kiểm soát, khi phiếu đang chờ cấp đó',
           );
         }
       } else if (!this.access.canRecordMoney(ctx, request)) {

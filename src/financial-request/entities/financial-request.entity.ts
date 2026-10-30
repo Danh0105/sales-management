@@ -171,6 +171,19 @@ export class FinancialRequest {
   })
   directManagerName!: string | null;
 
+  /**
+   * Tài khoản tiền (bảng cash_accounts) Bộ phận kiểm soát chọn khi duyệt —
+   * chỉ là mặc định cho lần ghi nhận thanh toán; báo cáo thu chi lấy theo
+   * tài khoản thực chi trên từng khoản thanh toán.
+   */
+  @Column({
+    name: 'control_cash_account_code',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  controlCashAccountCode!: string | null;
+
   // ---- Nội dung ----
   @Column({ name: 'request_date', type: 'date' })
   requestDate!: string;

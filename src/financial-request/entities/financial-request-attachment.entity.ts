@@ -23,7 +23,7 @@ import { FinancialRequest } from './financial-request.entity';
 @Index('IDX_financial_request_attachments_request', ['requestId'])
 @Check(
   'CHK_financial_request_attachments_kind',
-  `"kind" IN ('DOCUMENT','INVOICE','PAYMENT_PROOF','REFUND_PROOF','ADJUSTMENT_EVIDENCE')`,
+  `"kind" IN ('DOCUMENT','INVOICE','PAYMENT_PROOF','REFUND_PROOF','ADJUSTMENT_EVIDENCE','CONTROL_EVIDENCE')`,
 )
 export class FinancialRequestAttachment {
   @PrimaryGeneratedColumn({

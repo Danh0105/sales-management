@@ -215,7 +215,17 @@ export enum AttachmentKind {
   REFUND_PROOF = 'REFUND_PROOF',
   /** Bằng chứng cho thao tác huỷ/điều chỉnh sau duyệt. */
   ADJUSTMENT_EVIDENCE = 'ADJUSTMENT_EVIDENCE',
+  /** Chứng từ Bộ phận kiểm soát đính kèm khi duyệt cấp của mình. */
+  CONTROL_EVIDENCE = 'CONTROL_EVIDENCE',
 }
+
+/** Cấp duyệt của Bộ phận kiểm soát: chọn tài khoản tiền + đính kèm chứng từ. */
+export const isControlStep = (step: {
+  approverRole: FinanceRole | null;
+  signatureSlot: SignatureSlot | null;
+}) =>
+  step.approverRole === FinanceRole.CONTROLLER ||
+  step.signatureSlot === SignatureSlot.CONTROLLER;
 
 export enum MovementStatus {
   RECORDED = 'RECORDED',

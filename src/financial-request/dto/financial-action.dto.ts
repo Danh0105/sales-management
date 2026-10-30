@@ -59,6 +59,13 @@ export class ApproveStepDto {
   @ValidateNested({ each: true })
   @Type(() => ItemAdjustmentDto)
   adjustments?: ItemAdjustmentDto[];
+
+  /** Tài khoản tiền (cash_accounts) — chỉ cấp Bộ phận kiểm soát được chọn. */
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(20)
+  cashAccountCode?: string;
 }
 
 export class DecideStepDto {

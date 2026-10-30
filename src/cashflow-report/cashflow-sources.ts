@@ -1,3 +1,7 @@
+import {
+  FinancialRequestType,
+  REQUEST_TYPE_LABELS,
+} from '../financial-request/financial-request.constants';
 import { Cents, toCents } from './cashflow-money';
 import {
   CollectedLedger,
@@ -14,6 +18,8 @@ import {
  * - Chi Ngoài (management_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi".
  * - Đề nghị chi (suggest_history): mỗi lần thủ quỹ xác nhận xuất tiền là một
  *   bút toán chi, mỗi lần nhận lại quỹ là một bút toán thu cùng tài khoản.
+ * - Đề nghị tài chính (financial_payments / financial_refunds): mỗi khoản
+ *   thanh toán là bút toán chi, mỗi khoản thu hồi là bút toán thu.
  * Ngày lấy theo giờ Việt Nam (timezone của DB). Thiếu thông tin thì thành lỗi
  * trong danh sách "Chưa phân loại" — không đoán tài khoản.
  */
@@ -148,6 +154,46 @@ WHERE h.action IN (
   'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
+
+/** Một lần chi (thanh toán) hoặc thu (hoàn trả) đã ghi nhận của đề nghị tài chính. */
+export interface FinancialMovementRow {
+  kind: 'PAYMENT' | 'REFUND';
+  movement_id: number;
+  request_id: number;
+  request_code: string;
+  request_type: string;
+  title: string;
+  requester_id: number;
+  requester_code: string | null;
+  requester_name: string;
+  moved_at: string;
+  amount: string;
+  cash_account_code: string | null;
+}
+
+/** Khoản đã huỷ (VOIDED) không phải bút toán. */
+export const FINANCIAL_MOVEMENTS_SQL = `
+SELECT m.kind,
+  m.id AS movement_id,
+  r.id AS request_id,
+  r.code AS request_code,
+  r.type AS request_type,
+  r.title,
+  r.requester_id,
+  r.requester_code,
+  r.requester_name,
+  to_char(m.moved_at, 'YYYY-MM-DD') AS moved_at,
+  m.amount::text AS amount,
+  m.cash_account_code
+FROM (
+  SELECT 'PAYMENT' AS kind, id, request_id, paid_at AS moved_at, amount, cash_account_code
+  FROM financial_payments WHERE status = 'RECORDED'
+  UNION ALL
+  SELECT 'REFUND' AS kind, id, request_id, received_at AS moved_at, amount, cash_account_code
+  FROM financial_refunds WHERE status = 'RECORDED'
+) m
+JOIN financial_requests r ON r.id = m.request_id
+ORDER BY m.moved_at, r.id, m.kind, m.id`;
 
 /** Gom khoảng trắng (tab/xuống dòng nhập kèm nội dung) cho cột Diễn giải. */
 function clean(text: string): string {
@@ -515,6 +561,74 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
         });
       }
     }
+  }
+
+  return { lines, issues };
+}
+
+/**
+ * Đề nghị tài chính nội bộ: mỗi khoản thanh toán đã ghi nhận là một bút toán
+ * chi, mỗi khoản thu hồi (người đề nghị hoàn trả) là một bút toán thu — theo
+ * ngày và tài khoản thực chi/thực thu trên khoản đó (không theo tài khoản
+ * kiểm soát chọn lúc duyệt, vốn chỉ là mặc định).
+ */
+export function mapFinancialMovements(
+  rows: FinancialMovementRow[],
+): CollectedLedger {
+  const lines: LedgerLine[] = [];
+  const issues: LedgerIssue[] = [];
+
+  for (const row of rows) {
+    const amount = toCents(row.amount);
+    if (amount <= 0n) continue;
+    const isPayment = row.kind === 'PAYMENT';
+    const key = `FINANCIAL_${row.kind}:${row.movement_id}`;
+    const source: LedgerSourceRef = {
+      type: 'FINANCIAL_REQUEST',
+      financialRequestId: row.request_id,
+    };
+    const typeLabel = (
+      REQUEST_TYPE_LABELS[row.request_type as FinancialRequestType] ??
+      'đề nghị'
+    ).toLowerCase();
+    const description = clean(
+      `${isPayment ? 'Chi' : 'Thu hồi'} ${typeLabel} — ${row.title} — ${row.requester_name}`,
+    );
+
+    if (!row.cash_account_code) {
+      issues.push(
+        issue(
+          'MISSING_ACCOUNT',
+          `Đề nghị tài chính: khoản ${isPayment ? 'thanh toán' : 'thu hồi'} chưa chọn tài khoản tiền`,
+          {
+            key,
+            date: row.moved_at,
+            amount,
+            accountCode: null,
+            documentNo: row.request_code,
+            description,
+            source,
+          },
+        ),
+      );
+      continue;
+    }
+
+    lines.push({
+      key,
+      postingDate: row.moved_at,
+      documentDate: row.moved_at,
+      documentNo: row.request_code,
+      invoiceNo: null,
+      description,
+      accountCode: row.cash_account_code,
+      receipt: isPayment ? 0n : amount,
+      payment: isPayment ? amount : 0n,
+      partnerCode: row.requester_code || `NV${row.requester_id}`,
+      partnerName: row.requester_name,
+      isInternalTransfer: false,
+      source,
+    });
   }
 
   return { lines, issues };

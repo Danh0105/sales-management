@@ -1,9 +1,11 @@
 import { toCents } from './cashflow-money';
 import {
   ExpenseRow,
+  FinancialMovementRow,
   flagSuspiciousAmounts,
   InvoiceRow,
   mapExpenseRows,
+  mapFinancialMovements,
   mapInvoiceRows,
   mapSuggestEvents,
   SuggestEventRow,
@@ -278,5 +280,95 @@ describe('diễn giải', () => {
     expect(lines[0].description).toBe(
       'Thu Chương trình STEM tháng 9 — TH Đông Hòa (T10/2026)',
     );
+  });
+});
+
+describe('mapFinancialMovements', () => {
+  const movement = (
+    overrides: Partial<FinancialMovementRow> = {},
+  ): FinancialMovementRow => ({
+    kind: 'PAYMENT',
+    movement_id: 7,
+    request_id: 41,
+    request_code: 'TU-2610-0003',
+    request_type: 'ADVANCE',
+    title: 'Tạm ứng hội thảo\ttháng 11',
+    requester_id: 9,
+    requester_code: null,
+    requester_name: 'Nhân viên A',
+    moved_at: '2026-10-30',
+    amount: '5000000',
+    cash_account_code: '1121',
+    ...overrides,
+  });
+
+  it('thanh toán → bút toán chi theo ngày + tài khoản thực chi, mở được phiếu gốc', () => {
+    const { lines, issues } = mapFinancialMovements([movement()]);
+    expect(issues).toEqual([]);
+    expect(lines).toEqual([
+      {
+        key: 'FINANCIAL_PAYMENT:7',
+        postingDate: '2026-10-30',
+        documentDate: '2026-10-30',
+        documentNo: 'TU-2610-0003',
+        invoiceNo: null,
+        description: 'Chi tạm ứng — Tạm ứng hội thảo tháng 11 — Nhân viên A',
+        accountCode: '1121',
+        receipt: 0n,
+        payment: toCents('5000000'),
+        partnerCode: 'NV9',
+        partnerName: 'Nhân viên A',
+        isInternalTransfer: false,
+        source: { type: 'FINANCIAL_REQUEST', financialRequestId: 41 },
+      },
+    ]);
+  });
+
+  it('thu hồi → bút toán thu; dùng mã nhân viên khi có', () => {
+    const { lines } = mapFinancialMovements([
+      movement({
+        kind: 'REFUND',
+        movement_id: 3,
+        request_type: 'SETTLEMENT',
+        requester_code: 'KD012',
+        cash_account_code: '1111',
+        amount: '250000',
+      }),
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      key: 'FINANCIAL_REFUND:3',
+      accountCode: '1111',
+      receipt: toCents('250000'),
+      payment: 0n,
+      partnerCode: 'KD012',
+      description: 'Thu hồi hoàn ứng — Tạm ứng hội thảo tháng 11 — Nhân viên A',
+    });
+  });
+
+  it('thiếu tài khoản → MISSING_ACCOUNT, không tính vào báo cáo', () => {
+    const { lines, issues } = mapFinancialMovements([
+      movement({ cash_account_code: null }),
+    ]);
+    expect(lines).toEqual([]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      kind: 'MISSING_ACCOUNT',
+      warningOnly: false,
+      amount: toCents('5000000'),
+      documentNo: 'TU-2610-0003',
+      source: { type: 'FINANCIAL_REQUEST', financialRequestId: 41 },
+    });
+  });
+
+  it('thanh toán và thu hồi cùng phiếu có định danh khác nhau (không bị coi là trùng)', () => {
+    const { lines } = mapFinancialMovements([
+      movement(),
+      movement({ kind: 'REFUND', movement_id: 7 }),
+    ]);
+    expect(lines.map((l) => l.key)).toEqual([
+      'FINANCIAL_PAYMENT:7',
+      'FINANCIAL_REFUND:7',
+    ]);
   });
 });

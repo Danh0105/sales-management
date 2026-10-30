@@ -66,6 +66,10 @@ Tự phê duyệt — cấu hình theo quy trình:
 3. Cấp có `min_amount` lớn hơn tổng tiền thì tự bỏ qua (hạn mức).
 4. Trả về để bổ sung → người đề nghị sửa → gửi lại tạo **vòng mới**. Vòng cũ giữ nguyên làm lịch sử.
 5. Thao tác duyệt khoá dòng phiếu (`SELECT … FOR UPDATE`) và kiểm tra `stepId` thuộc bước đang chờ.
+6. Cấp **Bộ phận kiểm soát** (vai trò `CONTROLLER` hoặc ô ký Kiểm soát) khi duyệt được chọn tài khoản tiền
+   (`cashAccountCode`, bảng `cash_accounts`) và đính kèm tệp loại `CONTROL_EVIDENCE` (tải lên trước khi bấm
+   duyệt, chỉ khi phiếu đang chờ đúng cấp đó). Tài khoản này điền sẵn khi ghi nhận chi tiền và vẫn đổi được;
+   khoản chi/thu hồi đã ghi nhận đi vào **Tổng hợp thu chi** theo tài khoản thực chi (xem `CASHFLOW-REPORT.md`).
 
 ## Tạm ứng → hoàn ứng → thanh toán
 

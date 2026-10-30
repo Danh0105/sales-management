@@ -23,6 +23,11 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 
 import { CashAccount } from '../src/cashflow-report/cash-account.entity';
+import {
+  FINANCIAL_MOVEMENTS_SQL,
+  FinancialMovementRow,
+  mapFinancialMovements,
+} from '../src/cashflow-report/cashflow-sources';
 import { Department } from '../src/department/department.entity';
 import { Employee } from '../src/employee/employee.entity';
 import { FinancialAdvanceAllocation } from '../src/financial-request/entities/financial-advance-allocation.entity';
@@ -51,6 +56,7 @@ import { FinancialReportService } from '../src/financial-request/financial-repor
 import {
   ApprovalStatus,
   AttachmentKind,
+  AuditAction,
   DeductionStatus,
   FinanceRole,
   FinancialRequestType,
@@ -1233,5 +1239,121 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         items: [{ description: 'x', quantity: '1', unitPrice: '1000' }],
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('Kiểm soát chọn tài khoản + đính kèm khi duyệt; khoản chi vào Tổng hợp thu chi', async () => {
+    await ds.query(
+      `INSERT INTO cash_accounts (code, name, "groupCode") VALUES ('1121', 'TK Techcombank - ICHI', '112')
+       ON CONFLICT (code) DO NOTHING`,
+    );
+    const req = await newAdvance(400_000);
+    await requests.submit(U.A, req.id);
+    const current = async () => {
+      const detail = await requests.detail(U.D, req.id);
+      return detail.steps.find(
+        (s) =>
+          s.round === detail.currentRound && s.status === StepStatus.PENDING,
+      )!;
+    };
+    const controlFile = () => [file('UNC kiểm soát.pdf', PDF_BYTES)];
+
+    // Cấp quản lý trực tiếp: không chọn được tài khoản, không đính kèm chứng từ kiểm soát.
+    const managerStep = await current();
+    expect((await requests.detail(U.M, req.id)).permissions.isControlStep).toBe(
+      false,
+    );
+    await expect(
+      requests.approve(U.M, req.id, {
+        stepId: managerStep.id,
+        cashAccountCode: '1121',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      requests.uploadAttachments(U.M, req.id, controlFile(), {
+        kind: AttachmentKind.CONTROL_EVIDENCE,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await requests.approve(U.M, req.id, { stepId: managerStep.id });
+
+    // Cấp kiểm soát: chỉ người duyệt cấp đó đính kèm + chọn tài khoản hợp lệ.
+    const controlStep = await current();
+    expect((await requests.detail(U.C, req.id)).permissions.isControlStep).toBe(
+      true,
+    );
+    await expect(
+      requests.uploadAttachments(U.O, req.id, controlFile(), {
+        kind: AttachmentKind.CONTROL_EVIDENCE,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const attached = await requests.uploadAttachments(
+      U.C,
+      req.id,
+      controlFile(),
+      { kind: AttachmentKind.CONTROL_EVIDENCE },
+    );
+    expect(
+      attached.attachments
+        .filter((a) => a.kind === AttachmentKind.CONTROL_EVIDENCE)
+        .map((a) => a.originalName),
+    ).toEqual(['UNC kiểm soát.pdf']);
+    await expect(
+      requests.approve(U.C, req.id, {
+        stepId: controlStep.id,
+        cashAccountCode: 'KHONG-CO',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    const afterControl = await requests.approve(U.C, req.id, {
+      stepId: controlStep.id,
+      cashAccountCode: '1121',
+    });
+    expect(afterControl.controlCashAccountCode).toBe('1121');
+    expect(
+      afterControl.audit.some(
+        (log) =>
+          log.action === AuditAction.APPROVED_STEP &&
+          (log.changes as Record<string, unknown> | null)?.cashAccount ===
+            '1121',
+      ),
+    ).toBe(true);
+    // Qua cấp rồi thì không đính kèm chứng từ kiểm soát nữa.
+    await expect(
+      requests.uploadAttachments(U.C, req.id, controlFile(), {
+        kind: AttachmentKind.CONTROL_EVIDENCE,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    await approveAll(req.id);
+    await ledger.recordPayment(
+      req.id,
+      {
+        amount: 400_000,
+        date: '2026-10-30',
+        method: PaymentMethod.BANK_TRANSFER,
+        cashAccountCode: '1121',
+        idempotencyKey: idem(),
+      },
+      U.T,
+    );
+    const [{ id: paymentId }] = await ds.query(
+      `SELECT id FROM financial_payments WHERE request_id = $1`,
+      [req.id],
+    );
+    const movements = await ds.query<FinancialMovementRow[]>(
+      FINANCIAL_MOVEMENTS_SQL,
+    );
+    const { lines } = mapFinancialMovements(
+      movements.filter((m) => m.request_id === req.id),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      key: `FINANCIAL_PAYMENT:${paymentId}`,
+      postingDate: '2026-10-30',
+      documentNo: afterControl.code,
+      accountCode: '1121',
+      payment: 40_000_000n,
+      receipt: 0n,
+      partnerName: U.A.name,
+      source: { type: 'FINANCIAL_REQUEST', financialRequestId: req.id },
+    });
   });
 });
