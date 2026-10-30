@@ -49,6 +49,7 @@ import { RecruitmentModule } from './recruitment/recruitment.module';
 import { CashflowReportModule } from './cashflow-report/cashflow-report.module';
 import { FinancialRequestModule } from './financial-request/financial-request.module';
 import { OtherCashflowModule } from './other-cashflow/other-cashflow.module';
+import { AccountingSummaryModule } from './accounting-summary/accounting-summary.module';
 import { resolveDatabaseOptions } from './database/database-options';
 
 @Module({
@@ -109,6 +110,7 @@ import { resolveDatabaseOptions } from './database/database-options';
     CashflowReportModule,
     FinancialRequestModule,
     OtherCashflowModule,
+    AccountingSummaryModule,
   ],
 })
 export class AppModule {}
