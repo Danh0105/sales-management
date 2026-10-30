@@ -6,7 +6,13 @@ import {
 
 import { InjectRepository } from '@nestjs/typeorm';
 
-import { DataSource, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  EntityTarget,
+  ObjectLiteral,
+  Repository,
+} from 'typeorm';
 
 import { School } from '../school/schools.entity';
 
@@ -23,8 +29,10 @@ import {
   assertNotFinalized,
   buildManagementExpenseItemData,
   buildManagementPaymentData,
+  buildPaymentDateSourceData,
   buildRevenueItemData,
   buildSchoolExpenseItemData,
+  canEditLockedDateSource,
   canEditLockedManagementPayments,
   computeOtherCostRows,
   normalizeSharedFields,
@@ -33,6 +41,37 @@ import { AuthUser } from '../type/auth-user.type';
 
 /** Giữ đồng bộ với `SALESADMIN_ROLES` trong real-expenses.controller.ts. */
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
+
+/**
+ * Ghi một nhóm cột lên các dòng cũ, khớp theo `id` client gửi kèm (không theo
+ * vị trí) — xoá / thêm dòng ở client không làm ghi nhầm sang dòng khác; dòng
+ * không khớp id thì bỏ qua. Trả về snapshot cho lịch sử.
+ */
+async function updateRowsById<R extends { id: number; rowIndex: number }>(
+  manager: EntityManager,
+  entity: EntityTarget<ObjectLiteral>,
+  oldRows: R[],
+  items: unknown,
+  build: (item: any, old: R) => ObjectLiteral,
+) {
+  const byId = new Map<number, any>(
+    (Array.isArray(items) ? items : [])
+      .filter((item: any) => item?.id)
+      .map((item: any) => [Number(item.id), item]),
+  );
+  const snapshot: ObjectLiteral[] = [];
+
+  for (const old of oldRows) {
+    const item = byId.get(old.id);
+    if (!item) continue;
+
+    const data = build(item, old);
+    await manager.update(entity, { id: old.id }, data);
+    snapshot.push({ rowIndex: old.rowIndex, ...data });
+  }
+
+  return snapshot;
+}
 
 @Injectable()
 export class RealExpensesService {
@@ -342,7 +381,11 @@ export class RealExpensesService {
       throw new NotFoundException('SchoolExpense not found');
     }
 
-    assertNotFinalized(schoolExpense);
+    // Kỳ đã "Kết thúc": khoá hết, trừ Ngày chi + Nguồn chi (xem
+    // saveFinalizedDateSource) — sales admin vẫn bị chặn hẳn.
+    const finalizedDateSourceOnly =
+      schoolExpense.finalized && canEditLockedDateSource(user?.roles);
+    if (!finalizedDateSourceOnly) assertNotFinalized(schoolExpense);
 
     const subject = await this.subjectRepository.findOne({
       where: {
@@ -372,6 +415,17 @@ export class RealExpensesService {
       }),
     ]);
 
+    if (finalizedDateSourceOnly) {
+      await this.saveFinalizedDateSource(
+        schoolExpenseId,
+        body,
+        user,
+        oldSchoolExpense,
+        oldManagement,
+      );
+      return await this.getItems(schoolExpenseId, body.subjectId);
+    }
+
     // Map "Chi khác" cũ theo rowIndex — dùng khi client KHÔNG gửi `otherCosts`
     // (giữ nguyên dữ liệu cũ để tương thích client cũ).
     const oldOtherCostsByRow = new Map<number, any[]>();
@@ -396,6 +450,11 @@ export class RealExpensesService {
     // dòng cũ (Ngày chi, Nguồn chi, Đã chi, Người chi, Ghi chú).
     const managementPaymentOnly =
       managementLocked && canEditLockedManagementPayments(user?.roles);
+    // Trợ lý GĐ / giám đốc: khoá rồi chỉ còn Ngày chi + Nguồn chi.
+    const managementDateSourceOnly =
+      managementLocked &&
+      !managementPaymentOnly &&
+      canEditLockedDateSource(user?.roles);
 
     // Sales admin chỉ được sửa DUY NHẤT bảng "Chi Ngoài" — dùng chung endpoint
     // save-all (đỡ phải tách API riêng) nhưng bỏ qua hoàn toàn phần doanh thu
@@ -572,32 +631,23 @@ export class RealExpensesService {
       }
 
       // Bảng đã khoá: chỉ ghi cột chi lên dòng cũ — không thêm / xoá dòng, phần
-      // chính sách (đơn giá, thuế, Chi khác, Chi ngoài) giữ nguyên. Khớp theo
-      // `id` dòng client gửi kèm (không theo vị trí) để xoá dòng Doanh thu làm
-      // lệch thứ tự cũng không ghi nhầm sang dòng khác.
-      if (managementPaymentOnly && Array.isArray(body.managementExpenseItems)) {
-        const bodyById = new Map(
-          body.managementExpenseItems
-            .filter((item: any) => item?.id)
-            .map((item: any) => [Number(item.id), item]),
-        );
-
-        for (const old of oldManagement) {
-          const item = bodyById.get(old.id);
-          if (!item) continue;
-
-          const payment = buildManagementPaymentData(
-            item,
-            Number(old.totalOutside ?? 0),
-          );
-
-          await queryRunner.manager.update(
+      // chính sách (đơn giá, thuế, Chi khác, Chi ngoài) giữ nguyên.
+      if (managementPaymentOnly || managementDateSourceOnly) {
+        newManagementSnapshot.push(
+          ...(await updateRowsById(
+            queryRunner.manager,
             ManagementExpenseItem,
-            { id: old.id },
-            payment,
-          );
-          newManagementSnapshot.push({ rowIndex: old.rowIndex, ...payment });
-        }
+            oldManagement,
+            body.managementExpenseItems,
+            (item, old) =>
+              managementPaymentOnly
+                ? buildManagementPaymentData(
+                    item,
+                    Number(old.totalOutside ?? 0),
+                  )
+                : buildPaymentDateSourceData(item),
+          )),
+        );
       }
 
       await queryRunner.manager.save(SchoolExpenseHistory, {
@@ -629,6 +679,64 @@ export class RealExpensesService {
     }
 
     return await this.getItems(schoolExpenseId, body.subjectId);
+  }
+
+  /**
+   * Kỳ đã "Kết thúc": chỉ ghi Ngày chi + Nguồn chi lên các dòng Chi Trường /
+   * Chi Ngoài đã có — doanh thu, đơn giá, Đã chi, Người chi... giữ nguyên.
+   */
+  private async saveFinalizedDateSource(
+    schoolExpenseId: number,
+    body: any,
+    user: AuthUser | undefined,
+    oldSchoolExpense: SchoolExpenseItem[],
+    oldManagement: ManagementExpenseItem[],
+  ) {
+    const queryRunner = this.dataSource.createQueryRunner();
+
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const schoolExpenseItems = await updateRowsById(
+        queryRunner.manager,
+        SchoolExpenseItem,
+        oldSchoolExpense,
+        body.schoolExpenseItems,
+        buildPaymentDateSourceData,
+      );
+      const managementExpenseItems = await updateRowsById(
+        queryRunner.manager,
+        ManagementExpenseItem,
+        oldManagement,
+        body.managementExpenseItems,
+        buildPaymentDateSourceData,
+      );
+
+      await queryRunner.manager.save(SchoolExpenseHistory, {
+        schoolExpenseId,
+        updatedById: user?.id,
+        updatedByName: user?.name,
+        action: 'SAVE_ALL',
+        entityType: 'school_expense',
+        oldData: {
+          schoolExpenseItems: oldSchoolExpense,
+          managementExpenseItems: oldManagement,
+        },
+        newData: {
+          subjectId: body.subjectId,
+          schoolExpenseItems,
+          managementExpenseItems,
+        },
+      });
+
+      await queryRunner.commitTransaction();
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   async getItems(schoolExpenseId: number, subjectId: number) {
