@@ -18,6 +18,7 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
 | Chi Ngoài                 | `management_expense_items`                  | Chi                         | `expenseDate`                     | `cashAccount` ("Nguồn chi")                                                            | `paidAmount` ("Đã chi")                                                                                                                     |
 | Đề xuất chi: xuất tiền    | `suggest_history` (`CONFIRM_CASH_RELEASED`) | Chi                         | ngày của sự kiện                  | `data.cashAccount`; lần xuất cuối cùng lấy thêm từ `suggest_payment_order.cashAccount` | snapshot lệnh chi gần nhất trước lần xuất (`CREATE_PAYMENT_ORDER.data.paymentOrder.amount`), nếu không có thì lấy số tiền lệnh chi hiện tại |
 | Đề xuất chi: nhận lại quỹ | `suggest_history` (`CONFIRM_FUND_RETURNED`) | Thu                         | ngày của sự kiện                  | cùng tài khoản với lần xuất đang mở                                                    | cùng số tiền với lần xuất đang mở                                                                                                           |
+| Thu Chi ngoài             | `other_cashflow_entries` (`RECORDED`)       | Thu (`flow` `IN`) / Chi (`OUT`) | `entry_date`                  | `cash_account_code` thủ quỹ chọn ở từng lần thu/chi                                    | `amount`                                                                                                                                    |
 
 - "Đã thu" (`revenue_items.paidAmount`) **không** được cộng thẳng vào sổ: chỉ khoản ở
   Hóa Đơn được tính, để không ghi trùng. Dòng có Đã thu mà chưa có khoản Thu ở Hóa Đơn sẽ
@@ -27,6 +28,10 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
   `HD|CT|CN-<phiếu thu chi>-<môn>-<dòng>`.
 - Đối tượng: trường → `TR<id>`; người đề xuất → `NV<id>`. Trường và nhân viên chưa có cột
   mã riêng.
+- Thu Chi ngoài: số chứng từ = mã hợp đồng `TCN-<id>`, đối tượng = trường gắn với hợp đồng
+  (`TR<id>`, không gắn thì để trống) + tên đối tác. Đơn Thương mại: thu tiền hàng là bút toán
+  thu; chi từng khoản chi phí là bút toán chi, đối tượng = người nhận chi phí. Lần thu/chi đã
+  huỷ (`VOIDED`) không vào sổ. Xem `OTHER-CASHFLOW.md`.
 - Ngày: tính theo giờ Việt Nam (timezone của DB là `Asia/Ho_Chi_Minh`). Khoảng ngày lọc
   tính cả ngày đầu và ngày cuối.
 

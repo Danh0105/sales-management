@@ -36,6 +36,11 @@ import {
   SuggestEventRow,
 } from './cashflow-sources';
 import {
+  mapOtherCashflowEntries,
+  OTHER_CASHFLOW_ENTRIES_SQL,
+  OtherCashflowEntryRow,
+} from './other-cashflow-source';
+import {
   CashAccountInfo,
   CashGroup,
   CollectedLedger,
@@ -110,21 +115,30 @@ export class CashflowReportService {
     }));
   }
 
-  /** Gom bút toán từ 4 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
+  /** Gom bút toán từ 5 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
   async collect(accounts: CashAccountInfo[]): Promise<CollectedLedger> {
-    const [invoiceRows, schoolRows, managementRows, suggestEvents] =
-      await Promise.all([
-        this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
-        this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
-        this.dataSource.query<ExpenseRow[]>(MANAGEMENT_EXPENSE_ROWS_SQL),
-        this.dataSource.query<SuggestEventRow[]>(SUGGEST_EVENTS_SQL),
-      ]);
+    const [
+      invoiceRows,
+      schoolRows,
+      managementRows,
+      suggestEvents,
+      otherCashflowEntries,
+    ] = await Promise.all([
+      this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
+      this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
+      this.dataSource.query<ExpenseRow[]>(MANAGEMENT_EXPENSE_ROWS_SQL),
+      this.dataSource.query<SuggestEventRow[]>(SUGGEST_EVENTS_SQL),
+      this.dataSource.query<OtherCashflowEntryRow[]>(
+        OTHER_CASHFLOW_ENTRIES_SQL,
+      ),
+    ]);
 
     const parts = [
       mapInvoiceRows(invoiceRows),
       mapExpenseRows(schoolRows, 'SCHOOL_EXPENSE'),
       mapExpenseRows(managementRows, 'MANAGEMENT_EXPENSE'),
       mapSuggestEvents(suggestEvents),
+      mapOtherCashflowEntries(otherCashflowEntries),
     ];
 
     return validateLines(
