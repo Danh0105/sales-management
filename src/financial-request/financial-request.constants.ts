@@ -137,7 +137,7 @@ export const FINANCE_ROLE_LABELS: Record<FinanceRole, string> = {
   [FinanceRole.CONTROLLER]: 'Bộ phận kiểm soát',
   [FinanceRole.ACCOUNTANT]: 'Kế toán',
   [FinanceRole.CASHIER]: 'Thủ quỹ',
-  [FinanceRole.DIRECTOR]: 'BGĐ/Trưởng phòng duyệt',
+  [FinanceRole.DIRECTOR]: 'Giám đốc duyệt',
   [FinanceRole.ADMIN]: 'Quản trị phân hệ',
   [FinanceRole.VIEWER]: 'Xem báo cáo',
 };
@@ -179,7 +179,7 @@ export const SIGNATURE_SLOT_LABELS: Record<SignatureSlot, string> = {
   [SignatureSlot.MANAGER]: 'Quản lý trực tiếp',
   [SignatureSlot.CONTROLLER]: 'Bộ phận kiểm soát',
   [SignatureSlot.ACCOUNTANT]: 'Kế toán',
-  [SignatureSlot.DIRECTOR]: 'BGĐ/TP duyệt',
+  [SignatureSlot.DIRECTOR]: 'Giám đốc duyệt',
 };
 
 /** Người đề nghị trùng người duyệt của một bước. */
