@@ -52,6 +52,13 @@ export class ApproveStepDto {
   @MaxLength(2000)
   comment?: string;
 
+  /** Bắt buộc ở bước Bộ phận kiểm soát; tài khoản tiền nội bộ 111/112. */
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(20)
+  paymentAccountCode?: string;
+
   /** Số tiền chấp nhận theo dòng (chỉ bước được phép điều chỉnh). */
   @IsOptional()
   @IsArray()

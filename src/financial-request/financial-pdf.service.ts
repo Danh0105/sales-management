@@ -229,6 +229,12 @@ export class FinancialPdfService {
         PAYMENT_METHOD_LABELS[detail.paymentMethod],
       ]);
     }
+    if (detail.paymentAccountCode) {
+      info.push([
+        'Tài khoản thanh toán',
+        `${detail.paymentAccountCode}${detail.paymentAccountName ? ` — ${detail.paymentAccountName}` : ''}`,
+      ]);
+    }
     if (detail.paymentMethod === PaymentMethod.BANK_TRANSFER) {
       info.push(['Ngân hàng', detail.bankName ?? '']);
       info.push([

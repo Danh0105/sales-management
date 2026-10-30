@@ -49,9 +49,11 @@ import {
   FinanceRole,
   FinancialRequestType,
   MovementStatus,
+  PaymentMethod,
   RecoveryStatus,
   SettlementStatus,
 } from './financial-request.constants';
+import { paymentAccountGroup } from './financial-payment-account';
 import {
   formatVnd,
   requireText,
@@ -418,13 +420,24 @@ export class FinancialLedgerService {
   // Chi tiền / thu hồi
   // ---------------------------------------------------------------------------
 
-  private async assertCashAccount(manager: EntityManager, code?: string) {
+  private async assertCashAccount(
+    manager: EntityManager,
+    code?: string,
+    method?: PaymentMethod,
+  ) {
     if (!code) return null;
     const account = await manager
       .getRepository(CashAccount)
       .findOne({ where: { code } });
     if (!account || !account.isActive) {
       throw new BadRequestException(`Tài khoản tiền "${code}" không hợp lệ`);
+    }
+    if (method && account.groupCode !== paymentAccountGroup(method)) {
+      throw new BadRequestException(
+        method === PaymentMethod.CASH
+          ? 'Chi/thu tiền mặt chỉ được dùng tài khoản nhóm 111'
+          : 'Chi/thu chuyển khoản chỉ được dùng tài khoản nhóm 112',
+      );
     }
     return code;
   }
@@ -498,6 +511,15 @@ export class FinancialLedgerService {
           `Số tiền chi ${formatVnd(dto.amount)} đ vượt số còn phải chi ${formatVnd(remaining)} đ`,
         );
       }
+      if (
+        request.paymentAccountCode &&
+        dto.cashAccountCode &&
+        request.paymentAccountCode !== dto.cashAccountCode
+      ) {
+        throw new BadRequestException(
+          'Tài khoản chi tiền phải đúng tài khoản Bộ phận kiểm soát đã chọn',
+        );
+      }
       const payment = await manager.getRepository(FinancialPayment).save(
         manager.getRepository(FinancialPayment).create({
           requestId: id,
@@ -506,7 +528,8 @@ export class FinancialLedgerService {
           method: dto.method,
           cashAccountCode: await this.assertCashAccount(
             manager,
-            dto.cashAccountCode,
+            request.paymentAccountCode ?? dto.cashAccountCode,
+            dto.method,
           ),
           transactionRef: dto.transactionRef || null,
           note: dto.note || null,
@@ -659,6 +682,7 @@ export class FinancialLedgerService {
           cashAccountCode: await this.assertCashAccount(
             manager,
             dto.cashAccountCode,
+            dto.method,
           ),
           transactionRef: dto.transactionRef || null,
           note: dto.note || null,

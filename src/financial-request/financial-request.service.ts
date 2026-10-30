@@ -87,6 +87,10 @@ import {
 } from './financial-money';
 import { openStoredFile, storeFile } from './financial-storage';
 import {
+  isControllerApprovalStep,
+  paymentAccountGroup,
+} from './financial-payment-account';
+import {
   nextStepsAfterDecision,
   pickWorkflow,
   planSteps,
@@ -570,38 +574,51 @@ export class FinancialRequestService {
     steps: FinancialApprovalStep[],
   ) {
     const manager = this.dataSource.manager;
-    const [items, attachments, payments, refunds, deductions, audit, workflow] =
-      await Promise.all([
-        this.itemRepo.find({
-          where: { requestId: request.id },
-          order: { lineNo: 'ASC' },
-        }),
-        this.attachmentRepo.find({
-          where: { requestId: request.id },
-          order: { createdAt: 'ASC' },
-        }),
-        manager.getRepository(FinancialPayment).find({
-          where: { requestId: request.id },
-          order: { createdAt: 'ASC' },
-        }),
-        manager.getRepository(FinancialRefund).find({
-          where: { requestId: request.id },
-          order: { createdAt: 'ASC' },
-        }),
-        manager.getRepository(FinancialSalaryAdvanceDeduction).find({
-          where: { requestId: request.id },
-          order: { periodYear: 'ASC', periodMonth: 'ASC' },
-        }),
-        manager.getRepository(FinancialAuditLog).find({
-          where: { requestId: request.id },
-          order: { createdAt: 'DESC', id: 'DESC' },
-        }),
-        request.workflowId
-          ? manager
-              .getRepository(FinancialApprovalWorkflow)
-              .findOne({ where: { id: request.workflowId } })
-          : Promise.resolve(null),
-      ]);
+    const [
+      items,
+      attachments,
+      payments,
+      refunds,
+      deductions,
+      audit,
+      workflow,
+      paymentAccount,
+    ] = await Promise.all([
+      this.itemRepo.find({
+        where: { requestId: request.id },
+        order: { lineNo: 'ASC' },
+      }),
+      this.attachmentRepo.find({
+        where: { requestId: request.id },
+        order: { createdAt: 'ASC' },
+      }),
+      manager.getRepository(FinancialPayment).find({
+        where: { requestId: request.id },
+        order: { createdAt: 'ASC' },
+      }),
+      manager.getRepository(FinancialRefund).find({
+        where: { requestId: request.id },
+        order: { createdAt: 'ASC' },
+      }),
+      manager.getRepository(FinancialSalaryAdvanceDeduction).find({
+        where: { requestId: request.id },
+        order: { periodYear: 'ASC', periodMonth: 'ASC' },
+      }),
+      manager.getRepository(FinancialAuditLog).find({
+        where: { requestId: request.id },
+        order: { createdAt: 'DESC', id: 'DESC' },
+      }),
+      request.workflowId
+        ? manager
+            .getRepository(FinancialApprovalWorkflow)
+            .findOne({ where: { id: request.workflowId } })
+        : Promise.resolve(null),
+      request.paymentAccountCode
+        ? manager
+            .getRepository(CashAccount)
+            .findOne({ where: { code: request.paymentAccountCode } })
+        : Promise.resolve(null),
+    ]);
 
     const allocations =
       request.type === FinancialRequestType.SETTLEMENT
@@ -698,6 +715,8 @@ export class FinancialRequestService {
         ? request.bankAccountNumber
         : FinancialAccessService.maskAccount(request.bankAccountNumber),
       paymentMethod: request.paymentMethod,
+      paymentAccountCode: request.paymentAccountCode,
+      paymentAccountName: paymentAccount?.name ?? null,
       paymentNote: request.paymentNote,
       currency: request.currency,
       totalAmount: request.totalAmount,
@@ -891,6 +910,8 @@ export class FinancialRequestService {
         actionableStepId: actionable?.id ?? null,
         canApprove: !!actionable,
         canAdjust: !!actionable?.canAdjustAmounts,
+        requiresPaymentAccount:
+          !!actionable && isControllerApprovalStep(actionable),
         canSkip: ctx.isAdmin && currentPending.some((s) => s.skippable),
         canRecordPayment:
           request.approvalStatus === ApprovalStatus.APPROVED &&
@@ -1871,6 +1892,8 @@ export class FinancialRequestService {
       request.workflowId = workflow.id;
       request.workflowName = workflow.name;
       request.isSequential = workflow.isSequential;
+      // Mỗi vòng duyệt phải được Bộ phận kiểm soát chọn lại trên dữ liệu mới.
+      request.paymentAccountCode = null;
       request.version += 1;
       await manager.getRepository(FinancialRequest).save(request);
       await writeAudit(manager, {
@@ -2147,6 +2170,43 @@ export class FinancialRequestService {
       const request = await this.ledger.lockRequest(manager, id);
       const { step, onBehalfOfId, onBehalfOfName } =
         await this.lockActionableStep(manager, ctx, request, dto.stepId);
+      const controllerStep = isControllerApprovalStep(step);
+      let paymentAccountChange:
+        | { from: string | null; to: string; name: string }
+        | undefined;
+      if (controllerStep) {
+        const code = requireText(
+          dto.paymentAccountCode,
+          'Bộ phận kiểm soát phải chọn tài khoản thanh toán',
+        );
+        const account = await manager
+          .getRepository(CashAccount)
+          .findOne({ where: { code } });
+        if (!account || !account.isActive) {
+          throw new BadRequestException(
+            `Tài khoản thanh toán "${code}" không hợp lệ hoặc đã ngừng sử dụng`,
+          );
+        }
+        const expectedGroup = paymentAccountGroup(request.paymentMethod);
+        if (account.groupCode !== expectedGroup) {
+          throw new BadRequestException(
+            request.paymentMethod === PaymentMethod.CASH
+              ? 'Phiếu tiền mặt chỉ được chọn tài khoản nhóm 111'
+              : 'Phiếu chuyển khoản chỉ được chọn tài khoản nhóm 112',
+          );
+        }
+        paymentAccountChange = {
+          from: request.paymentAccountCode,
+          to: account.code,
+          name: account.name,
+        };
+        request.paymentAccountCode = account.code;
+        await manager.getRepository(FinancialRequest).save(request);
+      } else if (dto.paymentAccountCode) {
+        throw new BadRequestException(
+          'Chỉ bước Bộ phận kiểm soát được chọn tài khoản thanh toán',
+        );
+      }
       await this.applyAdjustments(
         manager,
         ctx,
@@ -2172,6 +2232,9 @@ export class FinancialRequestService {
           step: step.name,
           stepOrder: step.stepOrder,
           round: step.round,
+          ...(paymentAccountChange
+            ? { paymentAccount: paymentAccountChange }
+            : {}),
           ...(onBehalfOfName ? { onBehalfOf: onBehalfOfName } : {}),
         },
       });

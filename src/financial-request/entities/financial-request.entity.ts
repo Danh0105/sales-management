@@ -261,6 +261,15 @@ export class FinancialRequest {
   })
   paymentMethod!: PaymentMethod | null;
 
+  /** Tài khoản 111/112 do Bộ phận kiểm soát chọn khi duyệt. */
+  @Column({
+    name: 'payment_account_code',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  paymentAccountCode!: string | null;
+
   @Column({ name: 'payment_note', type: 'text', nullable: true })
   paymentNote!: string | null;
 
