@@ -455,7 +455,7 @@ export function buildManagementExpenseItemData(
 
 /**
  * Bảng "Chi Ngoài" đã xác nhận BBCS: ngoài kế toán trưởng, các role này vẫn
- * nhập được phần chi (xem `buildManagementPaymentData`); role khác bị khoá hẳn.
+ * nhập được phần chi (xem `buildManagementPaymentData`).
  */
 export const LOCKED_MANAGEMENT_PAYMENT_ROLES = [
   'accountant',
@@ -468,6 +468,32 @@ export function canEditLockedManagementPayments(roles?: string[] | null) {
 }
 
 /**
+ * Ngày chi + Nguồn chi vẫn sửa được khi "Chi Ngoài" đã khoá BBCS (trợ lý GĐ,
+ * giám đốc) và khi kỳ đã "Kết thúc" (Chi Trường + Chi Ngoài) — mọi role ghi
+ * thu chi, trừ sales admin.
+ */
+export const LOCKED_DATE_SOURCE_ROLES = [
+  'ketoan_truong',
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+  'troly_gd',
+  'director',
+];
+
+export function canEditLockedDateSource(roles?: string[] | null) {
+  return (roles ?? []).some((r) => LOCKED_DATE_SOURCE_ROLES.includes(r));
+}
+
+/** Ngày chi + Nguồn chi của một dòng Chi Trường / Chi Ngoài. */
+export function buildPaymentDateSourceData(item: any) {
+  return {
+    expenseDate: item?.expenseDate || null,
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
+  };
+}
+
+/**
  * Cột chi của một dòng "Chi Ngoài": Ngày chi, Nguồn chi, Đã chi, Người chi,
  * Ghi chú (+ Còn lại = Chi ngoài − Đã chi).
  */
@@ -477,11 +503,10 @@ export function buildManagementPaymentData(item: any, totalOutside: number) {
   assertNonNegative({ paidAmount });
 
   return {
-    expenseDate: item?.expenseDate || null,
+    ...buildPaymentDateSourceData(item),
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer || null,
-    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
     note: item?.note || null,
   };
 }
