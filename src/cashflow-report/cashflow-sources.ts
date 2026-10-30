@@ -14,6 +14,8 @@ import {
  * - Chi Ngoài (management_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi".
  * - Đề nghị chi (suggest_history): mỗi lần thủ quỹ xác nhận xuất tiền là một
  *   bút toán chi, mỗi lần nhận lại quỹ là một bút toán thu cùng tài khoản.
+ * - Đề nghị tài chính nội bộ: phiếu chi đã ghi nhận là bút toán chi, phiếu
+ *   hoàn trả đã ghi nhận là bút toán thu; phiếu đã huỷ không được tính.
  * Ngày lấy theo giờ Việt Nam (timezone của DB). Thiếu thông tin thì thành lỗi
  * trong danh sách "Chưa phân loại" — không đoán tài khoản.
  */
@@ -71,6 +73,22 @@ export interface SuggestEventRow {
   po_amount: string | null;
   po_cash_account: string | null;
   po_created_date: string | null;
+}
+
+export interface FinancialMovementRow {
+  direction: 'PAYMENT' | 'REFUND';
+  movement_id: number;
+  request_id: number;
+  request_code: string;
+  request_type: string;
+  title: string;
+  posting_date: string | null;
+  cash_account: string | null;
+  amount: string | null;
+  transaction_ref: string | null;
+  requester_id: number;
+  requester_code: string | null;
+  requester_name: string;
 }
 
 const ROW_CONTEXT_SELECT = `
@@ -148,6 +166,46 @@ WHERE h.action IN (
   'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
+
+/**
+ * Phiếu chi/thu thực tế của Đề nghị tài chính; không lấy giao dịch đã huỷ.
+ * Phiếu chi cũ chưa chụp mã tài khoản thì dùng lựa chọn của Bộ phận kiểm soát.
+ */
+export const FINANCIAL_MOVEMENTS_SQL = `
+SELECT 'PAYMENT' AS direction,
+  p.id AS movement_id,
+  r.id AS request_id,
+  r.code AS request_code,
+  r.type AS request_type,
+  r.title,
+  to_char(p.paid_at, 'YYYY-MM-DD') AS posting_date,
+  COALESCE(p.cash_account_code, r.control_cash_account_code) AS cash_account,
+  p.amount::text AS amount,
+  p.transaction_ref,
+  r.requester_id,
+  r.requester_code,
+  r.requester_name
+FROM financial_payments p
+JOIN financial_requests r ON r.id = p.request_id
+WHERE p.status = 'RECORDED'
+UNION ALL
+SELECT 'REFUND' AS direction,
+  f.id AS movement_id,
+  r.id AS request_id,
+  r.code AS request_code,
+  r.type AS request_type,
+  r.title,
+  to_char(f.received_at, 'YYYY-MM-DD') AS posting_date,
+  f.cash_account_code AS cash_account,
+  f.amount::text AS amount,
+  f.transaction_ref,
+  r.requester_id,
+  r.requester_code,
+  r.requester_name
+FROM financial_refunds f
+JOIN financial_requests r ON r.id = f.request_id
+WHERE f.status = 'RECORDED'
+ORDER BY posting_date, movement_id`;
 
 /** Gom khoảng trắng (tab/xuống dòng nhập kèm nội dung) cho cột Diễn giải. */
 function clean(text: string): string {
@@ -515,6 +573,76 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
         });
       }
     }
+  }
+
+  return { lines, issues };
+}
+
+/** Chuyển các lần chi/hoàn trả của Đề nghị tài chính thành bút toán quỹ. */
+export function mapFinancialMovements(
+  rows: FinancialMovementRow[],
+): CollectedLedger {
+  const lines: LedgerLine[] = [];
+  const issues: LedgerIssue[] = [];
+
+  for (const row of rows) {
+    const amount = toCents(row.amount);
+    const isReceipt = row.direction === 'REFUND';
+    const key = `FINANCIAL_REQUEST:${row.direction}:${row.movement_id}`;
+    const source: LedgerSourceRef = {
+      type: 'FINANCIAL_REQUEST',
+      requestId: row.request_id,
+    };
+    const description = clean(
+      `${isReceipt ? 'Thu hoàn trả' : 'Chi đề nghị tài chính'} ${row.request_code}: ${row.title}`,
+    );
+    const base = {
+      key,
+      date: row.posting_date,
+      amount,
+      accountCode: row.cash_account,
+      documentNo: row.request_code,
+      description,
+      source,
+    };
+
+    if (amount <= 0n) continue;
+    if (!row.cash_account) {
+      issues.push(
+        issue(
+          'MISSING_ACCOUNT',
+          `${isReceipt ? 'Phiếu hoàn trả' : 'Phiếu chi'} chưa có tài khoản tiền`,
+          base,
+        ),
+      );
+      continue;
+    }
+    if (!row.posting_date) {
+      issues.push(
+        issue(
+          'MISSING_DATE',
+          `${isReceipt ? 'Phiếu hoàn trả' : 'Phiếu chi'} chưa có ngày hạch toán`,
+          base,
+        ),
+      );
+      continue;
+    }
+
+    lines.push({
+      key,
+      postingDate: row.posting_date,
+      documentDate: row.posting_date,
+      documentNo: row.request_code,
+      invoiceNo: row.transaction_ref,
+      description,
+      accountCode: row.cash_account,
+      receipt: isReceipt ? amount : 0n,
+      payment: isReceipt ? 0n : amount,
+      partnerCode: row.requester_code ?? `NV${row.requester_id}`,
+      partnerName: row.requester_name,
+      isInternalTransfer: false,
+      source,
+    });
   }
 
   return { lines, issues };

@@ -1,9 +1,12 @@
 import { toCents } from './cashflow-money';
 import {
   ExpenseRow,
+  FINANCIAL_MOVEMENTS_SQL,
+  FinancialMovementRow,
   flagSuspiciousAmounts,
   InvoiceRow,
   mapExpenseRows,
+  mapFinancialMovements,
   mapInvoiceRows,
   mapSuggestEvents,
   SuggestEventRow,
@@ -30,6 +33,25 @@ const invoice = (overrides: Partial<InvoiceRow> = {}): InvoiceRow => ({
   cash_direction: 'IN',
   cash_amount: '87100000.00',
   paid_amount: '87100000.00',
+  ...overrides,
+});
+
+const financialMovement = (
+  overrides: Partial<FinancialMovementRow> = {},
+): FinancialMovementRow => ({
+  direction: 'PAYMENT',
+  movement_id: 41,
+  request_id: 9,
+  request_code: 'TT-2026-00009',
+  request_type: 'EXPENSE_PAYMENT',
+  title: 'Thanh toán chi phí sự kiện',
+  posting_date: '2026-10-30',
+  cash_account: '1121',
+  amount: '2500000',
+  transaction_ref: 'FT-123456',
+  requester_id: 22,
+  requester_code: 'NV0022',
+  requester_name: 'Nguyễn Văn A',
   ...overrides,
 });
 
@@ -248,6 +270,61 @@ describe('mapSuggestEvents', () => {
     ).toEqual({
       lines: [],
       issues: [],
+    });
+  });
+});
+
+describe('mapFinancialMovements', () => {
+  it('nguồn SQL chỉ lấy giao dịch còn hiệu lực và bù tài khoản cho phiếu chi cũ', () => {
+    expect(FINANCIAL_MOVEMENTS_SQL).toContain("p.status = 'RECORDED'");
+    expect(FINANCIAL_MOVEMENTS_SQL).toContain("f.status = 'RECORDED'");
+    expect(FINANCIAL_MOVEMENTS_SQL).toContain(
+      'COALESCE(p.cash_account_code, r.control_cash_account_code)',
+    );
+  });
+
+  it('phiếu chi → bút toán chi đúng tài khoản và liên kết phiếu gốc', () => {
+    const { lines, issues } = mapFinancialMovements([financialMovement()]);
+
+    expect(issues).toEqual([]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      accountCode: '1121',
+      receipt: 0n,
+      payment: toCents('2500000'),
+      documentNo: 'TT-2026-00009',
+      invoiceNo: 'FT-123456',
+      partnerCode: 'NV0022',
+      source: { type: 'FINANCIAL_REQUEST', requestId: 9 },
+    });
+  });
+
+  it('phiếu hoàn trả → bút toán thu', () => {
+    const { lines } = mapFinancialMovements([
+      financialMovement({
+        direction: 'REFUND',
+        movement_id: 8,
+        cash_account: '1111',
+        amount: '300000',
+      }),
+    ]);
+
+    expect(lines[0]).toMatchObject({
+      accountCode: '1111',
+      receipt: toCents('300000'),
+      payment: 0n,
+    });
+  });
+
+  it('giao dịch thiếu tài khoản → chưa phân loại, không cộng vào tổng', () => {
+    const { lines, issues } = mapFinancialMovements([
+      financialMovement({ cash_account: null }),
+    ]);
+
+    expect(lines).toEqual([]);
+    expect(issues[0]).toMatchObject({
+      kind: 'MISSING_ACCOUNT',
+      source: { type: 'FINANCIAL_REQUEST', requestId: 9 },
     });
   });
 });
