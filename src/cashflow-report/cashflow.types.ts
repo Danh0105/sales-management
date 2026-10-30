@@ -20,7 +20,8 @@ export type LedgerSourceType =
   | 'SCHOOL_EXPENSE'
   | 'MANAGEMENT_EXPENSE'
   | 'EXPENSE_REQUEST'
-  | 'FINANCIAL_REQUEST';
+  | 'FINANCIAL_REQUEST'
+  | 'OTHER_CASHFLOW';
 
 /** Chỗ mở chứng từ gốc từ báo cáo. */
 export interface LedgerSourceRef {
@@ -30,6 +31,8 @@ export interface LedgerSourceRef {
   rowIndex?: number;
   suggestId?: number;
   requestId?: number;
+  /** Hợp đồng Thu Chi ngoài. */
+  otherCashflowId?: number;
 }
 
 /** Một bút toán ghi tăng (thu) hoặc ghi giảm (chi) đúng một tài khoản. */
