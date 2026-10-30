@@ -263,7 +263,7 @@ export class FinancialRequest {
 
   /** Tài khoản 111/112 do Bộ phận kiểm soát chọn khi duyệt. */
   @Column({
-    name: 'payment_account_code',
+    name: 'control_cash_account_code',
     type: 'varchar',
     length: 20,
     nullable: true,
