@@ -1181,4 +1181,57 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     const rowA = balances.rows.find((r) => r.employeeId === U.A.id);
     expect(rowA?.advanceOutstanding ?? 0).toBe(0);
   });
+
+  it('Giám đốc và trưởng/phó phòng được chọn làm quản lý trực tiếp', async () => {
+    await employee('H', ['saleadmin', 'truongphong_saleadmin'], dept1);
+
+    const managers = await requests.eligibleManagers(U.A, companyX);
+    const ids = managers.map((m) => m.id);
+    expect(ids).toEqual(expect.arrayContaining([U.D.id, U.H.id, U.M.id]));
+    expect(ids).not.toContain(U.O.id);
+    expect(ids).not.toContain(U.A.id);
+    // Giám đốc đứng trước trưởng/phó phòng, rồi tới người được gán MANAGER.
+    expect(ids.indexOf(U.D.id)).toBeLessThan(ids.indexOf(U.H.id));
+    expect(ids.indexOf(U.H.id)).toBeLessThan(ids.indexOf(U.M.id));
+    expect(managers.find((m) => m.id === U.H.id)?.position).toBe(
+      'Trưởng/phó phòng sale admin',
+    );
+    expect((await requests.meta(U.H)).capabilities.canApprove).toBe(true);
+    expect((await requests.meta(U.O)).capabilities.canApprove).toBe(false);
+
+    const req = await requests.create(U.A, {
+      type: FinancialRequestType.ADVANCE,
+      companyId: companyX,
+      title: 'Tạm ứng mua văn phòng phẩm',
+      directManagerId: U.H.id,
+      paymentMethod: PaymentMethod.CASH,
+      items: [{ description: 'Giấy in', quantity: '1', unitPrice: '200000' }],
+    });
+    expect(req.directManagerName).toBe(U.H.name);
+    await requests.submit(U.A, req.id);
+
+    const inbox = await requests.list(U.H, { scope: 'approvals' });
+    expect(inbox.data.map((r) => r.id)).toContain(req.id);
+    const detail = await requests.detail(U.H, req.id);
+    const step = detail.steps.find(
+      (s) => s.round === detail.currentRound && s.status === StepStatus.PENDING,
+    )!;
+    expect(step.candidates.map((c) => c.id)).toEqual([U.H.id]);
+    await requests.approve(U.H, req.id, { stepId: step.id });
+
+    // Không suy ra vai trò MANAGER: không xem được phiếu không ghi tên mình.
+    await expect(requests.detail(U.H, advanceId)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    await expect(
+      requests.create(U.A, {
+        type: FinancialRequestType.ADVANCE,
+        companyId: companyX,
+        title: 'Chọn người không phải quản lý',
+        directManagerId: U.O.id,
+        paymentMethod: PaymentMethod.CASH,
+        items: [{ description: 'x', quantity: '1', unitPrice: '1000' }],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
 });

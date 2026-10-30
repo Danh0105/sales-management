@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { AuthUser } from '../type/auth-user.type';
 import { HR_ROLE, TEACHER_ROLES } from '../teaching/teaching-roles';
+import { DEPARTMENT_HEAD_ROLES } from './employee-positions';
 
 /**
  * Role dành cho tài khoản dev/test — được TỰ chọn bất kỳ tổ hợp role nào
@@ -30,6 +31,7 @@ export const ALL_BUSINESS_ROLES = [
   'accountant',
   'giaovien_congty',
   'giaovien_ctv',
+  ...DEPARTMENT_HEAD_ROLES,
 ];
 
 export function isDevAccount(user?: AuthUser): boolean {

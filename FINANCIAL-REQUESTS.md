@@ -16,7 +16,7 @@ Module **mới, tách riêng**: không sửa bảng hay luồng "Đề xuất ch
    - `FINANCIAL_STORAGE_DIR`: kho tệp riêng, mặc định `<cwd>/private-uploads/financial`. Thư mục này nằm ngoài `/uploads` công khai. Cần sao lưu cùng dữ liệu.
    - `FINANCIAL_APP_URL`: gốc link trong mã QR trên PDF, mặc định `https://kidoapp.kidoedu.vn`.
 4. Cron nhắc hạn chạy 08:00 hằng ngày, chỉ trên instance `NODE_ENV=production`.
-5. Sau khi deploy, quản trị (role `director`) vào **Quản lý tài chính → Cấu hình quy trình**:
+5. Sau khi deploy, quản trị (role `director`) vào **Đề nghị tài chính nội bộ → Cấu hình quy trình**:
    - Thêm công ty: tên, mã số thuế, địa chỉ, logo, mã biểu mẫu.
    - Gán vai trò: Quản lý trực tiếp theo phòng ban, Bộ phận kiểm soát, Kế toán. Nếu chưa gán, nhân viên sẽ không gửi duyệt được và hệ thống báo rõ cấp nào chưa có người duyệt.
 

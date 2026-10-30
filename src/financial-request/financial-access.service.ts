@@ -11,6 +11,7 @@ import { FinancialRoleAssignment } from './entities/financial-role-assignment.en
 import {
   ApprovalStatus,
   ApproverType,
+  DIRECT_MANAGER_SYSTEM_ROLES,
   FinanceRole,
   FinancialRequestType,
   IMPLICIT_FINANCE_ROLES,
@@ -432,21 +433,37 @@ export class FinancialAccessService {
     return [...new Set([...explicit, ...implicit])];
   }
 
-  /** Quản lý trực tiếp hợp lệ cho người đề nghị (vai trò MANAGER phủ công ty + phòng ban). */
+  /**
+   * Quản lý trực tiếp hợp lệ cho người đề nghị: giám đốc, trưởng/phó phòng và
+   * người được gán vai trò MANAGER phủ công ty + phòng ban. Giám đốc đứng đầu,
+   * rồi tới trưởng/phó phòng, mỗi nhóm xếp theo tên.
+   */
   async eligibleManagers(companyId: number, departmentId: number | null) {
     const ids = await this.employeesWithRole(
       FinanceRole.MANAGER,
       companyId,
       departmentId,
     );
-    if (!ids.length) return [];
-    return this.employeeRepo
+    const employees = await this.employeeRepo
       .createQueryBuilder('e')
-      .select(['e.id', 'e.name'])
-      .where('e.id IN (:...ids)', { ids })
-      .andWhere('COALESCE(e.isActive, true) = true')
+      .select(['e.id', 'e.name', 'e.roles'])
+      .where('COALESCE(e.isActive, true) = true')
+      .andWhere(
+        new Brackets((w) => {
+          w.where('e.roles && :managerRoles', {
+            managerRoles: DIRECT_MANAGER_SYSTEM_ROLES,
+          });
+          if (ids.length) w.orWhere('e.id IN (:...ids)', { ids });
+        }),
+      )
       .orderBy('e.name', 'ASC')
       .getMany();
+    const rank = (e: Employee) => {
+      const roles = e.roles ?? [];
+      if (roles.some((r) => r === 'director' || r === 'director_la')) return 0;
+      return roles.some((r) => DIRECT_MANAGER_SYSTEM_ROLES.includes(r)) ? 1 : 2;
+    };
+    return employees.sort((a, b) => rank(a) - rank(b));
   }
 
   /**

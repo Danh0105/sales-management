@@ -9,6 +9,8 @@
  * là đã chi, và chi xong KHÔNG có nghĩa là đã quyết toán.
  */
 
+import { DEPARTMENT_HEAD_ROLES } from '../employee/employee-positions';
+
 export enum FinancialRequestType {
   /** Giấy đề nghị tạm ứng. */
   ADVANCE = 'ADVANCE',
@@ -150,6 +152,17 @@ export const IMPLICIT_FINANCE_ROLES: Record<string, FinanceRole[]> = {
   ketoan_truong: [FinanceRole.ACCOUNTANT],
   thuquy: [FinanceRole.CASHIER],
 };
+
+/**
+ * Role hệ thống được chọn làm quản lý trực tiếp ở mọi công ty/phòng ban, ngoài
+ * những người được gán vai trò MANAGER ở màn Cấu hình. Không suy ra vai trò
+ * MANAGER: họ chỉ thấy và duyệt phiếu ghi họ là quản lý trực tiếp.
+ */
+export const DIRECT_MANAGER_SYSTEM_ROLES = [
+  'director',
+  'director_la',
+  ...DEPARTMENT_HEAD_ROLES,
+];
 
 /** Người lập phiếu lương — được ghi nhận khấu trừ tạm ứng lương. */
 export const PAYROLL_DEDUCTION_SYSTEM_ROLES = ['nhansu', 'ketoan_truong'];

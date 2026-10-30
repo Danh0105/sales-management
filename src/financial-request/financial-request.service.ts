@@ -11,7 +11,10 @@ import { Brackets, DataSource, EntityManager, In, Repository } from 'typeorm';
 import { CashAccount } from '../cashflow-report/cash-account.entity';
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
-import { EMPLOYEE_POSITIONS } from '../employee/employee-positions';
+import {
+  EMPLOYEE_POSITIONS,
+  employeePosition,
+} from '../employee/employee-positions';
 import { Payroll } from '../payroll/entities/payroll.entity';
 import { AuthUser } from '../type/auth-user.type';
 import {
@@ -64,6 +67,7 @@ import {
   AuditAction,
   DeductionRowStatus,
   DeductionStatus,
+  DIRECT_MANAGER_SYSTEM_ROLES,
   FinanceRole,
   FinancialRequestType,
   PaymentMethod,
@@ -230,6 +234,9 @@ export class FinancialRequestService {
           ]),
         canApprove:
           ctx.delegations.length > 0 ||
+          ctx.systemRoles.some((r) =>
+            DIRECT_MANAGER_SYSTEM_ROLES.includes(r),
+          ) ||
           this.access.hasAnyRole(ctx, [
             FinanceRole.MANAGER,
             FinanceRole.CONTROLLER,
@@ -267,7 +274,7 @@ export class FinancialRequestService {
     );
     return managers
       .filter((m) => m.id !== ctx.userId)
-      .map((m) => ({ id: m.id, name: m.name }));
+      .map((m) => ({ id: m.id, name: m.name, position: this.positionOf(m) }));
   }
 
   private publicCompany(c: FinancialCompany) {
@@ -285,9 +292,11 @@ export class FinancialRequestService {
 
   private positionOf(employee?: Employee | null): string | null {
     const roles = employee?.roles ?? [];
-    return (
-      EMPLOYEE_POSITIONS.find((p) => roles.includes(p.value))?.label ?? null
-    );
+    // Giám đốc, trưởng/phó phòng ghi trước role nghiệp vụ kiêm cùng (vd. Sale Admin kiêm trưởng phòng).
+    const role =
+      DIRECT_MANAGER_SYSTEM_ROLES.find((r) => roles.includes(r)) ??
+      EMPLOYEE_POSITIONS.find((p) => roles.includes(p.value))?.value;
+    return employeePosition(role)?.label ?? null;
   }
 
   // ===========================================================================
