@@ -215,6 +215,8 @@ export enum AttachmentKind {
   REFUND_PROOF = 'REFUND_PROOF',
   /** Bằng chứng cho thao tác huỷ/điều chỉnh sau duyệt. */
   ADJUSTMENT_EVIDENCE = 'ADJUSTMENT_EVIDENCE',
+  /** Chứng từ Bộ phận kiểm soát đính kèm khi duyệt cấp của mình. */
+  CONTROL_EVIDENCE = 'CONTROL_EVIDENCE',
 }
 
 export enum MovementStatus {

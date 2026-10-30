@@ -158,6 +158,13 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     writeFileSync(join(process.env.FIN_IT_PDF_DIR, `${name}.pdf`), buffer);
   }
 
+  /** Bộ phận kiểm soát bắt buộc chọn tài khoản: tiền mặt → 111, chuyển khoản → 112. */
+  const controlAccount = (detail: { paymentMethod: PaymentMethod | null }) =>
+    detail.paymentMethod === PaymentMethod.CASH ? '1111' : '1121';
+  const isControl = (step: { approverRole?: unknown; signatureSlot?: unknown }) =>
+    step.approverRole === FinanceRole.CONTROLLER ||
+    step.signatureSlot === 'CONTROLLER';
+
   /** Duyệt hết các bước còn chờ bằng người duyệt hợp lệ đầu tiên của mỗi bước. */
   async function approveAll(id: number, comment = 'Đồng ý') {
     for (let guard = 0; guard < 10; guard += 1) {
@@ -170,7 +177,11 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       const approver = step.candidates.map((c) => byId(c.id)).find(Boolean);
       if (!approver)
         throw new Error(`Không có người duyệt test cho bước ${step.name}`);
-      await requests.approve(approver, id, { stepId: step.id, comment });
+      await requests.approve(approver, id, {
+        stepId: step.id,
+        comment,
+        ...(isControl(step) ? { paymentAccountCode: controlAccount(detail) } : {}),
+      });
     }
     throw new Error('Quá số vòng duyệt');
   }
@@ -207,7 +218,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       {
         amount,
         date: '2026-10-01',
-        method: PaymentMethod.CASH,
+        method: PaymentMethod.BANK_TRANSFER,
         idempotencyKey: idem(),
       },
       U.T,
@@ -285,7 +296,9 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     await employee('T', ['thuquy'], dept1); // thủ quỹ — ngầm định
     await employee('O', ['sales'], dept1); // người ngoài
     await ds.query(
-      `INSERT INTO cash_accounts (code, name, "groupCode") VALUES ('1111', 'Tiền mặt tại quỹ', '111')
+      `INSERT INTO cash_accounts (code, name, "groupCode") VALUES
+         ('1111', 'Tiền mặt tại quỹ', '111'),
+         ('1121', 'Tiền gửi ngân hàng', '112')
        ON CONFLICT (code) DO NOTHING`,
     );
     await ds.query(
@@ -469,6 +482,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
     await requests.approve(U.C, advanceId, {
       stepId: controlStep.id,
+      paymentAccountCode: controlAccount(atControl),
       adjustments: [
         {
           itemId: atControl.items[0].id,
@@ -560,7 +574,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         {
           amount: 1,
           date: '2026-10-02',
-          method: PaymentMethod.CASH,
+          method: PaymentMethod.BANK_TRANSFER,
           idempotencyKey: idem(),
         },
         U.M,
@@ -573,8 +587,8 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       {
         amount: 2_000_000,
         date: '2026-10-02',
-        method: PaymentMethod.CASH,
-        cashAccountCode: '1111',
+        method: PaymentMethod.BANK_TRANSFER,
+        cashAccountCode: '1121',
         idempotencyKey: key1,
       },
       U.T,
@@ -584,7 +598,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       {
         amount: 2_000_000,
         date: '2026-10-02',
-        method: PaymentMethod.CASH,
+        method: PaymentMethod.BANK_TRANSFER,
         idempotencyKey: key1,
       },
       U.T,
@@ -630,7 +644,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         {
           amount: 1,
           date: '2026-10-03',
-          method: PaymentMethod.CASH,
+          method: PaymentMethod.BANK_TRANSFER,
           idempotencyKey: idem(),
         },
         U.T,
@@ -992,6 +1006,40 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     expect(asK2.permissions.canRecordPayment).toBe(true);
     const asOutsider = await requests.list(U.O, { scope: 'all' });
     expect(asOutsider.data.map((r) => r.id)).not.toContain(y.id);
+  });
+
+  it('20b. Bộ phận kiểm soát đính kèm chứng từ khi phiếu đang chờ cấp của mình', async () => {
+    const req = await newAdvance(400_000);
+    await requests.submit(U.A, req.id);
+    const control = () =>
+      requests.uploadAttachments(U.C, req.id, [file('bien-ban-kiem-soat.pdf', PDF_BYTES)], {
+        kind: AttachmentKind.CONTROL_EVIDENCE,
+      });
+    // Chưa tới cấp kiểm soát → chưa được đính kèm.
+    await expect(control()).rejects.toBeInstanceOf(ForbiddenException);
+    let d = await requests.detail(U.M, req.id);
+    await requests.approve(U.M, req.id, { stepId: d.permissions.actionableStepId! });
+
+    d = await requests.detail(U.C, req.id);
+    expect(d.permissions.requiresPaymentAccount).toBe(true);
+    // Người lập / người ngoài không đính kèm chứng từ kiểm soát.
+    await expect(
+      requests.uploadAttachments(U.A, req.id, [file('x.pdf', PDF_BYTES)], {
+        kind: AttachmentKind.CONTROL_EVIDENCE,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    const withEvidence = await control();
+    expect(
+      withEvidence.attachments.filter((a) => a.kind === AttachmentKind.CONTROL_EVIDENCE),
+    ).toHaveLength(1);
+    await requests.approve(U.C, req.id, {
+      stepId: d.permissions.actionableStepId!,
+      paymentAccountCode: controlAccount(d),
+    });
+    // Qua cấp kiểm soát rồi thì thôi.
+    await expect(control()).rejects.toBeInstanceOf(ForbiddenException);
+    const after = await requests.detail(U.A, req.id);
+    expect(after.paymentAccountCode).toBe('1121');
   });
 
   it('20. Tệp đính kèm (kiểm tra loại/quyền), nhật ký và lịch sử duyệt', async () => {

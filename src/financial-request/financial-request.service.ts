@@ -2575,6 +2575,28 @@ export class FinancialRequestService {
             'Chỉ kế toán/quản trị đính kèm bằng chứng điều chỉnh',
           );
         }
+      } else if (kind === AttachmentKind.CONTROL_EVIDENCE) {
+        // Tải lên trước khi bấm duyệt: phải đang là người duyệt cấp kiểm soát.
+        const pending =
+          request.approvalStatus === ApprovalStatus.PENDING
+            ? await manager.getRepository(FinancialApprovalStep).find({
+                where: {
+                  requestId: id,
+                  round: request.currentRound,
+                  status: StepStatus.PENDING,
+                },
+              })
+            : [];
+        const canAttach = pending.some(
+          (step) =>
+            isControllerApprovalStep(step) &&
+            this.access.eligibility(ctx, request, step).eligible,
+        );
+        if (!canAttach) {
+          throw new ForbiddenException(
+            'Chỉ người duyệt cấp Bộ phận kiểm soát đính kèm chứng từ kiểm soát, khi phiếu đang chờ cấp đó',
+          );
+        }
       } else if (!this.access.canRecordMoney(ctx, request)) {
         throw new ForbiddenException(
           'Bạn không có quyền đính kèm chứng từ thanh toán',
