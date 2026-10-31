@@ -347,6 +347,9 @@ describe('Recruitment hire account', () => {
     const service = new RecruitmentJobService(
       jobs,
       repo() as any,
+      repo() as any,
+      repo() as any,
+      repo() as any,
       { record: jest.fn() } as any,
     );
     await expect(

@@ -13,8 +13,23 @@ import {
 import { Department } from '../../department/department.entity';
 import { Employee } from '../../employee/employee.entity';
 import { numericTransformer } from '../../utils/numeric-transformer';
-import { EmploymentType, RecruitmentJobStatus } from '../recruitment.enums';
+import {
+  EmploymentType,
+  RecruitmentEducationLevel,
+  RecruitmentExperienceLevel,
+  RecruitmentJobStatus,
+  RecruitmentSalaryStructure,
+  RecruitmentSeniority,
+} from '../recruitment.enums';
 import type { ScreeningCriteria } from '../screening/screening.types';
+
+export interface RecruitmentWorkLocation {
+  provinceId: number;
+  provinceName: string;
+  wardId: number;
+  wardName: string;
+  address: string;
+}
 
 /** Vị trí tuyển dụng. */
 @Entity('recruitment_jobs')
@@ -49,6 +64,23 @@ export class RecruitmentJob {
 
   @Column({ name: 'department_id', type: 'int', nullable: true })
   departmentId!: number | null;
+
+  @Column({ name: 'industry_ids', type: 'int', array: true, default: '{}' })
+  industryIds!: number[];
+
+  @Column({ type: 'varchar', length: 30, nullable: true })
+  seniority!: RecruitmentSeniority | null;
+
+  @Column({
+    name: 'experience_level',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  experienceLevel!: RecruitmentExperienceLevel | null;
+
+  @Column({ name: 'application_deadline', type: 'date', nullable: true })
+  applicationDeadline!: string | null;
 
   @ManyToOne(() => Department, {
     nullable: true,
@@ -95,6 +127,17 @@ export class RecruitmentJob {
   })
   salaryMax!: number | null;
 
+  @Column({ name: 'salary_negotiable', type: 'boolean', default: false })
+  salaryNegotiable!: boolean;
+
+  @Column({
+    name: 'salary_structure',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  salaryStructure!: RecruitmentSalaryStructure | null;
+
   @Column({ type: 'varchar', length: 3, default: 'VND' })
   currency!: string;
 
@@ -103,6 +146,72 @@ export class RecruitmentJob {
 
   @Column({ type: 'text', nullable: true })
   responsibilities!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  benefits!: string | null;
+
+  @Column({
+    name: 'education_level',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  educationLevel!: RecruitmentEducationLevel | null;
+
+  @Column({
+    name: 'probation_period',
+    type: 'varchar',
+    length: 100,
+    nullable: true,
+  })
+  probationPeriod!: string | null;
+
+  @Column({ name: 'work_locations', type: 'jsonb', default: [] })
+  workLocations!: RecruitmentWorkLocation[];
+
+  /** Luồng hiện tại vốn không bắt buộc CV, nên mặc định true để tương thích. */
+  @Column({
+    name: 'allow_applications_without_cv',
+    type: 'boolean',
+    default: true,
+  })
+  allowApplicationsWithoutCv!: boolean;
+
+  @Column({
+    name: 'contact_name',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  contactName!: string | null;
+
+  @Column({
+    name: 'contact_email',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  contactEmail!: string | null;
+
+  @Column({
+    name: 'contact_phone',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  contactPhone!: string | null;
+
+  @Column({
+    name: 'additional_phones',
+    type: 'text',
+    array: true,
+    default: '{}',
+  })
+  additionalPhones!: string[];
+
+  /** Bản ghi cũ giữ v1; form mới tạo v2 để áp dụng validation khi publish. */
+  @Column({ name: 'form_version', type: 'smallint', default: 2 })
+  formVersion!: number;
 
   /**
    * Tiêu chí sàng lọc có cấu trúc — schema cố định ở `ScreeningCriteriaDto`,

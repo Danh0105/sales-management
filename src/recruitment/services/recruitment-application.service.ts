@@ -121,7 +121,7 @@ export class RecruitmentApplicationService {
   // ---------------------------------------------------------------- HR ----
 
   async create(dto: CreateApplicationDto, actor: RecruitmentActor) {
-    await this.getCandidateOrThrow(dto.candidateId);
+    const candidate = await this.getCandidateOrThrow(dto.candidateId);
     const job = await this.getJobOrThrow(dto.jobId);
     if (
       ![RecruitmentJobStatus.ACTIVE, RecruitmentJobStatus.PAUSED].includes(
@@ -136,6 +136,7 @@ export class RecruitmentApplicationService {
 
     const existing = await this.findActive(dto.candidateId, dto.jobId);
     if (existing) throw this.duplicateApplication(existing.id);
+    this.assertCvRequirement(job, candidate);
 
     let saved: RecruitmentApplication;
     try {
@@ -463,6 +464,7 @@ export class RecruitmentApplicationService {
         message: `Vị trí đang ở trạng thái ${job.status}, không nhận hồ sơ mới`,
       });
     }
+    this.assertCvRequirement(job, candidate);
 
     let saved: RecruitmentApplication;
     try {
@@ -765,6 +767,20 @@ export class RecruitmentApplicationService {
       });
     }
     return job;
+  }
+
+  private assertCvRequirement(
+    job: RecruitmentJob,
+    candidate: RecruitmentCandidate,
+  ) {
+    // Bản ghi cũ không có cột khi chưa migrate được xem như luồng cũ: không
+    // chặn. Chỉ chặn khi HR đã tắt tuỳ chọn một cách tường minh.
+    if (job.allowApplicationsWithoutCv === false && !candidate.cvUrl) {
+      throw new ConflictException({
+        code: 'CV_REQUIRED',
+        message: 'Vị trí này yêu cầu ứng viên bổ sung CV trước khi ứng tuyển',
+      });
+    }
   }
 
   private duplicateApplication(applicationId?: number) {

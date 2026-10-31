@@ -179,6 +179,23 @@ describe('RecruitmentApplicationService', () => {
     });
   });
 
+  it('vị trí tắt ứng tuyển không CV → backend yêu cầu bổ sung CV', async () => {
+    const { service, jobRepo, applicationRepo } = setup();
+    jobRepo.findOne.mockResolvedValue({
+      id: 3,
+      status: RecruitmentJobStatus.ACTIVE,
+      allowApplicationsWithoutCv: false,
+    });
+    applicationRepo.findOne.mockResolvedValueOnce(null);
+
+    await expect(
+      service.aiFindOrCreate({ candidateId: 7, jobId: 3 }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'CV_REQUIRED' }),
+    });
+    expect(applicationRepo.save).not.toHaveBeenCalled();
+  });
+
   it('HR chuyển trạng thái hợp lệ (INTERVIEW → OFFER), ghi người duyệt + audit', async () => {
     const { service, applicationRepo, audit } = setup();
     const app = {

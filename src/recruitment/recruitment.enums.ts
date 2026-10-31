@@ -17,6 +17,47 @@ export enum EmploymentType {
   CONTRACT = 'CONTRACT',
   INTERNSHIP = 'INTERNSHIP',
   COLLABORATOR = 'COLLABORATOR',
+  SEASONAL = 'SEASONAL',
+  REMOTE = 'REMOTE',
+  HYBRID = 'HYBRID',
+}
+
+/** Các giá trị cấu hình tin tuyển dụng, không phải kết quả sàng lọc ứng viên. */
+export enum RecruitmentSeniority {
+  INTERN = 'INTERN',
+  STAFF = 'STAFF',
+  SPECIALIST = 'SPECIALIST',
+  TEAM_LEAD = 'TEAM_LEAD',
+  DEPARTMENT_HEAD = 'DEPARTMENT_HEAD',
+  MANAGER = 'MANAGER',
+  DIRECTOR = 'DIRECTOR',
+}
+
+export enum RecruitmentExperienceLevel {
+  NONE = 'NONE',
+  UNDER_ONE_YEAR = 'UNDER_ONE_YEAR',
+  ONE_YEAR = 'ONE_YEAR',
+  TWO_YEARS = 'TWO_YEARS',
+  THREE_YEARS = 'THREE_YEARS',
+  THREE_TO_FIVE_YEARS = 'THREE_TO_FIVE_YEARS',
+  OVER_FIVE_YEARS = 'OVER_FIVE_YEARS',
+}
+
+export enum RecruitmentSalaryStructure {
+  FIXED = 'FIXED',
+  BASE_KPI = 'BASE_KPI',
+  BASE_COMMISSION = 'BASE_COMMISSION',
+  SALES_BASED = 'SALES_BASED',
+  NEGOTIABLE = 'NEGOTIABLE',
+}
+
+export enum RecruitmentEducationLevel {
+  NONE = 'NONE',
+  HIGH_SCHOOL = 'HIGH_SCHOOL',
+  VOCATIONAL = 'VOCATIONAL',
+  COLLEGE = 'COLLEGE',
+  UNIVERSITY = 'UNIVERSITY',
+  POSTGRADUATE = 'POSTGRADUATE',
 }
 
 export enum CandidateSource {

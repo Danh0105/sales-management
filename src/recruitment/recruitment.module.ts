@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
+import { Province } from '../province/province.entity';
+import { Ward } from '../ward/ward.entity';
 import { RecruitmentAiAuthGuard } from './ai/recruitment-ai-auth.guard';
 import { RecruitmentAiIdempotencyInterceptor } from './ai/recruitment-ai-idempotency.interceptor';
 import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.service';
@@ -111,6 +113,8 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentRuntimeControl,
       Department,
       Employee,
+      Province,
+      Ward,
     ]),
   ],
   controllers: [
