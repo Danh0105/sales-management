@@ -22,6 +22,7 @@ import {
   TEACHER_COLLABORATOR_ROLE,
 } from './teaching-roles';
 import { Employee } from '../employee/employee.entity';
+import { Department } from '../department/department.entity';
 import { Teacher } from './entities/teacher.entity';
 import {
   amountOf,
@@ -2236,20 +2237,26 @@ describe('TeacherService', () => {
     const school = makeRepo();
     const subjectCatalog = makeRepo();
     const locationChange = makeRepo();
+    // Phòng Chuyên môn — nơi tài khoản giáo viên công ty được gán vào.
+    const department = makeRepo({
+      findOne: jest.fn().mockResolvedValue({ id: 40 }),
+    });
 
     // `create()` với password tự tạo Employee+Teacher trong transaction — cùng
     // 2 repo mock ở trên để test assert được thẳng trên `employee.repo`/`teacher.repo`.
+    const manager = {
+      getRepository: (target: any) =>
+        target === Employee
+          ? employee.repo
+          : target === Teacher
+            ? teacher.repo
+            : target === Department
+              ? department.repo
+              : undefined,
+    };
     const dataSource = {
-      transaction: jest.fn((work: any) =>
-        work({
-          getRepository: (target: any) =>
-            target === Employee
-              ? employee.repo
-              : target === Teacher
-                ? teacher.repo
-                : undefined,
-        }),
-      ),
+      manager,
+      transaction: jest.fn((work: any) => work(manager)),
     };
 
     const service = new TeacherService(
@@ -2366,7 +2373,10 @@ describe('TeacherService', () => {
     } as CreateTeacherDto);
 
     expect(employee.repo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ roles: [TEACHER_STAFF_ROLE] }),
+      expect.objectContaining({
+        roles: [TEACHER_STAFF_ROLE],
+        department: { id: 40 },
+      }),
     );
   });
 
@@ -2388,6 +2398,7 @@ describe('TeacherService', () => {
         roles: [TEACHER_COLLABORATOR_ROLE],
         bankAccountNumber: '0914732580',
         bankName: 'MB - Ngân hàng TMCP Quân Đội',
+        department: { id: 1 },
       }),
     );
   });

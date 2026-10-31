@@ -3,6 +3,7 @@ import * as bcrypt from 'bcrypt';
 import { TeacherService } from './teacher.service';
 import { Teacher } from './entities/teacher.entity';
 import { Employee } from '../employee/employee.entity';
+import { Department } from '../department/department.entity';
 import {
   TeacherAccountRequest,
   TeacherAccountRequestStatus,
@@ -11,6 +12,9 @@ import { NotificationType } from '../notifications/enums/notification-type.enum'
 import {
   ACADEMIC_ROLE,
   HR_ROLE,
+  TEACHER_COLLABORATOR_ROLE,
+  TEACHER_STAFF_DEPARTMENT,
+  TEACHER_STAFF_ROLE,
   requiresTeacherAccountApproval,
 } from './teaching-roles';
 
@@ -22,7 +26,10 @@ const dto = {
 };
 
 describe('Duyệt tài khoản giáo viên do Giáo vụ tạo', () => {
-  const makeService = (pendingRequest: any = null) => {
+  const makeService = (
+    pendingRequest: any = null,
+    staffDepartment: { id: number } | null = { id: 40 },
+  ) => {
     const savedTeachers: any[] = [];
     const savedEmployees: any[] = [];
 
@@ -81,10 +88,15 @@ describe('Duyệt tài khoản giáo viên do Giáo vụ tạo', () => {
       save: jest.fn(async (value) => ({ id: 12, ...value })),
     };
 
+    const departmentRepo = {
+      findOne: jest.fn().mockResolvedValue(staffDepartment),
+    };
+
     const manager = {
       getRepository: jest.fn((entity) => {
         if (entity === Teacher) return teacherRepo;
         if (entity === Employee) return employeeRepo;
+        if (entity === Department) return departmentRepo;
         return accountRequestRepo;
       }),
     };
@@ -94,7 +106,7 @@ describe('Duyệt tài khoản giáo viên do Giáo vụ tạo', () => {
       teacherRepo as any,
       {} as any,
       employeeRepo as any,
-      { transaction: jest.fn((cb) => cb(manager)) } as any,
+      { transaction: jest.fn((cb) => cb(manager)), manager } as any,
       {} as any,
       {} as any,
       {} as any,
@@ -110,6 +122,7 @@ describe('Duyệt tài khoản giáo viên do Giáo vụ tạo', () => {
       service,
       teacherRepo,
       employeeRepo,
+      departmentRepo,
       accountRequestRepo,
       notificationService,
       savedTeachers,
@@ -233,10 +246,94 @@ describe('Duyệt tài khoản giáo viên do Giáo vụ tạo', () => {
     const result = await service.reviewAccountRequest(12, 9, true, {});
 
     expect(result).toMatchObject({ teacherId: 55 });
-    expect(savedEmployees[0]).toMatchObject({ password: 'da-bam' });
+    expect(savedEmployees[0]).toMatchObject({
+      password: 'da-bam',
+      department: { id: 40 },
+    });
     // Hồ sơ giáo viên chỉ được gắn tài khoản, không nhân bản thêm bản ghi.
     expect(savedTeachers).toHaveLength(1);
     expect(savedTeachers[0]).toMatchObject({ id: 55, employeeId: 501 });
+  });
+
+  describe('phòng ban của tài khoản giáo viên', () => {
+    const approvedRequest = (payload: Record<string, unknown> = {}) => ({
+      id: 12,
+      payload: { name: dto.name, phone: dto.phone, email: dto.email, ...payload },
+      passwordHash: 'da-bam',
+      name: dto.name,
+      requestedBy: 5,
+      status: TeacherAccountRequestStatus.PENDING,
+    });
+
+    it('giáo viên công ty vào phòng Chuyên môn', async () => {
+      const { service, savedEmployees, departmentRepo } =
+        makeService(approvedRequest());
+
+      await service.reviewAccountRequest(12, 9, true, {});
+
+      expect(departmentRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { name: TEACHER_STAFF_DEPARTMENT } }),
+      );
+      expect(savedEmployees[0]).toMatchObject({
+        roles: [TEACHER_STAFF_ROLE],
+        department: { id: 40 },
+      });
+    });
+
+    it('cộng tác viên giữ phòng mặc định #1', async () => {
+      const { service, savedEmployees, departmentRepo } = makeService(
+        approvedRequest({ teacherRole: TEACHER_COLLABORATOR_ROLE }),
+      );
+
+      await service.reviewAccountRequest(12, 9, true, {});
+
+      expect(departmentRepo.findOne).not.toHaveBeenCalled();
+      expect(savedEmployees[0]).toMatchObject({
+        roles: [TEACHER_COLLABORATOR_ROLE],
+        department: { id: 1 },
+      });
+    });
+
+    it('chưa có phòng Chuyên môn thì về phòng #1, không chặn mở tài khoản', async () => {
+      const { service, savedEmployees } = makeService(approvedRequest(), null);
+
+      await expect(
+        service.reviewAccountRequest(12, 9, true, {}),
+      ).resolves.toMatchObject({ status: TeacherAccountRequestStatus.APPROVED });
+      expect(savedEmployees[0]).toMatchObject({ department: { id: 1 } });
+    });
+
+    it('đổi sang giáo viên công ty thì chuyển phòng Chuyên môn, giữ role kiêm nhiệm', async () => {
+      const { service, employeeRepo, savedEmployees } = makeService();
+      employeeRepo.findOne.mockResolvedValueOnce({
+        id: 501,
+        roles: [ACADEMIC_ROLE, TEACHER_COLLABORATOR_ROLE],
+      });
+
+      await (service as any).changeTeacherRole(501, TEACHER_STAFF_ROLE);
+
+      expect(savedEmployees[0]).toMatchObject({
+        roles: [ACADEMIC_ROLE, TEACHER_STAFF_ROLE],
+        department: { id: 40 },
+      });
+    });
+
+    it('đổi về cộng tác viên thì giữ nguyên phòng đang có', async () => {
+      const { service, employeeRepo, savedEmployees, departmentRepo } =
+        makeService();
+      employeeRepo.findOne.mockResolvedValueOnce({
+        id: 501,
+        roles: [TEACHER_STAFF_ROLE],
+      });
+
+      await (service as any).changeTeacherRole(501, TEACHER_COLLABORATOR_ROLE);
+
+      expect(departmentRepo.findOne).not.toHaveBeenCalled();
+      expect(savedEmployees[0]).toEqual({
+        id: 501,
+        roles: [TEACHER_COLLABORATOR_ROLE],
+      });
+    });
   });
 
   it('Giáo vụ gửi đề nghị cấp tài khoản cho giáo viên có sẵn thì chưa tạo tài khoản', async () => {

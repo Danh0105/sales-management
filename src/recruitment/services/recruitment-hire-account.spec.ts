@@ -1,6 +1,7 @@
 import * as bcrypt from 'bcrypt';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { Department } from '../../department/department.entity';
 import { Employee } from '../../employee/employee.entity';
 import { EMPLOYEE_POSITIONS } from '../../employee/employee-positions';
 import { sanitizeBody } from '../../activity-log/activity-log.util';
@@ -60,6 +61,8 @@ function setup() {
     [RecruitmentCandidate, repo(candidate)],
     [RecruitmentJob, repo(job)],
     [Employee, repo()],
+    // Phòng Chuyên môn của giáo viên công ty.
+    [Department, repo({ id: 40 })],
     [Teacher, repo()],
     [RecruitmentApplication, repo(app)],
     [RecruitmentHandoff, repo()],
@@ -135,6 +138,42 @@ describe('Recruitment hire account', () => {
       );
     },
   );
+  it.each([
+    ['giaovien_congty', 40],
+    ['giaovien_ctv', 4],
+  ])(
+    'HR hiring %s puts the account in department %i (company teachers → Chuyên môn)',
+    async (role, departmentId) => {
+      const { em, repos, job } = setup();
+      job.positionRole = role;
+      await createHireAccount(
+        em,
+        7,
+        3,
+        { ...dto, accountPositionRole: role },
+        HR,
+      );
+      expect(repos.get(Employee).save.mock.calls[0][0]).toMatchObject({
+        roles: [role],
+        department: { id: departmentId },
+      });
+    },
+  );
+  it('company teacher keeps the job department when Chuyên môn is missing', async () => {
+    const { em, repos, job } = setup();
+    job.positionRole = 'giaovien_congty';
+    repos.get(Department).findOne.mockResolvedValue(null);
+    await createHireAccount(
+      em,
+      7,
+      3,
+      { ...dto, accountPositionRole: 'giaovien_congty' },
+      HR,
+    );
+    expect(repos.get(Employee).save.mock.calls[0][0]).toMatchObject({
+      department: { id: 4 },
+    });
+  });
   it.each([
     [
       'missing position',

@@ -5,10 +5,15 @@ import {
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { Raw, type EntityManager } from 'typeorm';
+import { Department } from '../../department/department.entity';
 import { Employee } from '../../employee/employee.entity';
 import { employeePosition } from '../../employee/employee-positions';
 import { Teacher } from '../../teaching/entities/teacher.entity';
-import { TEACHER_ROLES } from '../../teaching/teaching-roles';
+import {
+  TEACHER_ROLES,
+  TEACHER_STAFF_DEPARTMENT,
+  TEACHER_STAFF_ROLE,
+} from '../../teaching/teaching-roles';
 import type { UpdateApplicationStatusDto } from '../dto/application.dto';
 import { RecruitmentCandidate } from '../entities/recruitment-candidate.entity';
 import { RecruitmentJob } from '../entities/recruitment-job.entity';
@@ -127,6 +132,11 @@ export async function createHireAccount(
         'Đã có hồ sơ giáo viên với liên hệ này; HR cần đối soát trước khi tuyển.',
     });
   }
+  const departmentId = await hireDepartmentId(
+    em,
+    position.value,
+    job.departmentId,
+  );
   const employee = await employeeRepo.save(
     employeeRepo.create({
       name: candidate.fullName.trim(),
@@ -135,7 +145,7 @@ export async function createHireAccount(
       password: await bcrypt.hash(dto.password, 10),
       roles: [position.value],
       isActive: true,
-      ...(job.departmentId ? { department: { id: job.departmentId } } : {}),
+      ...(departmentId ? { department: { id: departmentId } } : {}),
     }),
   );
   if (!employee.id) throw new Error('HIRE_ACCOUNT_ID_MISSING');
@@ -154,4 +164,24 @@ export async function createHireAccount(
   // Không copy Zalo ID OA tuyển dụng sang OA công ty/Mini App: khác miền định danh.
   await candidateRepo.update(candidate.id, { employeeId: employee.id });
   return employee.id;
+}
+
+/**
+ * Giáo viên công ty luôn vào phòng Chuyên môn, bất kể phòng ghi trên vị trí
+ * tuyển; chức danh khác theo phòng của vị trí. Chưa có phòng Chuyên môn thì
+ * theo vị trí như trước.
+ */
+async function hireDepartmentId(
+  em: EntityManager,
+  role: string,
+  jobDepartmentId: number | null,
+): Promise<number | null> {
+  if (role === TEACHER_STAFF_ROLE) {
+    const staff = await em.getRepository(Department).findOne({
+      where: { name: TEACHER_STAFF_DEPARTMENT },
+      select: { id: true },
+    });
+    if (staff) return staff.id;
+  }
+  return jobDepartmentId;
 }
