@@ -361,6 +361,74 @@ describe('AttendanceExportService', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  describe('tiết theo ngày', () => {
+    const exportWith = async (kind: 'summary' | 'daily') => {
+      const selects: string[] = [];
+      const qb: any = {
+        getRawMany: jest.fn().mockResolvedValue([
+          {
+            teacherId: '1',
+            date: '2026-09-07',
+            provinceName: 'Hồ Chí Minh',
+            periods: '3',
+            sessions: '2',
+          },
+        ]),
+      };
+      for (const method of [
+        'leftJoin',
+        'select',
+        'where',
+        'andWhere',
+        'groupBy',
+        'addGroupBy',
+      ]) {
+        qb[method] = jest.fn().mockReturnValue(qb);
+      }
+      qb.addSelect = jest.fn((sql: string) => {
+        selects.push(sql);
+        return qb;
+      });
+      const sessionService = {
+        attendanceSummary: jest.fn().mockResolvedValue({
+          data: [{ teacherId: 1, teacherName: 'Nguyễn Văn An' }],
+        }),
+      };
+      const sessionRepo = {
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+        manager: { query: jest.fn().mockResolvedValue([]) },
+      };
+      const service = new AttendanceExportService(
+        sessionService as any,
+        sessionRepo as any,
+      );
+      const { buffer } = await service.exportAttendanceSummary(
+        { fromDate: '2026-09-01', toDate: '2026-09-30' },
+        kind,
+      );
+      const periodsSql = selects.find((sql) => sql.includes('ss.periods'))!;
+      return { periodsSql, buffer };
+    };
+
+    it('file số tiết theo ngày tính mọi tiết đã lên lịch, chỉ bỏ buổi huỷ', async () => {
+      const { periodsSql, buffer } = await exportWith('daily');
+      expect(periodsSql).toContain("ss.status <> 'CANCELLED'");
+      expect(periodsSql).not.toContain("'PRESENT'");
+
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buffer as any);
+      const ws = wb.getWorksheet('Tiết theo ngày')!;
+      // Nhóm tỉnh ở dòng 7, giáo viên ở dòng 8; ngày 07/09 là cột 3 + 6.
+      expect(ws.getCell(8, 1).value).toBe('Nguyễn Văn An');
+      expect(ws.getCell(8, 9).value).toBe(3);
+    });
+
+    it('file tổng hợp (kèm tiền) vẫn chỉ tính tiết "Có dạy"', async () => {
+      const { periodsSql } = await exportWith('summary');
+      expect(periodsSql).toContain("ss.status = 'PRESENT'");
+    });
+  });
 });
 
 describe('GET /teaching-sessions/attendance/summary/export', () => {

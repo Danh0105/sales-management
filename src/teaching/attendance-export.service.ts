@@ -26,17 +26,28 @@ export const ATTENDANCE_EXPORT_MAX_DAYS = 366;
 export const UNKNOWN_PROVINCE = 'Chưa xác định tỉnh';
 
 /**
- * `summary`: file đầy đủ (sheet tổng hợp + sheet tiết theo ngày).
- * `daily`: chỉ sheet số tiết theo ngày — bảng công gửi đi đối chiếu, không kèm tiền.
+ * `summary`: file đầy đủ (sheet tổng hợp + sheet tiết theo ngày "Có dạy").
+ * `daily`: chỉ sheet số tiết theo ngày theo lịch dạy — gửi đi đối chiếu, không kèm tiền.
  */
 export type AttendanceExportKind = 'summary' | 'daily';
+
+/**
+ * Tiết nào được cộng vào sheet tiết theo ngày. File tổng hợp đi kèm tiền nên chỉ
+ * tính tiết "Có dạy"; file số tiết theo ngày tính mọi tiết đã lên lịch (kể cả
+ * chưa chấm công), chỉ bỏ buổi đã huỷ.
+ */
+export function dailyPeriodsStatusSql(kind: AttendanceExportKind): string {
+  return kind === 'daily'
+    ? `ss.status <> '${SessionStatus.CANCELLED}'`
+    : `ss.status = '${SessionStatus.PRESENT}'`;
+}
 
 type SummaryResult = Awaited<
   ReturnType<TeachingSessionService['attendanceSummary']>
 >;
 export type AttendanceSummaryRow = SummaryResult['data'][number];
 
-/** Số tiết "Có dạy" của một giáo viên trong một ngày, tại một tỉnh. */
+/** Số tiết của một giáo viên trong một ngày, tại một tỉnh (xem `dailyPeriodsStatusSql`). */
 export interface DailyPeriodsRow {
   teacherId: number;
   date: string;
@@ -646,7 +657,7 @@ export class AttendanceExportService {
 
     const [summary, daily] = await Promise.all([
       this.sessionService.attendanceSummary(query),
-      this.loadDailyPeriods(query),
+      this.loadDailyPeriods(query, kind),
     ]);
     const teacherIds = summary.data.map((row) => row.teacherId);
     const [staffTeacherIds, filterLabels] = await Promise.all([
@@ -670,9 +681,10 @@ export class AttendanceExportService {
     return { buffer, fileName: attendanceExportFileName(query, kind) };
   }
 
-  /** Tiết "Có dạy" theo giáo viên × ngày × tỉnh của trường, cùng bộ lọc với bảng tổng hợp. */
+  /** Tiết theo giáo viên × ngày × tỉnh của trường, cùng bộ lọc với bảng tổng hợp. */
   private async loadDailyPeriods(
     query: QueryAttendanceSummaryDto,
+    kind: AttendanceExportKind,
   ): Promise<DailyPeriodsRow[]> {
     const qb = this.sessionRepo
       .createQueryBuilder('ss')
@@ -684,7 +696,7 @@ export class AttendanceExportService {
       .addSelect('sp.name', 'provinceName')
       .addSelect(
         `COALESCE(SUM(COALESCE(ss.periods, 1))
-                    FILTER (WHERE ss.status = '${SessionStatus.PRESENT}'), 0)`,
+                    FILTER (WHERE ${dailyPeriodsStatusSql(kind)}), 0)`,
         'periods',
       )
       .addSelect('COUNT(*)', 'sessions')
