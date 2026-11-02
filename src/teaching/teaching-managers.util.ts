@@ -1,6 +1,7 @@
 import { Repository } from 'typeorm';
 import { Employee } from '../employee/employee.entity';
 import {
+    HR_ROLE,
     TEACHER_ACCOUNT_APPROVE_ROLES,
     TEACHING_MANAGE_ROLES,
 } from './teaching-roles';
@@ -17,6 +18,13 @@ export function findTeacherAccountApprovers(
     employeeRepo: Repository<Employee>,
 ): Promise<Array<{ id: number; zaloUserId: string | null }>> {
     return findEmployeesByRoles(employeeRepo, TEACHER_ACCOUNT_APPROVE_ROLES);
+}
+
+/** Chỉ Nhân sự — người nhận báo động chưa check-in qua Zalo. */
+export function findHrStaff(
+    employeeRepo: Repository<Employee>,
+): Promise<Array<{ id: number; zaloUserId: string | null }>> {
+    return findEmployeesByRoles(employeeRepo, [HR_ROLE]);
 }
 
 async function findEmployeesByRoles(

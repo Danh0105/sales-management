@@ -118,7 +118,10 @@ import {
 } from './fuel-allowance-tier.service';
 import { effectiveRatePerPeriod } from './teaching-rate.util';
 import { HCM_OFFICE, isHcmRegionWard } from './company-departure';
-import { findTeachingManagers as findTeachingManagersUtil } from './teaching-managers.util';
+import {
+  findHrStaff,
+  findTeachingManagers as findTeachingManagersUtil,
+} from './teaching-managers.util';
 import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
@@ -3275,7 +3278,7 @@ export class TeachingSessionService {
 
     // Gửi OA trước các kênh realtime/push: socket hoặc Firebase chậm không được
     // phép làm mất cảnh báo Zalo vốn có cửa sổ chỉ vài phút.
-    const zaloSent = await this.sendCheckinAlertToZalo(managers, message);
+    const zaloSent = await this.sendCheckinAlertToZalo(sessions);
 
     for (const receiverId of recipients) {
       await this.notificationService.create({
@@ -3785,31 +3788,40 @@ export class TeachingSessionService {
    * Kênh Zalo của báo động — chạy sau thông báo trong app và push, và không bao
    * giờ ném lỗi ra ngoài: Zalo là kênh phụ, hỏng thì báo động vẫn phải tới nơi
    * bằng hai kênh kia.
+   *
+   * Chỉ buổi ở trường khu vực TP.HCM và chỉ gửi Nhân sự (quyết định 02/11/2026);
+   * Giáo vụ và các khu vực khác theo dõi qua thông báo trong app/push.
    */
   private async sendCheckinAlertToZalo(
-    managers: Array<{ id: number; zaloUserId: string | null }>,
-    message: string,
+    sessions: Array<
+      Parameters<TeachingSessionService['buildCheckinAlertMessage']>[0][number] & {
+        hcmRegion: boolean;
+      }
+    >,
   ): Promise<number> {
     if (!isTeachingCheckinAlertZaloEnabled()) return 0;
 
-    const targets = managers
-      .map((m) => m.zaloUserId)
-      .filter((id): id is string => Boolean(id));
-
-    if (!targets.length) {
-      this.logger.warn(
-        'Bật báo động Zalo nhưng chưa tài khoản Giáo vụ / Nhân sự nào có zalo_user_id',
-      );
-      return 0;
-    }
+    const hcmSessions = sessions.filter((s) => s.hcmRegion);
+    if (!hcmSessions.length) return 0;
 
     try {
+      const targets = (await findHrStaff(this.employeeRepo))
+        .map((m) => m.zaloUserId)
+        .filter((id): id is string => Boolean(id));
+
+      if (!targets.length) {
+        this.logger.warn(
+          'Bật báo động Zalo nhưng chưa tài khoản Nhân sự nào có zalo_user_id',
+        );
+        return 0;
+      }
+
       this.logger.log(
         `Zalo: bắt đầu gửi cảnh báo check-in tới ${targets.length} người`,
       );
       const result = await this.zaloNotifyService.sendToMany(
         targets,
-        `${TEACHING_CHECKIN_ALERT_ZALO_PREFIX}${message}`,
+        `${TEACHING_CHECKIN_ALERT_ZALO_PREFIX}${this.buildCheckinAlertMessage(hcmSessions)}`,
       );
       this.logger.log(
         `Zalo: hoàn tất cảnh báo check-in (${result.sent} thành công, ${result.failed} lỗi)`,
@@ -3901,6 +3913,7 @@ export class TeachingSessionService {
       .createQueryBuilder('ss')
       .innerJoin('ss.teacher', 't')
       .innerJoin('ss.school', 'sc')
+      .leftJoin('sc.ward', 'sw')
       .leftJoin('ss.class', 'cl')
       .innerJoin('ss.subject', 'sub')
       .select([
@@ -3911,6 +3924,8 @@ export class TeachingSessionService {
         'ss.teacherId AS "teacherId"',
         't.name AS "teacherName"',
         'sc.name AS "schoolName"',
+        'sw.id AS "schoolWardId"',
+        'sw.province_id AS "schoolProvinceId"',
         'cl.name AS "className"',
         'sub.name AS "subjectName"',
       ])
@@ -3937,6 +3952,7 @@ export class TeachingSessionService {
         className: (row.className as string) ?? null,
         subjectName: (row.subjectName as string) ?? '',
         minutesToStart: this.minutesOfTime(startTime) - nowMinutes,
+        hcmRegion: isHcmRegionWard(row.schoolWardId, row.schoolProvinceId),
       };
     });
   }
