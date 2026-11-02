@@ -318,8 +318,12 @@ async function main() {
         mã_cuối: created[created.length - 1]?.code ?? '',
       },
     ]);
-    console.log('Kiểu chấm công:');
-    console.table([modes]);
+    if (created.length) {
+      console.log('Kiểu chấm công:');
+      console.table([modes]);
+    } else {
+      console.log('Không tạo hồ sơ nào (file chỉ có SKIP).');
+    }
   } finally {
     await ds.destroy();
   }

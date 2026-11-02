@@ -183,3 +183,122 @@ export async function performBootstrap(
 
   return { assignment, adminsBefore: before, adminsAfter: after };
 }
+
+export interface PermissionBootstrapParams {
+  accountId: number;
+  permissionCode: string;
+  scope: HrScope;
+  reason: string;
+  effectiveTo?: string | null;
+}
+
+/**
+ * Phase 1.3 — break-glass cấp MỘT quyền lẻ ĐẦU TIÊN (vd. HEALTH_DOCUMENT_VIEW:
+ * M1 không cho ai cấp quyền mà chính mình chưa có). Cùng luật thời hạn (M2)
+ * với bootstrap role; sau đó người giữ quyền cấp tiếp qua Access Admin API.
+ * ACCESS_ADMIN không cấp lẻ (quản trị chỉ qua role HR_ADMIN + luật tối thiểu).
+ * Phải chạy trong transaction: quyền + audit cùng commit/rollback.
+ */
+export async function performPermissionBootstrap(
+  manager: EntityManager,
+  audit: HrAuditService,
+  params: PermissionBootstrapParams,
+) {
+  const reason = params.reason.trim();
+  if (reason.length < 5) {
+    throw new BootstrapError('Thiếu lý do (tối thiểu 5 ký tự)');
+  }
+  if (!BOOTSTRAP_SCOPES.includes(params.scope)) {
+    throw new BootstrapError(
+      `Bootstrap chỉ nhận scope ${BOOTSTRAP_SCOPES.join('/')}`,
+    );
+  }
+  if (params.permissionCode === 'ACCESS_ADMIN') {
+    throw new BootstrapError(
+      'ACCESS_ADMIN không cấp lẻ — dùng --role=HR_ADMIN (luật số quản trị tối thiểu)',
+    );
+  }
+  const [account] = await manager.query<{ id: number; isActive: boolean }[]>(
+    `SELECT "id", "isActive" FROM "public"."employee" WHERE "id" = $1`,
+    [params.accountId],
+  );
+  if (!account) {
+    throw new BootstrapError(`Không có tài khoản id=${params.accountId}`);
+  }
+  if (!account.isActive) throw new BootstrapError('Tài khoản đã bị khoá');
+  const [permission] = await manager.query<{ code: string }[]>(
+    `SELECT "code" FROM "hr"."permissions" WHERE "code" = $1`,
+    [params.permissionCode],
+  );
+  if (!permission) {
+    throw new BootstrapError(
+      `Quyền ${params.permissionCode} không có trong hr.permissions`,
+    );
+  }
+  const on = hrToday();
+  const effectiveTo = params.effectiveTo ?? null;
+  const periodError = bootstrapPeriodError(
+    [params.permissionCode],
+    on,
+    effectiveTo,
+  );
+  if (periodError) throw new BootstrapError(periodError);
+
+  const [duplicate] = await manager.query<{ id: number }[]>(
+    `SELECT "id" FROM "hr"."account_permission_grants"
+      WHERE "account_id" = $1 AND "permission_code" = $2 AND "scope" = $3
+        AND "scope_ref_id" IS NULL AND "revoked_at" IS NULL
+        AND ("effective_to" IS NULL OR "effective_to" >= $4::date)
+      FOR UPDATE`,
+    [params.accountId, params.permissionCode, params.scope, on],
+  );
+  if (duplicate) {
+    throw new BootstrapError(
+      `Tài khoản đã có quyền ${params.permissionCode} (${params.scope}) chưa thu hồi — quyền lẻ #${duplicate.id}. Không tạo trùng.`,
+    );
+  }
+  const [row] = await manager.query<
+    { id: number; effectiveFrom: string; effectiveTo: string | null }[]
+  >(
+    `INSERT INTO "hr"."account_permission_grants"
+       ("account_id","permission_code","scope","scope_ref_id","effective_from","effective_to","reason","granted_by")
+     VALUES ($1,$2,$3,NULL,$4,$5,$6,NULL)
+     RETURNING "id", "effective_from"::text AS "effectiveFrom", "effective_to"::text AS "effectiveTo"`,
+    [
+      params.accountId,
+      params.permissionCode,
+      params.scope,
+      on,
+      effectiveTo,
+      reason,
+    ],
+  );
+  const sensitiveAccess = isSensitiveAccess([params.permissionCode]);
+  await audit.record(manager, {
+    actor: {
+      accountId: null,
+      name: 'hr-bootstrap-script',
+      roles: [],
+      ip: null,
+      userAgent: 'hr:access:bootstrap',
+      requestId: randomUUID(),
+    },
+    action: HrAuditAction.ACCESS_GRANT,
+    entity: 'account_permission_grant',
+    entityId: row.id,
+    oldValue: null,
+    newValue: {
+      id: row.id,
+      accountId: params.accountId,
+      permissionCode: params.permissionCode,
+      scope: params.scope,
+      effectiveFrom: row.effectiveFrom,
+      effectiveTo: row.effectiveTo,
+      grantedPermissions: [params.permissionCode],
+      sensitiveAccess,
+      via: 'bootstrap',
+    },
+    reason,
+  });
+  return { grantId: row.id, sensitiveAccess, ...row };
+}

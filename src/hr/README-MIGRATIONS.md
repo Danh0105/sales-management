@@ -249,3 +249,53 @@ gender, orgUnitCode, note` (+ các cột tham khảo `legacy*`, `category`, `ana
 - Idempotency: `hr.employee_import_batches.checksum` (SHA-256 file) — chạy lại đúng file → "ĐÃ được áp dụng".
 - Audit: `EMPLOYEE_IMPORT` (batchId, checksum, số IMPORT/SKIP, mã NV đầu/cuối) + `EMPLOYEE_CREATE` từng hồ sơ
   (`source: IMPORT`). Console/audit không in họ tên, email, SĐT, nội dung hay đường dẫn file.
+
+## Hồ sơ tài liệu (Phase 1.3 — migration 1100, 1110, 1130, 1140)
+
+Dùng lại hoàn toàn Private Files 0.4C: mỗi phiên bản tài liệu là một dòng `hr.files`; xem/tải qua
+`POST files/:id/access` → `GET files/:id/content` sẵn có (không có kho, endpoint tải hay token mới).
+
+- `1100` (SAFE): `hr.employee_documents`, `hr.employee_document_versions`; quyền `DOCUMENT_VIEW`,
+  `DOCUMENT_MANAGE` (HR_OFFICER + role cũ `nhansu` COMPANY), `HEALTH_DOCUMENT_VIEW` (nhạy cảm, không gán).
+- `1110` (**CAUTION**, cần `--allow-caution`): CHECK `hr.files.document_type` nhận thêm RESUME, DEGREE,
+  CERTIFICATE, HEALTH_CERTIFICATE (thêm CHECK mới NOT VALID → VALIDATE → bỏ CHECK cũ; không đổi dòng nào).
+- `1130` (**CAUTION**): file của phiên bản cũ (không phải `current_version_id`) còn ACTIVE → ARCHIVED
+  (`version + 1`, lý do "Phiên bản cũ — đã có phiên bản mới"). Idempotent; `down()` không hoàn tác (dữ liệu
+  vẫn còn, chỉ đổi trạng thái).
+- `1140` (SAFE): `hr.account_permission_grants` thêm `revoked_at`, `revoked_by`, `revoke_reason` (CHECK đi
+  cặp) + index grant còn hiệu lực. Grant đã thu hồi hết hiệu lực từ ngày thu hồi (giờ VN).
+
+**Không có role riêng cho giấy khám** (giữ 6 HR role). `HEALTH_DOCUMENT_VIEW` là quyền nhạy cảm duy nhất của
+giấy khám (không có `..._REVEAL`), cấp **quyền lẻ** từng người qua Access Admin — cùng luật với cấp role:
+không tự cấp, phạm vi/đơn vị hợp lệ, M1 (không vượt quyền mình), M2 (bắt buộc hạn, ≤ 180 ngày), audit
+`ACCESS_GRANT` / `ACCESS_REVOKE` (entity `account_permission_grant`). `ACCESS_ADMIN` không cấp lẻ (400
+`HR_DIRECT_GRANT_NOT_ALLOWED`) — quản trị chỉ qua role HR_ADMIN.
+
+API (`/api/hr/v1/access`): `GET accounts/:id/permission-grants` (ACCESS_VIEW),
+`POST accounts/:id/permission-grants` (ACCESS_ADMIN; body như cấp role, `permissionCode` thay `roleCode`;
+trùng còn hiệu lực → 409), `POST permission-grants/:id/revoke` (`{ reason, version }`). UI: trang Phân quyền
+→ khu "Quyền lẻ".
+
+Người giữ đầu tiên (break-glass, chỉ phạm vi COMPANY):
+
+```bash
+npm run hr:access:bootstrap -- --account-id=<id> --permission=HEALTH_DOCUMENT_VIEW   --effective-to=<YYYY-MM-DD> --reason="Initial health document access" --apply --confirm-db=<tên_db>
+```
+
+DB đã chạy migration `1120` (role `HEALTH_DOCUMENT_VIEWER`, file đã bỏ khỏi repo) → dọn bằng lệnh riêng,
+không dùng `migration:revert`. Mặc định chỉ xem trước; **dừng nếu role còn bất kỳ assignment nào** (kể cả đã
+thu hồi/hết hạn — lịch sử phải giữ). Khi áp dụng: xoá quyền của role, role, và dòng `hr.migrations` của 1120;
+audit `HR_ROLE_REMOVE`. Chạy lại an toàn ("Không còn gì để dọn").
+
+```bash
+npm run hr:access:cleanup-health-role                      # xem trước
+npm run hr:access:cleanup-health-role -- --reason="Bỏ role theo quyết định 1.3" --apply --confirm-db=<tên_db>
+```
+
+Loại tài liệu: RESUME, DEGREE (CONFIDENTIAL, không có hạn), CERTIFICATE (CONFIDENTIAL, hạn tuỳ chọn),
+HEALTH_CERTIFICATE (RESTRICTED, hạn bắt buộc), OTHER (INTERNAL — lưu file loại `GENERAL` có sẵn; file GENERAL
+cũ hiển thị là "Tài liệu khác"). Không lưu số hiệu giấy tờ; không có lý lịch tư pháp.
+Thêm phiên bản → file của bản hiện hành cũ chuyển ARCHIVED; ACTIVE chỉ còn nghĩa là bản hiện hành. Bản cũ vẫn
+xem/tải lại được (người có quyền xem loại đó) khi tài liệu còn ACTIVE. Lưu trữ tài liệu → lưu trữ mọi file, không
+tải được nữa. Không có quyền xem giấy khám: backend không trả ghi chú/tên file/nút tải và từ chối sửa ghi chú
+(403 `HR_DOCUMENT_NOTE_FORBIDDEN`).

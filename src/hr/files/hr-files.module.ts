@@ -30,5 +30,7 @@ import { LocalHrPrivateStorage } from './storage/local-hr-private-storage';
       useFactory: () => LocalHrPrivateStorage.fromEnv(process.env),
     },
   ],
+  // Phase 1.3 — module Documents ghi/lưu trữ file qua đúng service này.
+  exports: [HrFileService],
 })
 export class HrFilesModule {}

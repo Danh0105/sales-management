@@ -20,6 +20,7 @@ export const SENSITIVE_ACCESS_PERMISSIONS: readonly HrPermission[] = [
   HrPermission.SALARY_VIEW,
   HrPermission.IDENTITY_REVEAL,
   HrPermission.BANK_REVEAL,
+  HrPermission.HEALTH_DOCUMENT_VIEW,
 ];
 
 /**

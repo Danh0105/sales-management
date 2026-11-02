@@ -6,6 +6,8 @@
 export enum HrAuditAction {
   ACCESS_GRANT = 'ACCESS_GRANT',
   ACCESS_REVOKE = 'ACCESS_REVOKE',
+  /** Phase 1.3 — dọn một HR role (chỉ qua CLI chuyên dụng, role chưa từng được gán). */
+  HR_ROLE_REMOVE = 'HR_ROLE_REMOVE',
   /** Tài khoản đang quản trị HR bị khoá/xoá qua module employee cũ. */
   ACCOUNT_DEACTIVATE = 'ACCOUNT_DEACTIVATE',
   IDENTITY_REVEAL = 'IDENTITY_REVEAL',
@@ -34,6 +36,11 @@ export enum HrAuditAction {
   POSITION_DEACTIVATE = 'POSITION_DEACTIVATE',
   LEGACY_ORG_MAPPING_CREATE = 'LEGACY_ORG_MAPPING_CREATE',
   LEGACY_ORG_MAPPING_DEACTIVATE = 'LEGACY_ORG_MAPPING_DEACTIVATE',
+  /** Phase 1.3 — hồ sơ tài liệu (nội dung file vẫn qua FILE_*). */
+  DOCUMENT_CREATE = 'DOCUMENT_CREATE',
+  DOCUMENT_UPDATE = 'DOCUMENT_UPDATE',
+  DOCUMENT_VERSION_ADD = 'DOCUMENT_VERSION_ADD',
+  DOCUMENT_ARCHIVE = 'DOCUMENT_ARCHIVE',
   FILE_UPLOAD = 'FILE_UPLOAD',
   FILE_DOWNLOAD = 'FILE_DOWNLOAD',
   /** Task 0.4C — cấp URL/token truy cập nội dung (TTL ngắn). */

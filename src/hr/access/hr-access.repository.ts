@@ -85,6 +85,11 @@ export class HrAccessRepository {
       .where('g.accountId = :accountId', { accountId })
       .andWhere('g.effectiveFrom <= :on', { on })
       .andWhere('(g.effectiveTo IS NULL OR g.effectiveTo >= :on)', { on })
+      // Thu hồi mất hiệu lực ngay trong ngày thu hồi (giờ Việt Nam) — như role assignment.
+      .andWhere(
+        `("g"."revoked_at" IS NULL OR ("g"."revoked_at" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > CAST(:on AS date))`,
+        { on },
+      )
       .orderBy('g.permissionCode', 'ASC')
       .addOrderBy('g.id', 'ASC');
     if (permission)

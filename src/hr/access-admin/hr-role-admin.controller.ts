@@ -22,6 +22,7 @@ import {
 } from '../access/hr-permission.guard';
 import { auditActorFromRequest } from '../audit/hr-audit-actor';
 import { AssignHrRoleDto } from './dto/assign-hr-role.dto';
+import { GrantHrPermissionDto } from './dto/grant-hr-permission.dto';
 import { RevokeHrRoleAssignmentDto } from './dto/revoke-hr-role-assignment.dto';
 import { HrRoleAdminService } from './hr-role-admin.service';
 
@@ -107,6 +108,51 @@ export class HrRoleAdminController {
       req.hrAccess.accountId,
       auditActorFromRequest(req),
       assignmentId,
+      dto,
+    );
+  }
+
+  // ─── Quyền lẻ (Phase 1.3) — cùng luật M1/M2/audit với cấp role ────────
+
+  @Get('accounts/:accountId/permission-grants')
+  @RequireHrPermission(HrPermission.ACCESS_VIEW)
+  permissionGrants(
+    @Req() req: HrRequest,
+    @Param('accountId', ParseIntPipe) accountId: number,
+  ) {
+    return this.service.accountPermissionGrants(
+      req.hrAccess.accountId,
+      accountId,
+    );
+  }
+
+  @Post('accounts/:accountId/permission-grants')
+  @RequireHrPermission(HrPermission.ACCESS_ADMIN)
+  grantPermission(
+    @Req() req: HrRequest,
+    @Param('accountId', ParseIntPipe) accountId: number,
+    @Body() dto: GrantHrPermissionDto,
+  ) {
+    return this.service.grantPermission(
+      req.hrAccess.accountId,
+      auditActorFromRequest(req),
+      accountId,
+      dto,
+    );
+  }
+
+  @Post('permission-grants/:grantId/revoke')
+  @HttpCode(200)
+  @RequireHrPermission(HrPermission.ACCESS_ADMIN)
+  revokePermissionGrant(
+    @Req() req: HrRequest,
+    @Param('grantId', ParseIntPipe) grantId: number,
+    @Body() dto: RevokeHrRoleAssignmentDto,
+  ) {
+    return this.service.revokePermissionGrant(
+      req.hrAccess.accountId,
+      auditActorFromRequest(req),
+      grantId,
       dto,
     );
   }

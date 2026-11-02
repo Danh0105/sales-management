@@ -15,10 +15,11 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
 
-export class AssignHrRoleDto {
-  @Matches(/^[A-Z][A-Z0-9_]{1,63}$/, { message: 'roleCode không hợp lệ' })
-  roleCode: string;
-
+/**
+ * Trường chung của mọi kiểu cấp quyền (role / quyền lẻ): phạm vi, thời hạn,
+ * lý do. Luật kiểm tra dùng chung ở `HrRoleAdminService.checkGrantRequest`.
+ */
+export class HrGrantScopeFields {
   @IsIn(HR_SCOPES, {
     message: `scope phải là một trong ${HR_SCOPES.join(', ')}`,
   })
@@ -46,4 +47,9 @@ export class AssignHrRoleDto {
   @MinLength(5, { message: 'Lý do cấp quyền tối thiểu 5 ký tự' })
   @MaxLength(2000)
   reason: string;
+}
+
+export class AssignHrRoleDto extends HrGrantScopeFields {
+  @Matches(/^[A-Z][A-Z0-9_]{1,63}$/, { message: 'roleCode không hợp lệ' })
+  roleCode: string;
 }

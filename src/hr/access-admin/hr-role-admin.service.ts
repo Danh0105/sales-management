@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import { HrAccountPermissionGrant } from '../access/entities/hr-account-permission-grant.entity';
 import { HrAccountRoleAssignment } from '../access/entities/hr-account-role-assignment.entity';
 import { HrAccessRepository } from '../access/hr-access.repository';
 import { HrAccessService, HrGrant } from '../access/hr-access.service';
@@ -17,6 +19,7 @@ import { HrAuditAction } from '../audit/hr-audit-action';
 import { HrAuditActor } from '../audit/hr-audit-actor';
 import { HrAuditService } from '../audit/hr-audit.service';
 import { AssignHrRoleDto } from './dto/assign-hr-role.dto';
+import { GrantHrPermissionDto } from './dto/grant-hr-permission.dto';
 import { RevokeHrRoleAssignmentDto } from './dto/revoke-hr-role-assignment.dto';
 import { HrAccessSafetyService } from '../access-safety/hr-access-safety.service';
 import {
@@ -32,6 +35,7 @@ import { isScopeOptionType } from '../organization/org-scope-options';
 import { OrgScopeUnitValidator } from '../organization/org-scope-unit.validator';
 
 const AUDIT_ENTITY = 'account_role_assignment';
+const GRANT_AUDIT_ENTITY = 'account_permission_grant';
 const UNIQUE_VIOLATION = '23505';
 
 function isUniqueViolation(error: unknown): boolean {
@@ -55,6 +59,46 @@ function snapshot(a: HrAccountRoleAssignment) {
     revokedAt: a.revokedAt,
     revokedBy: a.revokedBy,
     version: a.version,
+  };
+}
+
+/** Ảnh chụp quyền lẻ cho audit — không kèm dữ liệu cá nhân nào. */
+function grantSnapshot(g: HrAccountPermissionGrant) {
+  return {
+    id: g.id,
+    accountId: g.accountId,
+    permissionCode: g.permissionCode,
+    scope: g.scope,
+    scopeRefId: g.scopeRefId,
+    effectiveFrom: g.effectiveFrom,
+    effectiveTo: g.effectiveTo,
+    revokedAt: g.revokedAt,
+    revokedBy: g.revokedBy,
+    version: g.version,
+  };
+}
+
+function grantView(g: HrAccountPermissionGrant, on: string) {
+  return {
+    id: g.id,
+    accountId: g.accountId,
+    permissionCode: g.permissionCode,
+    scope: g.scope,
+    scopeRefId: g.scopeRefId,
+    effectiveFrom: g.effectiveFrom,
+    effectiveTo: g.effectiveTo,
+    reason: g.reason,
+    grantedBy: g.grantedBy,
+    createdAt: g.createdAt,
+    revokedAt: g.revokedAt,
+    revokedBy: g.revokedBy,
+    revokeReason: g.revokeReason,
+    version: g.version,
+    sensitive: isSensitiveAccess([g.permissionCode]),
+    active:
+      g.revokedAt === null &&
+      g.effectiveFrom <= on &&
+      (g.effectiveTo === null || g.effectiveTo >= on),
   };
 }
 
@@ -128,14 +172,270 @@ export class HrRoleAdminService {
     accountId: number,
     dto: AssignHrRoleDto,
   ): Promise<HrAccountRoleAssignment> {
-    if (accountId === actorId) {
-      throw new ForbiddenException(
+    let roleCode = dto.roleCode;
+    const checked = await this.checkGrantRequest(actorId, accountId, dto, {
+      selfMessage:
         'Không được tự cấp HR role cho chính mình — cần một quản trị viên khác',
+      resolvePermissions: async () => {
+        const role = await this.repo.findRole(dto.roleCode);
+        if (!role || !role.isActive) {
+          throw new BadRequestException(
+            `HR role ${dto.roleCode} không tồn tại hoặc đã tắt`,
+          );
+        }
+        roleCode = role.code;
+        return this.repo.listRolePermissionCodes(role.code);
+      },
+    });
+    const { requested, effectiveFrom, effectiveTo } = checked;
+
+    const row = {
+      accountId,
+      roleCode,
+      ...requested,
+      effectiveFrom,
+      effectiveTo,
+      reason: dto.reason,
+      grantedBy: actorId,
+    };
+
+    try {
+      return await this.dataSource.manager.transaction(async (manager) => {
+        const duplicate = await this.repo.findUnrevokedDuplicate(manager, row);
+        if (duplicate) {
+          throw new ConflictException({
+            message: `Tài khoản đã có ${roleCode} (${requested.scope}) chưa thu hồi — assignment #${duplicate.id}`,
+            existingAssignmentId: duplicate.id,
+          });
+        }
+
+        const created = await this.repo.insertAssignment(manager, row);
+        await this.audit.record(manager, {
+          actor,
+          action: HrAuditAction.ACCESS_GRANT,
+          entity: AUDIT_ENTITY,
+          entityId: created.id,
+          oldValue: null,
+          newValue: {
+            ...snapshot(created),
+            grantedPermissions: checked.permissions,
+            sensitiveAccess: checked.sensitiveAccess,
+          },
+          reason: dto.reason,
+        });
+        return created;
+      });
+    } catch (error) {
+      // Hai request cấp cùng lúc: request sau vấp unique index trong DB.
+      if (isUniqueViolation(error)) {
+        throw new ConflictException(
+          `Tài khoản đã có ${roleCode} (${requested.scope}) chưa thu hồi`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  // ─── Quyền lẻ (Phase 1.3) ────────────────────────────────────────────
+
+  /** Lịch sử quyền lẻ của một tài khoản — kiểm tra phạm vi ACCESS_VIEW trước. */
+  async accountPermissionGrants(viewerId: number, accountId: number) {
+    await this.access.assertCanAccess(viewerId, HrPermission.ACCESS_VIEW, {
+      accountId,
+    });
+    const on = hrToday();
+    const rows = await this.dataSource
+      .getRepository(HrAccountPermissionGrant)
+      .find({
+        where: { accountId },
+        order: { effectiveFrom: 'DESC', id: 'DESC' },
+      });
+    return { accountId, on, grants: rows.map((g) => grantView(g, on)) };
+  }
+
+  /**
+   * Cấp MỘT quyền lẻ cho một tài khoản — cùng luật với cấp role
+   * (`checkGrantRequest`: tự cấp, ngày, scope, đơn vị scope, phạm vi tài khoản
+   * đích, M2, M1). ACCESS_ADMIN không cấp lẻ: quyền quản trị chỉ qua role
+   * HR_ADMIN để luật số quản trị tối thiểu luôn áp dụng.
+   */
+  async grantPermission(
+    actorId: number,
+    actor: HrAuditActor,
+    accountId: number,
+    dto: GrantHrPermissionDto,
+  ) {
+    const checked = await this.checkGrantRequest(actorId, accountId, dto, {
+      selfMessage:
+        'Không được tự cấp quyền cho chính mình — cần một quản trị viên khác',
+      resolvePermissions: () => {
+        if (dto.permissionCode === HrPermission.ACCESS_ADMIN) {
+          throw new BadRequestException({
+            statusCode: 400,
+            code: 'HR_DIRECT_GRANT_NOT_ALLOWED',
+            message:
+              'Quyền quản trị phân quyền chỉ cấp qua role HR_ADMIN (để áp dụng luật số quản trị tối thiểu)',
+          });
+        }
+        return Promise.resolve([dto.permissionCode]);
+      },
+    });
+    const { requested, effectiveFrom, effectiveTo } = checked;
+    const today = hrToday();
+
+    return this.dataSource.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(HrAccountPermissionGrant);
+      // Trùng = cùng quyền + scope + đơn vị, chưa thu hồi, chưa hết hạn.
+      const duplicate = await repo
+        .createQueryBuilder('g')
+        .setLock('pessimistic_write')
+        .where('g.accountId = :accountId', { accountId })
+        .andWhere('g.permissionCode = :code', { code: dto.permissionCode })
+        .andWhere('g.scope = :scope', { scope: requested.scope })
+        .andWhere(
+          requested.scopeRefId === null
+            ? 'g.scopeRefId IS NULL'
+            : 'g.scopeRefId = :ref',
+          { ref: requested.scopeRefId },
+        )
+        .andWhere('g.revokedAt IS NULL')
+        .andWhere('(g.effectiveTo IS NULL OR g.effectiveTo >= :today)', {
+          today,
+        })
+        .getOne();
+      if (duplicate) {
+        throw new ConflictException({
+          message: `Tài khoản đã có quyền ${dto.permissionCode} (${requested.scope}) chưa thu hồi — quyền lẻ #${duplicate.id}`,
+          existingGrantId: duplicate.id,
+        });
+      }
+      const inserted = await repo.insert({
+        accountId,
+        permissionCode: dto.permissionCode,
+        ...requested,
+        effectiveFrom,
+        effectiveTo,
+        reason: dto.reason,
+        grantedBy: actorId,
+      } as QueryDeepPartialEntity<HrAccountPermissionGrant>);
+      const id = (inserted.identifiers[0] as { id: number }).id;
+      const created = await repo.findOneByOrFail({ id });
+      await this.audit.record(manager, {
+        actor,
+        action: HrAuditAction.ACCESS_GRANT,
+        entity: GRANT_AUDIT_ENTITY,
+        entityId: id,
+        oldValue: null,
+        newValue: {
+          ...grantSnapshot(created),
+          grantedPermissions: checked.permissions,
+          sensitiveAccess: checked.sensitiveAccess,
+        },
+        reason: dto.reason,
+      });
+      return grantView(created, today);
+    });
+  }
+
+  /** Thu hồi quyền lẻ theo `version` — cùng luật phạm vi với thu hồi role. */
+  async revokePermissionGrant(
+    actorId: number,
+    actor: HrAuditActor,
+    grantId: number,
+    dto: RevokeHrRoleAssignmentDto,
+  ) {
+    const current = await this.dataSource
+      .getRepository(HrAccountPermissionGrant)
+      .findOne({ where: { id: grantId } });
+    if (!current) throw new NotFoundException('Không tìm thấy dữ liệu');
+    // Ngoài phạm vi = 404 giống hệt không tồn tại.
+    await this.access.assertCanAccess(actorId, HrPermission.ACCESS_ADMIN, {
+      accountId: current.accountId,
+    });
+    if (current.accountId === actorId) {
+      throw new ForbiddenException(
+        'Không được tự thu hồi quyền của chính mình — cần một quản trị viên khác',
       );
     }
+    this.assertScopeWithinOwnAdmin(
+      await this.access.getGrants(actorId, HrPermission.ACCESS_ADMIN),
+      current,
+      'thu hồi',
+    );
 
-    // Thứ tự kiểm tra (chốt 01/10/2026): ngày → hình dạng scope → đơn vị của
-    // scope → tài khoản đích trong phạm vi → M2 → M1 → ghi.
+    return this.dataSource.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(HrAccountPermissionGrant);
+      const locked = await repo
+        .createQueryBuilder('g')
+        .setLock('pessimistic_write')
+        .where('g.id = :id', { id: grantId })
+        .getOne();
+      if (!locked) throw new NotFoundException('Không tìm thấy dữ liệu');
+      if (locked.revokedAt) {
+        throw new ConflictException('Quyền này đã được thu hồi');
+      }
+      if (locked.version !== dto.version) {
+        throw new ConflictException({
+          message: 'Dữ liệu đã bị người khác thay đổi — tải lại rồi thử lại',
+          currentVersion: locked.version,
+        });
+      }
+      const result = await manager
+        .createQueryBuilder()
+        .update(HrAccountPermissionGrant)
+        .set({
+          revokedAt: () => 'now()',
+          revokedBy: actorId,
+          revokeReason: dto.reason,
+          version: () => '"version" + 1',
+        } as QueryDeepPartialEntity<HrAccountPermissionGrant>)
+        .where('id = :id AND version = :version AND revoked_at IS NULL', {
+          id: grantId,
+          version: dto.version,
+        })
+        .execute();
+      if (!result.affected) {
+        throw new ConflictException(
+          'Dữ liệu đã bị người khác thay đổi — tải lại rồi thử lại',
+        );
+      }
+      const revoked = await repo.findOneByOrFail({ id: grantId });
+      await this.audit.record(manager, {
+        actor,
+        action: HrAuditAction.ACCESS_REVOKE,
+        entity: GRANT_AUDIT_ENTITY,
+        entityId: grantId,
+        oldValue: grantSnapshot(locked),
+        newValue: grantSnapshot(revoked),
+        reason: dto.reason,
+      });
+      return grantView(revoked, hrToday());
+    });
+  }
+
+  /**
+   * Luật DÙNG CHUNG cho mọi kiểu cấp quyền (role / quyền lẻ). Thứ tự (chốt
+   * 01/10/2026): tự cấp → ngày → hình dạng scope → đơn vị của scope → tài
+   * khoản đích trong phạm vi → (quyền được cấp) → M2 → M1 → tài khoản còn hoạt
+   * động. Không có bộ luật thứ hai.
+   */
+  private async checkGrantRequest(
+    actorId: number,
+    accountId: number,
+    dto: {
+      scope: HrScope;
+      scopeRefId?: number;
+      effectiveFrom?: string;
+      effectiveTo?: string;
+    },
+    opts: {
+      selfMessage: string;
+      /** Quyền sẽ được cấp — chạy SAU kiểm tra phạm vi tài khoản đích. */
+      resolvePermissions: () => Promise<string[]>;
+    },
+  ) {
+    if (accountId === actorId) throw new ForbiddenException(opts.selfMessage);
+
     const today = hrToday();
     const effectiveFrom = dto.effectiveFrom ?? today;
     const effectiveTo = dto.effectiveTo ?? null;
@@ -182,18 +482,12 @@ export class HrRoleAdminService {
       accountId,
     });
 
-    const role = await this.repo.findRole(dto.roleCode);
-    if (!role || !role.isActive) {
-      throw new BadRequestException(
-        `HR role ${dto.roleCode} không tồn tại hoặc đã tắt`,
-      );
-    }
-    const rolePermissions = await this.repo.listRolePermissionCodes(role.code);
+    const permissions = await opts.resolvePermissions();
 
-    // M2 — role chứa quyền xem dữ liệu nhạy cảm phải có hạn, tối đa
+    // M2 — quyền xem dữ liệu nhạy cảm phải có hạn, tối đa
     // MAX_SENSITIVE_ACCESS_DAYS ngày lịch (tính cả hai đầu). Kiểm tra TRƯỚC M1
     // để thiếu effectiveTo báo đúng lỗi, không bị M1 báo "thời hạn không phủ".
-    const sensitiveAccess = isSensitiveAccess(rolePermissions);
+    const sensitiveAccess = isSensitiveAccess(permissions);
     const durationError = sensitiveAccess
       ? sensitiveDurationError(effectiveFrom, effectiveTo)
       : null;
@@ -212,10 +506,13 @@ export class HrRoleAdminService {
     const actorGrants = await this.access.getGrants(actorId);
     this.assertScopeWithinOwnAdmin(actorGrants, requested, 'cấp');
     const uncovered = uncoveredPermissions(
-      rolePermissions,
+      permissions,
       actorGrants,
       requested,
-      { effectiveFrom, effectiveTo },
+      {
+        effectiveFrom,
+        effectiveTo,
+      },
     );
     if (uncovered.length) {
       const list = uncovered
@@ -247,52 +544,13 @@ export class HrRoleAdminService {
     if (!account.isActive) {
       throw new BadRequestException('Tài khoản đã bị khoá — không cấp quyền');
     }
-
-    const row = {
-      accountId,
-      roleCode: role.code,
-      ...requested,
+    return {
+      requested,
       effectiveFrom,
       effectiveTo,
-      reason: dto.reason,
-      grantedBy: actorId,
+      permissions,
+      sensitiveAccess,
     };
-
-    try {
-      return await this.dataSource.manager.transaction(async (manager) => {
-        const duplicate = await this.repo.findUnrevokedDuplicate(manager, row);
-        if (duplicate) {
-          throw new ConflictException({
-            message: `Tài khoản đã có ${role.code} (${requested.scope}) chưa thu hồi — assignment #${duplicate.id}`,
-            existingAssignmentId: duplicate.id,
-          });
-        }
-
-        const created = await this.repo.insertAssignment(manager, row);
-        await this.audit.record(manager, {
-          actor,
-          action: HrAuditAction.ACCESS_GRANT,
-          entity: AUDIT_ENTITY,
-          entityId: created.id,
-          oldValue: null,
-          newValue: {
-            ...snapshot(created),
-            grantedPermissions: rolePermissions,
-            sensitiveAccess,
-          },
-          reason: dto.reason,
-        });
-        return created;
-      });
-    } catch (error) {
-      // Hai request cấp cùng lúc: request sau vấp unique index trong DB.
-      if (isUniqueViolation(error)) {
-        throw new ConflictException(
-          `Tài khoản đã có ${role.code} (${requested.scope}) chưa thu hồi`,
-        );
-      }
-      throw error;
-    }
   }
 
   async revoke(

@@ -105,3 +105,16 @@ storage key, đường dẫn, tên file, nội dung. `public.activity_log`: `/ap
 
 Token nằm trên query string → có thể xuất hiện trong access log của Nginx trong 5 phút hiệu lực (giống presigned URL S3).
 Nên cấu hình log format bỏ query cho `/api/hr/v1/files/*/content` (việc hạ tầng, chưa làm).
+
+## Phase 1.3 — dùng chung với Hồ sơ tài liệu
+
+- Quyền xem nội dung theo loại là **danh sách "một trong các quyền"** (`accessPermissions`): `GENERAL` xem bằng
+  `FILE_VIEW` (như 0.4C) **hoặc** `DOCUMENT_VIEW`; giấy khám sức khỏe chỉ `HEALTH_DOCUMENT_VIEW`.
+- Loại `managedByDocuments` (RESUME, DEGREE, CERTIFICATE, HEALTH_CERTIFICATE) chỉ tạo qua module Documents;
+  `POST employees/:id/files` với các loại này → 400 `HR_FILE_USE_DOCUMENTS`.
+- `HrFileService` mở cho module Documents: `storeDocumentFile` (ghi file trong transaction của phiên bản tài
+  liệu, lỗi → xoá bù object), `archiveWithin`, `canSeeContent`, `contentVisibility`. Luồng upload/tải/token
+  của 0.4C không đổi.
+- File ARCHIVED thường vẫn bị chặn như 0.4C. Ngoại lệ duy nhất: file là **phiên bản cũ** của tài liệu còn ACTIVE
+  (`findViewable` / `isSupersededVersion`) — xin quyền + tải được, audit `FILE_ACCESS` ghi `superseded: true`.
+  Tài liệu bị lưu trữ → mọi phiên bản bị chặn.

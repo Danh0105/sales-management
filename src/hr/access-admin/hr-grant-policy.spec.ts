@@ -22,9 +22,17 @@ const s = (scope: HrScope, scopeRefId: number | null = null) => ({
 const { SELF, TEAM, ORG_UNIT, BRANCH, COMPANY, ALL } = HrScope;
 
 describe('M2 — danh sách tập trung', () => {
-  it('quyền nhạy cảm gồm lương, CCCD, ngân hàng; KHÔNG gồm ACCESS_ADMIN', () => {
+  it('quyền nhạy cảm gồm lương, CCCD, ngân hàng, giấy khám sức khỏe (1.3); KHÔNG gồm ACCESS_ADMIN', () => {
     expect([...SENSITIVE_ACCESS_PERMISSIONS].sort()).toEqual(
-      ['BANK_REVEAL', 'IDENTITY_REVEAL', 'SALARY_VIEW'].sort(),
+      [
+        'BANK_REVEAL',
+        'IDENTITY_REVEAL',
+        'SALARY_VIEW',
+        'HEALTH_DOCUMENT_VIEW',
+      ].sort(),
+    );
+    expect(SENSITIVE_ACCESS_PERMISSIONS).not.toContain(
+      HrPermission.DOCUMENT_VIEW,
     );
     expect(SENSITIVE_ACCESS_PERMISSIONS).not.toContain(
       HrPermission.ACCESS_ADMIN,

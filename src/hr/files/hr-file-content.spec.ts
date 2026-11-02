@@ -114,26 +114,60 @@ describe('Chính sách loại tài liệu', () => {
   });
 
   it('[14] quyền theo loại: CCCD → IDENTITY_REVEAL, ngân hàng → BANK_REVEAL; hợp đồng/thuế/BHXH chưa có quyền → fail closed', () => {
-    expect(HR_FILE_DOCUMENT_POLICY.IDENTITY_FRONT.accessPermission).toBe(
+    expect(HR_FILE_DOCUMENT_POLICY.IDENTITY_FRONT.accessPermissions).toEqual([
       HrPermission.IDENTITY_REVEAL,
-    );
-    expect(HR_FILE_DOCUMENT_POLICY.BANK_PROOF.accessPermission).toBe(
+    ]);
+    expect(HR_FILE_DOCUMENT_POLICY.BANK_PROOF.accessPermissions).toEqual([
       HrPermission.BANK_REVEAL,
-    );
-    expect(HR_FILE_DOCUMENT_POLICY.CONTRACT.accessPermission).toBeNull();
-    expect(HR_FILE_DOCUMENT_POLICY.TAX.accessPermission).toBeNull();
-    expect(HR_FILE_DOCUMENT_POLICY.INSURANCE.accessPermission).toBeNull();
+    ]);
+    expect(HR_FILE_DOCUMENT_POLICY.CONTRACT.accessPermissions).toEqual([]);
+    expect(HR_FILE_DOCUMENT_POLICY.TAX.accessPermissions).toEqual([]);
+    expect(HR_FILE_DOCUMENT_POLICY.INSURANCE.accessPermissions).toEqual([]);
   });
 
-  it('[15] không loại RESTRICTED nào mở bằng EMPLOYEE_VIEW / FILE_VIEW', () => {
+  it('[15] không loại RESTRICTED nào mở bằng EMPLOYEE_VIEW / FILE_VIEW / DOCUMENT_VIEW', () => {
     for (const p of Object.values(HR_FILE_DOCUMENT_POLICY)) {
       if (p.classification === HrFileClassification.RESTRICTED) {
-        expect([
+        for (const weak of [
           HrPermission.EMPLOYEE_VIEW,
           HrPermission.FILE_VIEW,
-        ]).not.toContain(p.accessPermission);
+          HrPermission.DOCUMENT_VIEW,
+        ])
+          expect(p.accessPermissions).not.toContain(weak);
       }
     }
+  });
+
+  it('Phase 1.3: loại Documents — phân loại, quyền, chỉ qua module Documents; GENERAL (= OTHER) giữ FILE_VIEW', () => {
+    const P = HR_FILE_DOCUMENT_POLICY;
+    for (const t of [
+      HrFileDocumentType.RESUME,
+      HrFileDocumentType.DEGREE,
+      HrFileDocumentType.CERTIFICATE,
+    ]) {
+      expect(P[t].classification).toBe(HrFileClassification.CONFIDENTIAL);
+      expect(P[t].accessPermissions).toEqual([HrPermission.DOCUMENT_VIEW]);
+      expect(P[t].managedByDocuments).toBe(true);
+    }
+    expect(P.HEALTH_CERTIFICATE.classification).toBe(
+      HrFileClassification.RESTRICTED,
+    );
+    expect(P.HEALTH_CERTIFICATE.accessPermissions).toEqual([
+      HrPermission.HEALTH_DOCUMENT_VIEW,
+    ]);
+    expect(P.HEALTH_CERTIFICATE.managedByDocuments).toBe(true);
+    expect(P.GENERAL.classification).toBe(HrFileClassification.INTERNAL);
+    expect(P.GENERAL.accessPermissions).toEqual([
+      HrPermission.FILE_VIEW,
+      HrPermission.DOCUMENT_VIEW,
+    ]);
+    expect(P.GENERAL.managedByDocuments).toBe(false);
+    for (const t of [
+      HrFileDocumentType.IDENTITY_FRONT,
+      HrFileDocumentType.IDENTITY_BACK,
+      HrFileDocumentType.BANK_PROOF,
+    ])
+      expect(P[t].managedByDocuments).toBe(false);
   });
 
   it('tài liệu không phải INTERNAL bắt buộc lý do khi truy cập', () => {

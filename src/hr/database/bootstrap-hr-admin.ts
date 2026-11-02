@@ -9,6 +9,7 @@ import {
   BOOTSTRAP_SCOPES,
   bootstrapPeriodError,
   performBootstrap,
+  performPermissionBootstrap,
 } from '../access-admin/hr-bootstrap';
 import { HrAuditLog } from '../audit/entities/hr-audit-log.entity';
 import { HrAuditService } from '../audit/hr-audit.service';
@@ -25,6 +26,9 @@ import { assertApplyAllowed } from './migration-risk';
  *   npm run hr:access:bootstrap -- --account-id=158 --role=HR_SENSITIVE_VIEWER \
  *     --effective-to=2026-12-31 --reason="Initial sensitive access" --apply --confirm-db=<tên_db>
  *
+ * Phase 1.3 — cấp MỘT quyền lẻ đầu tiên (vd. HEALTH_DOCUMENT_VIEW):
+ *   npm run hr:access:bootstrap -- --account-id=158 --permission=HEALTH_DOCUMENT_VIEW  *     --effective-to=2026-12-31 --reason="Initial health document access" --apply --confirm-db=<tên_db>
+ *
  * Role chứa quyền dữ liệu nhạy cảm BẮT BUỘC --effective-to (M2: tối đa
  * MAX_SENSITIVE_ACCESS_DAYS ngày, tính cả hai đầu). Không có assignment nhạy
  * cảm vĩnh viễn qua bootstrap.
@@ -40,6 +44,8 @@ function arg(argv: string[], name: string): string | undefined {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const permissionCode = arg(argv, 'permission');
+  if (permissionCode) return bootstrapPermission(argv, permissionCode);
   const apply = argv.includes('--apply');
   const accountId = Number(arg(argv, 'account-id'));
   const roleCode = arg(argv, 'role') ?? 'HR_ADMIN';
@@ -166,6 +172,102 @@ async function main(): Promise<void> {
       `Đã cấp: assignment #${result.assignment.id} — ${roleCode} (${scope}) cho #${accountId}. ` +
         `Protected HR admin: ${result.adminsBefore.length} → ${result.adminsAfter.length} ` +
         `(tối thiểu ${MIN_PROTECTED_HR_ADMINS} để vận hành).`,
+    );
+  } finally {
+    await ds.destroy();
+  }
+}
+
+/** Nhánh --permission: cấp một quyền lẻ đầu tiên (cùng luật thời hạn M2). */
+async function bootstrapPermission(
+  argv: string[],
+  permissionCode: string,
+): Promise<void> {
+  if (arg(argv, 'role')) {
+    throw new Error('Chỉ dùng một trong --role / --permission');
+  }
+  const apply = argv.includes('--apply');
+  const accountId = Number(arg(argv, 'account-id'));
+  const scope = (arg(argv, 'scope') ?? HrScope.COMPANY) as HrScope;
+  const reason = arg(argv, 'reason')?.trim() ?? '';
+  const effectiveTo = arg(argv, 'effective-to')?.trim() || null;
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    throw new Error('Thiếu hoặc sai --account-id=<id trong public.employee>');
+  }
+  if (!BOOTSTRAP_SCOPES.includes(scope)) {
+    throw new Error(`--scope chỉ nhận ${BOOTSTRAP_SCOPES.join('/')}`);
+  }
+  if (reason.length < 5) throw new Error('Thiếu --reason (tối thiểu 5 ký tự)');
+  const url = process.env.HR_MIGRATION_DATABASE_URL;
+  if (!url) throw new Error('Thiếu HR_MIGRATION_DATABASE_URL.');
+
+  const ds = new DataSource({
+    type: 'postgres',
+    url,
+    entities: [HrAuditLog],
+    synchronize: false,
+    migrationsRun: false,
+    installExtensions: false,
+    extra: {
+      max: 1,
+      options:
+        '-c lock_timeout=5000 -c statement_timeout=60000' +
+        (apply ? '' : ' -c default_transaction_read_only=on'),
+    },
+  });
+  await ds.initialize();
+  try {
+    const [target] = await ds.query<Record<string, unknown>[]>(
+      `SELECT current_database() AS db, inet_server_addr()::text AS addr, current_user AS usr`,
+    );
+    console.log('Database đích:');
+    console.table([target]);
+    const periodError = bootstrapPeriodError(
+      [permissionCode],
+      hrToday(),
+      effectiveTo,
+    );
+    if (periodError) throw new Error(periodError);
+    const existing = await ds.query<Record<string, unknown>[]>(
+      `SELECT "id", "permission_code" AS "permission", "scope", "effective_from"::text AS "from",
+              "effective_to"::text AS "to", "revoked_at" AS "revokedAt"
+         FROM "hr"."account_permission_grants" WHERE "account_id" = $1 ORDER BY "id"`,
+      [accountId],
+    );
+    console.log('Quyền lẻ đang có:');
+    console.table(existing);
+    console.log(
+      `Dự định: cấp quyền lẻ ${permissionCode} (${scope}) cho #${accountId} ` +
+        `từ ${hrToday()} đến ${effectiveTo ?? 'không thời hạn'} — lý do: "${reason}"`,
+    );
+    if (!apply) {
+      console.log(
+        'Xem trước xong — chưa ghi gì. Thêm --apply --confirm-db=<tên_db> để thực thi.',
+      );
+      return;
+    }
+    assertApplyAllowed({
+      apply,
+      confirmDb: arg(argv, 'confirm-db'),
+      actualDb: String(target.db),
+      nodeEnv: process.env.NODE_ENV,
+      allowProduction: process.env.HR_ALLOW_PRODUCTION_MIGRATION,
+      allowCaution: true,
+      pending: [{ name: `bootstrap ${permissionCode}`, risk: 'SAFE' }],
+    });
+    const audit = new HrAuditService(ds);
+    const result = await ds.transaction((manager) =>
+      performPermissionBootstrap(manager, audit, {
+        accountId,
+        permissionCode,
+        scope,
+        reason,
+        effectiveTo,
+      }),
+    );
+    console.log(
+      `Đã cấp: quyền lẻ #${result.grantId} — ${permissionCode} (${scope}) cho #${accountId}, ` +
+        `${result.effectiveFrom} → ${result.effectiveTo ?? 'không thời hạn'}.`,
     );
   } finally {
     await ds.destroy();

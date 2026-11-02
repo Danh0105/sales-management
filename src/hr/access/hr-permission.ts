@@ -20,6 +20,12 @@ export enum HrPermission {
   ACCESS_ADMIN = 'ACCESS_ADMIN',
   /** Phase 1.1 — quản lý cơ cấu tổ chức (luôn kèm scope). */
   ORG_MANAGE = 'ORG_MANAGE',
+  /** Phase 1.3 — hồ sơ tài liệu: xem danh sách/metadata + nội dung loại không nhạy cảm. */
+  DOCUMENT_VIEW = 'DOCUMENT_VIEW',
+  /** Phase 1.3 — tải lên, thêm phiên bản, sửa metadata, lưu trữ tài liệu. */
+  DOCUMENT_MANAGE = 'DOCUMENT_MANAGE',
+  /** Phase 1.3 — xem NỘI DUNG giấy khám sức khỏe. Nhạy cảm (M2 ≤ 180 ngày), không gán mặc định. */
+  HEALTH_DOCUMENT_VIEW = 'HEALTH_DOCUMENT_VIEW',
 }
 
 export const HR_PERMISSION_CODES = Object.values(HrPermission) as string[];

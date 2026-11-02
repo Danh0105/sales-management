@@ -10,8 +10,12 @@ import { HrScope } from '../hr-permission';
 /**
  * Quyền HR cấp riêng cho một tài khoản, có thời hạn hiệu lực.
  *
- * Thu hồi = đóng `effective_to`, không xoá dòng — giữ được lịch sử "ai từng có
- * quyền gì, trong khoảng nào". `effective_to` là ngày cuối còn hiệu lực.
+ * Thu hồi = `revoked_at` (mất hiệu lực ngay trong ngày thu hồi, giờ Việt Nam —
+ * như role assignment), không xoá dòng — giữ lịch sử "ai từng có quyền gì,
+ * trong khoảng nào". `effective_to` là ngày cuối còn hiệu lực.
+ *
+ * Phase 1.3: cấp/thu hồi qua Access Admin (`HrRoleAdminService`) — cùng M1/M2/
+ * audit với cấp role; bootstrap break-glass qua CLI (`granted_by` = null).
  */
 @Entity({ schema: 'hr', name: 'account_permission_grants', synchronize: false })
 export class HrAccountPermissionGrant {
@@ -46,6 +50,15 @@ export class HrAccountPermissionGrant {
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
+
+  @Column({ name: 'revoked_at', type: 'timestamptz', nullable: true })
+  revokedAt: Date | null;
+
+  @Column({ name: 'revoked_by', type: 'int', nullable: true })
+  revokedBy: number | null;
+
+  @Column({ name: 'revoke_reason', type: 'text', nullable: true })
+  revokeReason: string | null;
 
   @VersionColumn()
   version: number;

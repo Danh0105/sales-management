@@ -26,6 +26,7 @@ import {
 } from './hr-grant-policy';
 import { HrRoleAdminRepository } from './hr-role-admin.repository';
 import { HrRoleAdminService } from './hr-role-admin.service';
+import { GrantHrPermissionDto } from './dto/grant-hr-permission.dto';
 import { OrgScopeUnitValidator } from '../organization/org-scope-unit.validator';
 
 const ADMIN = 158;
@@ -1218,5 +1219,82 @@ describe('M1 — thời hạn: không cấp quyền LÂU HƠN quyền của chí
     expect(body.periodNotCovered).toEqual([
       { permission: 'EMPLOYEE_VIEW', yourEffectiveTo: addDays(TODAY, 89) },
     ]);
+  });
+});
+
+describe('Quyền lẻ (Phase 1.3) — cùng luật với cấp role', () => {
+  const pdto = (over: Partial<GrantHrPermissionDto> = {}) =>
+    ({
+      permissionCode: HrPermission.HEALTH_DOCUMENT_VIEW,
+      scope: HrScope.COMPANY,
+      effectiveFrom: '2099-01-01',
+      effectiveTo: '2099-01-31',
+      reason: 'Cấp quyền xem giấy khám',
+      ...over,
+    }) as GrantHrPermissionDto;
+  const codeOf = (e: unknown) =>
+    ((e as { getResponse?: () => { code?: string } }).getResponse?.() ?? {})
+      .code;
+
+  it('không tự cấp cho chính mình → 403', async () => {
+    const { service } = setup();
+    await expect(
+      service.grantPermission(ADMIN, actor, ADMIN, pdto()),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('ACCESS_ADMIN không cấp lẻ → 400 HR_DIRECT_GRANT_NOT_ALLOWED', async () => {
+    const { service } = setup();
+    const e = await service
+      .grantPermission(
+        ADMIN,
+        actor,
+        TARGET,
+        pdto({
+          permissionCode: HrPermission.ACCESS_ADMIN,
+          effectiveTo: undefined,
+        }),
+      )
+      .catch((x: unknown) => x);
+    expect(codeOf(e)).toBe('HR_DIRECT_GRANT_NOT_ALLOWED');
+  });
+
+  it('M2: HEALTH_DOCUMENT_VIEW không có hạn → 400 HR_SENSITIVE_ACCESS_DURATION', async () => {
+    const { service } = setup();
+    const e = await service
+      .grantPermission(ADMIN, actor, TARGET, pdto({ effectiveTo: undefined }))
+      .catch((x: unknown) => x);
+    expect(codeOf(e)).toBe('HR_SENSITIVE_ACCESS_DURATION');
+  });
+
+  it('M1: người cấp không giữ HEALTH_DOCUMENT_VIEW → 403 HR_GRANT_EXCEEDS_OWN_ACCESS', async () => {
+    const { service } = setup({
+      actorGrants: allGrants().filter(
+        (g) => g.permission !== HrPermission.HEALTH_DOCUMENT_VIEW,
+      ),
+    });
+    const e = await service
+      .grantPermission(ADMIN, actor, TARGET, pdto())
+      .catch((x: unknown) => x);
+    expect(codeOf(e)).toBe('HR_GRANT_EXCEEDS_OWN_ACCESS');
+  });
+
+  it('đơn vị scope không hợp lệ → 400 HR_SCOPE_UNIT_INVALID (trước kiểm tra tài khoản đích)', async () => {
+    const { service, access } = setup({ invalidUnits: [77] });
+    const e = await service
+      .grantPermission(
+        ADMIN,
+        actor,
+        TARGET,
+        pdto({
+          permissionCode: HrPermission.DOCUMENT_VIEW,
+          scope: HrScope.BRANCH,
+          scopeRefId: 77,
+          effectiveTo: undefined,
+        }),
+      )
+      .catch((x: unknown) => x);
+    expect(codeOf(e)).toBe('HR_SCOPE_UNIT_INVALID');
+    expect(access.assertCanAccess).not.toHaveBeenCalled();
   });
 });
