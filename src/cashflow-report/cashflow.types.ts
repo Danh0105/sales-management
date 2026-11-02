@@ -30,6 +30,8 @@ export interface LedgerSourceRef {
   schoolExpenseId?: number;
   subjectId?: number | null;
   rowIndex?: number;
+  /** Dòng Hóa Đơn / Chi Trường / Chi Ngoài (id trong bảng nguồn). */
+  itemId?: number;
   suggestId?: number;
   requestId?: number;
   /** Hợp đồng Thu Chi ngoài. */

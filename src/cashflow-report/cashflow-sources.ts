@@ -31,6 +31,8 @@ export interface SchoolRowContext {
   subject_name: string | null;
   period_month: number | null;
   period_year: number | null;
+  /** id của dòng trong bảng nguồn (revenue_items / school_expense_items / management_expense_items). */
+  item_id: number;
   row_index: number;
 }
 
@@ -109,6 +111,7 @@ const ROW_CONTEXT_JOINS = `
 /** Dòng doanh thu có khoản thu/chi ở Hóa Đơn, hoặc đã thu mà chưa ghi tài khoản. */
 export const INVOICE_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
+  t.id AS item_id,
   t."rowIndex" AS row_index,
   t.content,
   t."invoiceNumber" AS invoice_number,
@@ -126,6 +129,7 @@ WHERE t."invoiceCashDirection" IS NOT NULL
 
 export const SCHOOL_EXPENSE_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
+  t.id AS item_id,
   t."rowIndex" AS row_index,
   t."paidAmount"::text AS paid_amount,
   to_char(t."expenseDate", 'YYYY-MM-DD') AS expense_date,
@@ -135,6 +139,7 @@ WHERE t."paidAmount" > 0 OR t."cashAccount" IS NOT NULL`;
 
 export const MANAGEMENT_EXPENSE_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
+  t.id AS item_id,
   t."rowIndex" AS row_index,
   t."paidAmount"::text AS paid_amount,
   to_char(t."expenseDate", 'YYYY-MM-DD') AS expense_date,
@@ -234,6 +239,7 @@ function rowSource(
     schoolExpenseId: row.school_expense_id,
     subjectId: row.subject_id,
     rowIndex: row.row_index,
+    itemId: row.item_id,
   };
 }
 

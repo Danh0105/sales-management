@@ -13,6 +13,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, TypeOrmModule } from '@nestjs/typeorm';
@@ -23,6 +24,7 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 
 import { CashAccount } from '../src/cashflow-report/cash-account.entity';
+import { SourceDeletionService } from '../src/cashflow-report/source-deletion.service';
 import { Department } from '../src/department/department.entity';
 import { Employee } from '../src/employee/employee.entity';
 import { FinancialAdvanceAllocation } from '../src/financial-request/entities/financial-advance-allocation.entity';
@@ -119,6 +121,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
   let config: FinancialConfigService;
   let reports: FinancialReportService;
   let pdf: FinancialPdfService;
+  let deletion: SourceDeletionService;
   const notification = { create: jest.fn().mockResolvedValue({}) };
   const run = Date.now().toString(36);
   const storageDir = mkdtempSync(join(tmpdir(), 'fin-it-'));
@@ -260,6 +263,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         FinancialConfigService,
         FinancialReportService,
         FinancialPdfService,
+        SourceDeletionService,
         { provide: NotificationService, useValue: notification },
       ],
     }).compile();
@@ -269,6 +273,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     config = moduleRef.get(FinancialConfigService);
     reports = moduleRef.get(FinancialReportService);
     pdf = moduleRef.get(FinancialPdfService);
+    deletion = moduleRef.get(SourceDeletionService);
 
     [{ id: dept1 }] = await ds.query(
       `INSERT INTO department (name) VALUES ($1) RETURNING id`,
@@ -1329,5 +1334,78 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     expect((await requests.meta(U.O)).me.savedPayee).toBeNull();
     const meB = (await requests.meta(U.B)).me;
     expect(meB.bankAccountNumber).not.toBe('9988776655');
+  });
+
+  const countRows = async (sql: string, params: unknown[]) =>
+    Number((await ds.query(sql, params))[0].n);
+
+  it('Xoá từ Tổng hợp thu chi: tạm ứng đã chi + phiếu hoàn ứng đối trừ → xoá hẳn cả hai', async () => {
+    const adv = await paidAdvance(1_000_000);
+    const settlement = await newSettlement(adv.id, 1_000_000, 1_000_000);
+    await requests.submit(U.A, settlement.id);
+    await approveAll(settlement.id);
+    expect((await requests.detail(U.A, adv.id)).settledAmount).toBe(1_000_000);
+    await ds.query(
+      `INSERT INTO notification (type, "receiverId", "entityId", message) VALUES ('FINANCIAL_REQUEST', $1, $2, 'it')`,
+      [U.A.id, adv.id],
+    );
+
+    const plan = await deletion.plan('FINANCIAL_REQUEST', adv.id);
+    expect(plan).toMatchObject({ mode: 'DELETE', blockers: [] });
+    const listed = plan.items.join('\n');
+    expect(listed).toContain(adv.code);
+    expect(listed).toContain(`Phiếu hoàn ứng đối trừ tạm ứng này: Hoàn ứng ${settlement.code}`);
+    expect(listed).toContain('1 lần chi tiền (1.000.000 đ)');
+
+    await deletion.execute('FINANCIAL_REQUEST', adv.id, U.T);
+    const ids = [adv.id, settlement.id];
+    expect(await countRows(`SELECT count(*) AS n FROM financial_requests WHERE id = ANY($1)`, [ids])).toBe(0);
+    expect(await countRows(`SELECT count(*) AS n FROM financial_payments WHERE request_id = ANY($1)`, [ids])).toBe(0);
+    expect(await countRows(`SELECT count(*) AS n FROM financial_advance_allocations WHERE advance_id = ANY($1) OR settlement_id = ANY($1)`, [ids])).toBe(0);
+    expect(await countRows(`SELECT count(*) AS n FROM notification WHERE type = 'FINANCIAL_REQUEST' AND "entityId" = ANY($1)`, [ids])).toBe(0);
+    // Nhật ký kiểm toán giữ lại + ghi người xoá.
+    expect(await countRows(`SELECT count(*) AS n FROM financial_audit_logs WHERE request_id = ANY($1) AND action = 'DELETED' AND actor_id = $2`, [ids, U.T.id])).toBe(2);
+    expect(await countRows(`SELECT count(*) AS n FROM financial_audit_logs WHERE request_id = $1 AND action = 'PAYMENT_RECORDED'`, [adv.id])).toBe(1);
+    await expect(requests.detail(U.A, adv.id)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(deletion.plan('FINANCIAL_REQUEST', adv.id)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('Xoá phiếu hoàn ứng từ sổ → trả lại phần đối trừ cho các tạm ứng còn giữ', async () => {
+    const a1 = await paidAdvance(600_000);
+    const a2 = await paidAdvance(400_000);
+    const before = (await requests.detail(U.A, a1.id)).settlementStatus;
+    const settlement = await requests.create(U.A, {
+      type: FinancialRequestType.SETTLEMENT,
+      companyId: companyX,
+      title: 'Hoàn ứng gộp hai tạm ứng',
+      directManagerId: U.M.id,
+      items: [{ description: 'Chi phí thực tế', quantity: '1', unitPrice: '1200000' }],
+      allocations: [
+        { advanceId: a1.id, amount: 600_000 },
+        { advanceId: a2.id, amount: 400_000 },
+      ],
+    });
+    await requests.submit(U.A, settlement.id);
+    await approveAll(settlement.id);
+    await ledger.recordPayment(
+      settlement.id,
+      { amount: 200_000, date: '2026-10-12', method: PaymentMethod.CASH, cashAccountCode: '1111', idempotencyKey: idem() },
+      U.T,
+    );
+    expect((await requests.detail(U.A, a1.id)).settledAmount).toBe(600_000);
+
+    const plan = await deletion.plan('FINANCIAL_REQUEST', settlement.id);
+    const listed = plan.items.join('\n');
+    expect(listed).toContain(`Tạm ứng ${a1.code}: bỏ đối trừ 600.000 đ`);
+    expect(listed).toContain(`Tạm ứng ${a2.code}: bỏ đối trừ 400.000 đ`);
+    expect(listed).toContain('1 lần chi tiền (200.000 đ)');
+
+    await deletion.execute('FINANCIAL_REQUEST', settlement.id, U.K);
+    for (const advance of [a1, a2]) {
+      const d = await requests.detail(U.A, advance.id);
+      expect(d.settledAmount).toBe(0);
+      expect(d.settlementStatus).toBe(before);
+    }
+    expect(await countRows(`SELECT count(*) AS n FROM financial_requests WHERE id = $1`, [settlement.id])).toBe(0);
   });
 });

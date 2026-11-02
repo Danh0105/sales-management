@@ -75,5 +75,7 @@ import { FinancialRequestService } from './financial-request.service';
     FinancialPdfService,
     FinancialConfigService,
   ],
+  // Tổng hợp thu chi xoá phiếu từ sổ: cần trả lại phần đối trừ của tạm ứng.
+  exports: [FinancialLedgerService],
 })
 export class FinancialRequestModule {}

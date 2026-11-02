@@ -90,6 +90,8 @@ describe('Quyền Tổng hợp thu chi', () => {
       'createManualEntry',
       'updateManualEntry',
       'deleteManualEntry',
+      'sourceDeletionPlan',
+      'deleteSource',
     ] as const) {
       expect(roles(method)).toEqual(MANAGE_ROLES);
     }

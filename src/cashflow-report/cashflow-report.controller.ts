@@ -21,6 +21,7 @@ import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
 import { CashManualEntryService } from './cash-manual-entry.service';
 import { CashflowReportService } from './cashflow-report.service';
+import { SourceDeletionService } from './source-deletion.service';
 import { CashflowQueryDto } from './dto/cashflow-query.dto';
 import { CreateCashAccountDto } from './dto/create-cash-account.dto';
 import {
@@ -55,6 +56,7 @@ export class CashflowReportController {
   constructor(
     private readonly cashflowReportService: CashflowReportService,
     private readonly manualEntryService: CashManualEntryService,
+    private readonly sourceDeletionService: SourceDeletionService,
   ) {}
 
   @Get('summary')
@@ -122,6 +124,30 @@ export class CashflowReportController {
   @Roles(...MANAGE_ROLES)
   deleteAccount(@Param('code') code: string) {
     return this.cashflowReportService.deleteAccount(code);
+  }
+
+  /**
+   * Xoá một dòng trên sổ: xem trước các khoản bị xoá / gỡ (để người xoá xác
+   * nhận), rồi xoá. Đề nghị tài chính / Đề xuất chi / Thu Chi ngoài xoá hẳn
+   * chứng từ gốc; Hóa Đơn / Chi Trường / Chi Ngoài chỉ gỡ khoản thu chi.
+   */
+  @Get('sources/:type/:id/deletion')
+  @Roles(...MANAGE_ROLES)
+  sourceDeletionPlan(
+    @Param('type') type: string,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.sourceDeletionService.plan(type, id);
+  }
+
+  @Delete('sources/:type/:id')
+  @Roles(...MANAGE_ROLES)
+  deleteSource(
+    @Param('type') type: string,
+    @Param('id', ParseIntPipe) id: number,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.sourceDeletionService.execute(type, id, req.user);
   }
 
   /** Bút toán thu/chi/chuyển nội bộ nhập tay (dòng nguồn MANUAL_ENTRY trên sổ). */

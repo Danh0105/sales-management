@@ -85,6 +85,26 @@ Chuyển tiền nội bộ: chỉ có ở bút toán nhập tay loại Chuyển 
 chứng từ `CK-<id>` (hoặc số người nhập), cờ `isInternalTransfer = true`; `excludeInternal`
 bỏ cả hai chân khỏi tổng thu chi. Các nguồn khác luôn `false`.
 
+Xoá dòng trên sổ (`GET sources/:type/:id/deletion` xem trước, `DELETE sources/:type/:id`
+thực hiện; cùng quyền thêm/sửa/xoá). Xem trước liệt kê mọi khoản sẽ bị xoá / gỡ để người
+xoá xác nhận; khi thực hiện, các dòng bị khoá trong một transaction rồi mới tính lại:
+
+- Đề nghị tài chính (`requestId`): xoá hẳn phiếu, dòng chi tiết, bước duyệt, phiếu chi/thu
+  (kể cả đã huỷ), kỳ khấu trừ lương, tệp đính kèm, thông báo. Tạm ứng đã có phiếu hoàn ứng
+  đối trừ thì xoá cả phiếu hoàn ứng đó; xoá phiếu hoàn ứng thì trả lại phần đối trừ cho các
+  tạm ứng còn giữ (`revertSettlement`). `financial_audit_logs` bị DB khoá nên giữ nguyên,
+  ghi thêm dòng `DELETED` có người xoá.
+- Đề xuất chi (`suggestId`): xoá hẳn đề xuất (lệnh chi, tệp, phân công theo CASCADE),
+  `suggest_history`, thông báo `SUGGEST`. Đề xuất có phiếu xuất/nhập kho thì chặn (tồn kho).
+- Thu Chi ngoài (`otherCashflowId`): xoá hẳn hợp đồng và mọi lần thu/chi, phiếu, chi phí,
+  nhật ký, dòng hàng, tệp, thông báo.
+- Hóa Đơn / Chi Trường / Chi Ngoài (`itemId`): chỉ gỡ khỏi sổ — Hóa Đơn xoá Thu/Chi, Số
+  tiền, Ngày chi, Khoản thu/chi; Chi Trường/Ngoài đưa "Đã chi" về 0 (`remaining` cộng lại),
+  xoá Ngày chi, Nguồn chi. Doanh thu, chi phí, hoá đơn của trường giữ nguyên.
+- Bút toán nhập tay: xoá mềm.
+
+Tệp trên đĩa xoá sau khi commit, chỉ khi không còn dòng nào khác dùng.
+
 Bút toán nhập tay: số chứng từ trống thì sinh `PT-<id>` (thu) / `PC-<id>` (chi) /
 `CK-<id>` (chuyển). Chọn tài khoản mới phải đang sử dụng; giữ nguyên tài khoản cũ đã ngừng
 dùng thì vẫn sửa được. Xoá là xoá mềm (`deleted_at`, người xoá) — dòng ra khỏi sổ.
@@ -107,6 +127,8 @@ Thêm/sửa/xoá (tài khoản, bút toán nhập tay): `ketoan_truong`, `thuquy
 | POST   | `manual-entries` | `kind` (`IN`/`OUT`/`TRANSFER`), `entryDate`, `accountCode`, `counterAccountCode` (chuyển), `amount`, `description`, tuỳ chọn `documentNo`, `partnerName`, `note` |
 | PATCH  | `manual-entries/:id` | sửa từng trường như POST                                                                                      |
 | DELETE | `manual-entries/:id` | xoá mềm                                                                                                       |
+| GET    | `sources/:type/:id/deletion` | xem trước các khoản bị xoá/gỡ khi xoá dòng nguồn `type` (mục 4)                                       |
+| DELETE | `sources/:type/:id` | xoá chứng từ gốc / gỡ dòng khỏi sổ (mục 4)                                                                     |
 | GET    | `export`         | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
 
 Tham số chung: `from`, `to` (YYYY-MM-DD, bắt buộc), `accountType` (`all|cash|bank`),
