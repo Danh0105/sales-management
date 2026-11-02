@@ -40,7 +40,9 @@ import {
   AssignmentDto,
   CategoryDto,
   CompanyDto,
+  CreateAccountDto,
   DelegationDto,
+  EmployeeDepartmentDto,
   PolicyDto,
   UpdateCategoryDto,
   UpdateCompanyDto,
@@ -155,6 +157,20 @@ export class FinancialConfigController {
     @Param('id', ParseIntPipe) id: number,
   ) {
     return this.config.removeAssignment(req.user, id);
+  }
+
+  @Put('employees/:id/department')
+  setEmployeeDepartment(
+    @Req() req: RequestWithUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: EmployeeDepartmentDto,
+  ) {
+    return this.config.setEmployeeDepartment(req.user, id, dto);
+  }
+
+  @Post('accounts')
+  createAccount(@Req() req: RequestWithUser, @Body() dto: CreateAccountDto) {
+    return this.config.createAccount(req.user, dto);
   }
 
   @Put('policies')

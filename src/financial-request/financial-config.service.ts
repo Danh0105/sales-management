@@ -6,16 +6,25 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import * as bcrypt from 'bcrypt';
+import {
+  DataSource,
+  EntityManager,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
+import { isEmployeeAdmin } from '../employee/employee-roles';
 import { AuthUser } from '../type/auth-user.type';
 import {
   AssignmentDto,
   CategoryDto,
   CompanyDto,
+  CreateAccountDto,
   DelegationDto,
+  EmployeeDepartmentDto,
   PolicyDto,
   UpdateCategoryDto,
   UpdateCompanyDto,
@@ -130,6 +139,10 @@ export class FinancialConfigService {
         .getRepository(Department)
         .find({ order: { name: 'ASC' } }),
     ]);
+    const departmentManagerIds = await Promise.all(
+      departments.map((d) => this.access.departmentManagerIds(null, d.id)),
+    );
+    const employeeName = new Map(employees.map((e) => [e.id, e.name]));
     return {
       companies: companies.map((c) => ({
         ...c,
@@ -175,8 +188,16 @@ export class FinancialConfigService {
         departmentId: e.department?.id ?? null,
         departmentName: e.department?.name ?? null,
       })),
-      departments: departments.map((d) => ({ id: d.id, name: d.name })),
+      departments: departments.map((d, index) => ({
+        id: d.id,
+        name: d.name,
+        managers: departmentManagerIds[index].map((id) => ({
+          id,
+          name: employeeName.get(id) ?? `#${id}`,
+        })),
+      })),
       me: { id: ctx.userId },
+      canCreateAccount: isEmployeeAdmin(user),
     };
   }
 
@@ -557,6 +578,133 @@ export class FinancialConfigService {
     });
     await this.refreshPendingCandidates();
     return { success: true };
+  }
+
+  /**
+   * Vai trò "Nhân viên": chuyển nhân viên vào phòng ban — đổi đúng cột phòng
+   * ban của hồ sơ nhân viên. Phiếu đã lập giữ phòng ban lúc lập; phiếu mới tự
+   * chọn quản lý trực tiếp của phòng ban mới.
+   */
+  async setEmployeeDepartment(
+    user: AuthUser,
+    employeeId: number,
+    dto: EmployeeDepartmentDto,
+  ) {
+    const ctx = await this.admin(user);
+    return this.dataSource.transaction(async (manager) => {
+      const employee = await manager.getRepository(Employee).findOne({
+        where: { id: employeeId },
+        relations: ['department'],
+      });
+      if (!employee) throw new NotFoundException('Không tìm thấy nhân viên');
+      const department = await manager
+        .getRepository(Department)
+        .findOne({ where: { id: dto.departmentId } });
+      if (!department)
+        throw new BadRequestException('Không tìm thấy phòng ban');
+      const fromDepartmentId = employee.department?.id ?? null;
+      if (fromDepartmentId !== department.id) {
+        await manager
+          .getRepository(Employee)
+          .update(employeeId, { department: { id: department.id } as never });
+        await this.audit(
+          manager,
+          ctx,
+          'EMPLOYEE',
+          employeeId,
+          'EMPLOYEE_DEPARTMENT_CHANGED',
+          {
+            employeeName: employee.name,
+            fromDepartmentId,
+            toDepartmentId: department.id,
+          },
+        );
+      }
+      return {
+        employeeId,
+        employeeName: employee.name ?? `#${employeeId}`,
+        departmentId: department.id,
+        departmentName: department.name,
+      };
+    });
+  }
+
+  /**
+   * Tạo tài khoản đăng nhập (đăng nhập bằng số điện thoại) cho nhân viên mới,
+   * role hệ thống cố định `employee`. Cấp quyền đăng nhập nên ngoài quản trị
+   * phân hệ còn phải là người quản trị nhân sự — giống `POST /employees`.
+   */
+  async createAccount(user: AuthUser, dto: CreateAccountDto) {
+    const ctx = await this.admin(user);
+    if (!isEmployeeAdmin(user)) {
+      throw new ForbiddenException(
+        'Chỉ giám đốc hoặc nhân sự được tạo tài khoản đăng nhập',
+      );
+    }
+    const password = await bcrypt.hash(dto.password, 10);
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        const repo = manager.getRepository(Employee);
+        const department = await manager
+          .getRepository(Department)
+          .findOne({ where: { id: dto.departmentId } });
+        if (!department)
+          throw new BadRequestException('Không tìm thấy phòng ban');
+        if (await repo.findOne({ where: { phone: dto.phone } })) {
+          throw new ConflictException('Số điện thoại đã được sử dụng');
+        }
+        if (
+          dto.email &&
+          (await repo.findOne({ where: { email: dto.email } }))
+        ) {
+          throw new ConflictException('Email đã được sử dụng');
+        }
+        const employee = await repo.save(
+          repo.create({
+            name: dto.name,
+            phone: dto.phone,
+            email: dto.email ?? undefined,
+            password,
+            roles: ['employee'],
+            department: { id: department.id } as Department,
+          }),
+        );
+        await this.audit(
+          manager,
+          ctx,
+          'EMPLOYEE',
+          employee.id!,
+          'ACCOUNT_CREATED',
+          {
+            employeeName: employee.name,
+            roles: employee.roles,
+            departmentId: department.id,
+          },
+        );
+        return {
+          id: employee.id!,
+          name: employee.name!,
+          departmentId: department.id,
+          departmentName: department.name,
+        };
+      });
+    } catch (error) {
+      // Hai người tạo cùng lúc: kiểm tra trước vẫn lọt, ràng buộc UNIQUE chặn.
+      if (
+        error instanceof QueryFailedError &&
+        (error as QueryFailedError & { code?: string }).code === '23505'
+      ) {
+        const detail = String(
+          (error as QueryFailedError & { detail?: string }).detail ?? '',
+        );
+        throw new ConflictException(
+          detail.includes('(email)')
+            ? 'Email đã được sử dụng'
+            : 'Số điện thoại đã được sử dụng',
+        );
+      }
+      throw error;
+    }
   }
 
   /**

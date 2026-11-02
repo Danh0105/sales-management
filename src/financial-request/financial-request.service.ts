@@ -273,13 +273,22 @@ export class FinancialRequestService {
       where: { id: ctx.userId },
       relations: ['department'],
     });
-    const managers = await this.access.eligibleManagers(
-      companyId,
-      me?.department?.id ?? null,
-    );
-    return managers
-      .filter((m) => m.id !== ctx.userId)
-      .map((m) => ({ id: m.id, name: m.name, position: this.positionOf(m) }));
+    const departmentId = me?.department?.id ?? null;
+    const [managers, departmentManagerIds] = await Promise.all([
+      this.access.eligibleManagers(companyId, departmentId),
+      this.access.departmentManagerIds(companyId, departmentId),
+    ]);
+    const choices = managers.filter((m) => m.id !== ctx.userId);
+    // Quản lý của phòng ban người đề nghị — form chọn sẵn, người lập vẫn đổi được.
+    const defaultId =
+      departmentManagerIds.find((id) => choices.some((m) => m.id === id)) ??
+      null;
+    return choices.map((m) => ({
+      id: m.id,
+      name: m.name,
+      position: this.positionOf(m),
+      isDefault: m.id === defaultId,
+    }));
   }
 
   /** Lưu (ghi đè) thông tin nhận tiền của chính người dùng, không sửa hồ sơ nhân viên. */

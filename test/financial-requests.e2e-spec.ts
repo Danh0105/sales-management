@@ -17,6 +17,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken, TypeOrmModule } from '@nestjs/typeorm';
+import * as bcrypt from 'bcrypt';
 import * as ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -1033,13 +1034,20 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     const req = await newAdvance(400_000);
     await requests.submit(U.A, req.id);
     const control = () =>
-      requests.uploadAttachments(U.C, req.id, [file('bien-ban-kiem-soat.pdf', PDF_BYTES)], {
-        kind: AttachmentKind.CONTROL_EVIDENCE,
-      });
+      requests.uploadAttachments(
+        U.C,
+        req.id,
+        [file('bien-ban-kiem-soat.pdf', PDF_BYTES)],
+        {
+          kind: AttachmentKind.CONTROL_EVIDENCE,
+        },
+      );
     // Chưa tới cấp kiểm soát → chưa được đính kèm.
     await expect(control()).rejects.toBeInstanceOf(ForbiddenException);
     let d = await requests.detail(U.M, req.id);
-    await requests.approve(U.M, req.id, { stepId: d.permissions.actionableStepId! });
+    await requests.approve(U.M, req.id, {
+      stepId: d.permissions.actionableStepId!,
+    });
 
     d = await requests.detail(U.C, req.id);
     expect(d.permissions.isControlStep).toBe(true);
@@ -1051,7 +1059,9 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
     const withEvidence = await control();
     expect(
-      withEvidence.attachments.filter((a) => a.kind === AttachmentKind.CONTROL_EVIDENCE),
+      withEvidence.attachments.filter(
+        (a) => a.kind === AttachmentKind.CONTROL_EVIDENCE,
+      ),
     ).toHaveLength(1);
     await requests.approve(U.C, req.id, {
       stepId: d.permissions.actionableStepId!,
@@ -1299,6 +1309,131 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         items: [{ description: 'x', quantity: '1', unitPrice: '1000' }],
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  let dept2 = 0;
+
+  it('Vai trò Nhân viên: xếp vào phòng ban → phiếu mới chọn sẵn quản lý trực tiếp của phòng ban', async () => {
+    // Phòng 1: M được gán Quản lý trực tiếp riêng phòng 1, đứng trước trưởng phòng H.
+    const forA = await requests.eligibleManagers(U.A, companyX);
+    expect(forA.filter((m) => m.isDefault).map((m) => m.id)).toEqual([U.M.id]);
+    // Chính M lập phiếu thì không tự chọn mình — tới lượt trưởng phòng.
+    const forM = await requests.eligibleManagers(U.M, companyX);
+    expect(forM.find((m) => m.isDefault)?.id).toBe(U.H.id);
+
+    [{ id: dept2 }] = await ds.query(
+      `INSERT INTO department (name) VALUES ($1) RETURNING id`,
+      [`FIN-IT ${run} Kế toán`],
+    );
+    await employee('P', ['accountant', 'truongphong_ketoan'], dept2);
+    await employee('S', ['employee'], dept1);
+    const moved = await config.setEmployeeDepartment(U.D, U.S.id, {
+      departmentId: dept2,
+    });
+    expect(moved).toMatchObject({ employeeId: U.S.id, departmentId: dept2 });
+    // Phòng 2 chỉ có trưởng phòng → mặc định trưởng phòng.
+    const forS = await requests.eligibleManagers(U.S, companyX);
+    expect(forS.find((m) => m.isDefault)?.id).toBe(U.P.id);
+
+    const overview = await config.overview(U.D);
+    const managersOf = (id: number) =>
+      overview.departments.find((d) => d.id === id)?.managers.map((m) => m.id);
+    expect(managersOf(dept1)).toEqual([U.M.id, U.H.id]);
+    expect(managersOf(dept2)).toEqual([U.P.id]);
+
+    // Gán Quản lý trực tiếp riêng phòng 2 ở công ty X → đứng trước trưởng phòng,
+    // chỉ trong công ty X.
+    await config.createAssignment(U.D, {
+      employeeId: U.B.id,
+      role: FinanceRole.MANAGER,
+      companyId: companyX,
+      departmentId: dept2,
+    });
+    const afterAssign = await requests.eligibleManagers(U.S, companyX);
+    expect(afterAssign.find((m) => m.isDefault)?.id).toBe(U.B.id);
+    const inCompanyY = await requests.eligibleManagers(U.S, companyY);
+    expect(inCompanyY.find((m) => m.isDefault)?.id).toBe(U.P.id);
+
+    // Phiếu lập sau khi chuyển phòng mang phòng ban mới.
+    const req = await requests.create(U.S, {
+      type: FinancialRequestType.ADVANCE,
+      companyId: companyX,
+      title: 'Tạm ứng của nhân viên phòng 2',
+      directManagerId: U.B.id,
+      items: [{ description: 'Mực in', quantity: '1', unitPrice: '150000' }],
+    });
+    expect(req.departmentId).toBe(dept2);
+
+    // Gán lại đúng phòng hiện tại không ghi thêm nhật ký.
+    await config.setEmployeeDepartment(U.D, U.S.id, { departmentId: dept2 });
+    const [{ n }] = await ds.query(
+      `SELECT count(*)::int AS n FROM financial_audit_logs
+        WHERE entity_type = 'EMPLOYEE' AND entity_id = $1 AND action = 'EMPLOYEE_DEPARTMENT_CHANGED'`,
+      [U.S.id],
+    );
+    expect(n).toBe(1);
+    await expect(
+      config.setEmployeeDepartment(U.A, U.S.id, { departmentId: dept1 }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      config.setEmployeeDepartment(U.D, U.S.id, {
+        departmentId: 2_000_000_000,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('Tạo tài khoản nhân viên ở màn Phân quyền: role employee, đúng phòng ban', async () => {
+    const phone = `08${String(Date.now()).slice(-9)}`;
+    const account = await config.createAccount(U.D, {
+      name: 'Nhân viên mới IT',
+      phone,
+      password: 'matkhau123',
+      departmentId: dept2,
+    });
+    expect(account).toMatchObject({ departmentId: dept2 });
+    const [row] = await ds.query(
+      `SELECT roles, department_id, email, password FROM employee WHERE id = $1`,
+      [account.id],
+    );
+    expect(row.roles).toEqual(['employee']);
+    expect(row.department_id).toBe(dept2);
+    expect(row.email).toBeNull();
+    expect(await bcrypt.compare('matkhau123', row.password)).toBe(true);
+
+    // Tài khoản mới lập phiếu → mặc định quản lý trực tiếp của phòng 2.
+    const newcomer = {
+      id: account.id,
+      roles: ['employee'],
+      name: account.name,
+    };
+    const managers = await requests.eligibleManagers(newcomer, companyX);
+    expect(managers.find((m) => m.isDefault)?.id).toBe(U.B.id);
+
+    await expect(
+      config.createAccount(U.D, {
+        name: 'Trùng số',
+        phone,
+        password: 'matkhau123',
+        departmentId: dept1,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    // Quản trị phân hệ nhưng không phải giám đốc/nhân sự: không cấp tài khoản.
+    const admin = await config.createAssignment(U.D, {
+      employeeId: U.K.id,
+      role: FinanceRole.ADMIN,
+    });
+    expect((await config.overview(U.K)).canCreateAccount).toBe(false);
+    await expect(
+      config.createAccount(U.K, {
+        name: 'Không được tạo',
+        phone: `07${String(Date.now()).slice(-9)}`,
+        password: 'matkhau123',
+        departmentId: dept1,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await config.removeAssignment(U.D, admin.id);
+    expect((await config.overview(U.D)).canCreateAccount).toBe(true);
   });
 
   it('Lưu và sửa thông tin nhận tiền của chính mình (không sửa hồ sơ nhân viên)', async () => {

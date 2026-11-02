@@ -313,6 +313,45 @@ export class AssignmentDto {
   note?: string | null;
 }
 
+/** Vai trò "Nhân viên": xếp nhân viên vào phòng ban (không phải vai trò tài chính). */
+export class EmployeeDepartmentDto {
+  @Type(() => Number)
+  @IsInt()
+  departmentId!: number;
+}
+
+/** Tài khoản đăng nhập mới tạo từ màn Phân quyền — luôn mang role hệ thống `employee`. */
+export class CreateAccountDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MinLength(2, { message: 'Nhập họ tên' })
+  @MaxLength(255)
+  name!: string;
+
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.replace(/[\s.-]/g, '') : value,
+  )
+  @Matches(/^\+?\d{9,15}$/, { message: 'Số điện thoại không hợp lệ' })
+  phone!: string;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() || null : value,
+  )
+  @IsEmail({}, { message: 'Email không hợp lệ' })
+  @MaxLength(255)
+  email?: string | null;
+
+  @IsString()
+  @MinLength(6, { message: 'Mật khẩu tối thiểu 6 ký tự' })
+  @MaxLength(72)
+  password!: string;
+
+  @Type(() => Number)
+  @IsInt({ message: 'Chọn phòng ban' })
+  departmentId!: number;
+}
+
 export class PolicyDto {
   @IsOptional()
   @Transform(emptyToNull)

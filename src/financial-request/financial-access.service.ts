@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, IsNull, Repository, SelectQueryBuilder } from 'typeorm';
 
 import { Employee } from '../employee/employee.entity';
+import { DEPARTMENT_HEAD_ROLES } from '../employee/employee-positions';
 import { AuthUser } from '../type/auth-user.type';
 import { FinancialApprovalDelegation } from './entities/financial-approval-delegation.entity';
 import { FinancialApprovalStep } from './entities/financial-approval-step.entity';
@@ -464,6 +465,58 @@ export class FinancialAccessService {
       return roles.some((r) => DIRECT_MANAGER_SYSTEM_ROLES.includes(r)) ? 1 : 2;
     };
     return employees.sort((a, b) => rank(a) - rank(b));
+  }
+
+  /**
+   * Quản lý trực tiếp của riêng một phòng ban, theo thứ tự ưu tiên: người được
+   * gán vai trò MANAGER đúng phòng ban đó (gán riêng công ty đứng trước gán
+   * mọi công ty), rồi trưởng/phó phòng thuộc phòng ban. Gán MANAGER "mọi phòng
+   * ban" không tính — đó không phải quản lý của phòng nào. `companyId` NULL =
+   * không lọc theo công ty.
+   */
+  async departmentManagerIds(
+    companyId: number | null,
+    departmentId: number | null,
+  ): Promise<number[]> {
+    if (!departmentId) return [];
+    const assignments = (
+      await this.assignmentRepo.find({
+        where: { role: FinanceRole.MANAGER, isActive: true, departmentId },
+        order: { id: 'ASC' },
+      })
+    )
+      .filter(
+        (a) =>
+          companyId === null ||
+          a.companyId === null ||
+          a.companyId === companyId,
+      )
+      .sort(
+        (a, b) => Number(a.companyId === null) - Number(b.companyId === null),
+      );
+    const heads = await this.employeeRepo
+      .createQueryBuilder('e')
+      .select('e.id', 'id')
+      .where('e.department_id = :departmentId', { departmentId })
+      .andWhere('e.roles && :headRoles', { headRoles: DEPARTMENT_HEAD_ROLES })
+      .orderBy('e.name', 'ASC')
+      .getRawMany<{ id: number }>();
+
+    const ids = [
+      ...new Set([
+        ...assignments.map((a) => a.employeeId),
+        ...heads.map((row) => Number(row.id)),
+      ]),
+    ];
+    if (!ids.length) return [];
+    const active = await this.employeeRepo
+      .createQueryBuilder('e')
+      .select('e.id', 'id')
+      .where('e.id IN (:...ids)', { ids })
+      .andWhere('COALESCE(e.isActive, true) = true')
+      .getRawMany<{ id: number }>();
+    const activeIds = new Set(active.map((row) => Number(row.id)));
+    return ids.filter((id) => activeIds.has(id));
   }
 
   /**
