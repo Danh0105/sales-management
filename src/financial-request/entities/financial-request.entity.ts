@@ -261,7 +261,10 @@ export class FinancialRequest {
   })
   paymentMethod!: PaymentMethod | null;
 
-  /** Tài khoản 111/112 do Bộ phận kiểm soát chọn khi duyệt. */
+  /**
+   * Tài khoản 111/112 thủ quỹ dùng ở lần chi gần nhất (phiếu trước 02/11/2026:
+   * Bộ phận kiểm soát chọn khi duyệt). Tên cột giữ nguyên.
+   */
   @Column({
     name: 'control_cash_account_code',
     type: 'varchar',

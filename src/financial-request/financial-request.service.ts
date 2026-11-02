@@ -70,7 +70,6 @@ import {
   DIRECT_MANAGER_SYSTEM_ROLES,
   FinanceRole,
   FinancialRequestType,
-  PaymentMethod,
   PaymentStatus,
   RecoveryStatus,
   REQUEST_CODE_PREFIX,
@@ -86,10 +85,7 @@ import {
   vndToWords,
 } from './financial-money';
 import { openStoredFile, storeFile } from './financial-storage';
-import {
-  isControllerApprovalStep,
-  paymentAccountGroup,
-} from './financial-payment-account';
+import { isControllerApprovalStep } from './financial-payment-account';
 import {
   nextStepsAfterDecision,
   pickWorkflow,
@@ -126,7 +122,6 @@ const COMMON_FIELDS = [
   'bankAccountHolder',
   'bankName',
   'bankAccountNumber',
-  'paymentMethod',
   'paymentNote',
 ];
 
@@ -910,8 +905,7 @@ export class FinancialRequestService {
         actionableStepId: actionable?.id ?? null,
         canApprove: !!actionable,
         canAdjust: !!actionable?.canAdjustAmounts,
-        requiresPaymentAccount:
-          !!actionable && isControllerApprovalStep(actionable),
+        isControlStep: !!actionable && isControllerApprovalStep(actionable),
         canSkip: ctx.isAdmin && currentPending.some((s) => s.skippable),
         canRecordPayment:
           request.approvalStatus === ApprovalStatus.APPROVED &&
@@ -1310,11 +1304,7 @@ export class FinancialRequestService {
       });
       this.applyHeader(request, dto);
       if (!request.payeeName) request.payeeName = request.requesterName;
-      if (
-        !dto.bankAccountNumber &&
-        employee.bankAccountNumber &&
-        dto.paymentMethod !== PaymentMethod.CASH
-      ) {
+      if (!dto.bankAccountNumber && employee.bankAccountNumber) {
         request.bankAccountNumber = employee.bankAccountNumber;
         request.bankName = request.bankName ?? employee.bankName ?? null;
         request.bankAccountHolder =
@@ -1496,7 +1486,6 @@ export class FinancialRequestService {
       purpose: source.purpose,
       projectName: source.projectName,
       location: source.location,
-      paymentMethod: source.paymentMethod,
       paymentNote: source.paymentNote,
       ...(own
         ? {
@@ -1651,13 +1640,6 @@ export class FinancialRequestService {
     if (items.some((i) => i.amount <= 0))
       errors.push('Mỗi dòng phải có thành tiền lớn hơn 0');
     if (request.totalAmount <= 0) errors.push('Tổng tiền phải lớn hơn 0');
-    if (!request.paymentMethod) errors.push('Chọn phương thức nhận tiền');
-    if (
-      request.paymentMethod === PaymentMethod.BANK_TRANSFER &&
-      (!request.bankName || !request.bankAccountNumber)
-    ) {
-      errors.push('Nhận chuyển khoản phải có ngân hàng và số tài khoản');
-    }
     if (
       policy.expenseOverLimitMode === 'BLOCK' &&
       items.some((i) => i.overLimit)
@@ -1892,7 +1874,7 @@ export class FinancialRequestService {
       request.workflowId = workflow.id;
       request.workflowName = workflow.name;
       request.isSequential = workflow.isSequential;
-      // Mỗi vòng duyệt phải được Bộ phận kiểm soát chọn lại trên dữ liệu mới.
+      // Tài khoản thanh toán do thủ quỹ chọn khi chi; vòng duyệt mới bỏ lựa chọn cũ.
       request.paymentAccountCode = null;
       request.version += 1;
       await manager.getRepository(FinancialRequest).save(request);
@@ -2170,43 +2152,6 @@ export class FinancialRequestService {
       const request = await this.ledger.lockRequest(manager, id);
       const { step, onBehalfOfId, onBehalfOfName } =
         await this.lockActionableStep(manager, ctx, request, dto.stepId);
-      const controllerStep = isControllerApprovalStep(step);
-      let paymentAccountChange:
-        | { from: string | null; to: string; name: string }
-        | undefined;
-      if (controllerStep) {
-        const code = requireText(
-          dto.paymentAccountCode,
-          'Bộ phận kiểm soát phải chọn tài khoản thanh toán',
-        );
-        const account = await manager
-          .getRepository(CashAccount)
-          .findOne({ where: { code } });
-        if (!account || !account.isActive) {
-          throw new BadRequestException(
-            `Tài khoản thanh toán "${code}" không hợp lệ hoặc đã ngừng sử dụng`,
-          );
-        }
-        const expectedGroup = paymentAccountGroup(request.paymentMethod);
-        if (account.groupCode !== expectedGroup) {
-          throw new BadRequestException(
-            request.paymentMethod === PaymentMethod.CASH
-              ? 'Phiếu tiền mặt chỉ được chọn tài khoản nhóm 111'
-              : 'Phiếu chuyển khoản chỉ được chọn tài khoản nhóm 112',
-          );
-        }
-        paymentAccountChange = {
-          from: request.paymentAccountCode,
-          to: account.code,
-          name: account.name,
-        };
-        request.paymentAccountCode = account.code;
-        await manager.getRepository(FinancialRequest).save(request);
-      } else if (dto.paymentAccountCode) {
-        throw new BadRequestException(
-          'Chỉ bước Bộ phận kiểm soát được chọn tài khoản thanh toán',
-        );
-      }
       await this.applyAdjustments(
         manager,
         ctx,
@@ -2232,9 +2177,6 @@ export class FinancialRequestService {
           step: step.name,
           stepOrder: step.stepOrder,
           round: step.round,
-          ...(paymentAccountChange
-            ? { paymentAccount: paymentAccountChange }
-            : {}),
           ...(onBehalfOfName ? { onBehalfOf: onBehalfOfName } : {}),
         },
       });

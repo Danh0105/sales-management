@@ -511,26 +511,19 @@ export class FinancialLedgerService {
           `Số tiền chi ${formatVnd(dto.amount)} đ vượt số còn phải chi ${formatVnd(remaining)} đ`,
         );
       }
-      if (
-        request.paymentAccountCode &&
-        dto.cashAccountCode &&
-        request.paymentAccountCode !== dto.cashAccountCode
-      ) {
-        throw new BadRequestException(
-          'Tài khoản chi tiền phải đúng tài khoản Bộ phận kiểm soát đã chọn',
-        );
-      }
+      // Thủ quỹ chọn tài khoản thanh toán ở bước chi tiền (bước cuối).
+      const cashAccountCode = await this.assertCashAccount(
+        manager,
+        requireText(dto.cashAccountCode, 'Chọn tài khoản thanh toán'),
+        dto.method,
+      );
       const payment = await manager.getRepository(FinancialPayment).save(
         manager.getRepository(FinancialPayment).create({
           requestId: id,
           amount: dto.amount,
           paidAt: dto.date,
           method: dto.method,
-          cashAccountCode: await this.assertCashAccount(
-            manager,
-            request.paymentAccountCode ?? dto.cashAccountCode,
-            dto.method,
-          ),
+          cashAccountCode,
           transactionRef: dto.transactionRef || null,
           note: dto.note || null,
           idempotencyKey: dto.idempotencyKey,
@@ -541,6 +534,7 @@ export class FinancialLedgerService {
       );
       const before = request.paymentStatus;
       request.paidAmount += dto.amount;
+      request.paymentAccountCode = cashAccountCode;
       await this.afterPaidChanged(manager, request);
       await manager.getRepository(FinancialRequest).save(request);
       if (request.type === FinancialRequestType.SALARY_ADVANCE) {

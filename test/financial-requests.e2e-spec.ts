@@ -158,13 +158,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     writeFileSync(join(process.env.FIN_IT_PDF_DIR, `${name}.pdf`), buffer);
   }
 
-  /** Bộ phận kiểm soát bắt buộc chọn tài khoản: tiền mặt → 111, chuyển khoản → 112. */
-  const controlAccount = (detail: { paymentMethod: PaymentMethod | null }) =>
-    detail.paymentMethod === PaymentMethod.CASH ? '1111' : '1121';
-  const isControl = (step: { approverRole?: unknown; signatureSlot?: unknown }) =>
-    step.approverRole === FinanceRole.CONTROLLER ||
-    step.signatureSlot === 'CONTROLLER';
-
   /** Duyệt hết các bước còn chờ bằng người duyệt hợp lệ đầu tiên của mỗi bước. */
   async function approveAll(id: number, comment = 'Đồng ý') {
     for (let guard = 0; guard < 10; guard += 1) {
@@ -177,11 +170,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       const approver = step.candidates.map((c) => byId(c.id)).find(Boolean);
       if (!approver)
         throw new Error(`Không có người duyệt test cho bước ${step.name}`);
-      await requests.approve(approver, id, {
-        stepId: step.id,
-        comment,
-        ...(isControl(step) ? { paymentAccountCode: controlAccount(detail) } : {}),
-      });
+      await requests.approve(approver, id, { stepId: step.id, comment });
     }
     throw new Error('Quá số vòng duyệt');
   }
@@ -196,7 +185,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId,
       title: 'Tạm ứng đi công tác',
       directManagerId: companyId === companyX ? U.M.id : undefined,
-      paymentMethod: PaymentMethod.BANK_TRANSFER,
       bankName: 'MB Bank',
       bankAccountNumber: '0123456789',
       items: [
@@ -219,6 +207,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         amount,
         date: '2026-10-01',
         method: PaymentMethod.BANK_TRANSFER,
+        cashAccountCode: '1121',
         idempotencyKey: idem(),
       },
       U.T,
@@ -236,7 +225,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId: companyX,
       title: 'Hoàn ứng công tác',
       directManagerId: U.M.id,
-      paymentMethod: PaymentMethod.CASH,
       items: [
         {
           description: 'Chi phí thực tế',
@@ -362,7 +350,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId: companyX,
       title: 'Tạm ứng mua vật tư sự kiện',
       directManagerId: U.M.id,
-      paymentMethod: PaymentMethod.BANK_TRANSFER,
       bankName: 'MB Bank',
       bankAccountNumber: '0123456789',
       items: [
@@ -482,7 +469,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
     await requests.approve(U.C, advanceId, {
       stepId: controlStep.id,
-      paymentAccountCode: controlAccount(atControl),
       adjustments: [
         {
           itemId: atControl.items[0].id,
@@ -575,11 +561,38 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
           amount: 1,
           date: '2026-10-02',
           method: PaymentMethod.BANK_TRANSFER,
+          cashAccountCode: '1121',
           idempotencyKey: idem(),
         },
         U.M,
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+    // Thủ quỹ phải chọn tài khoản thanh toán, đúng nhóm với hình thức chi.
+    await expect(
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1,
+          date: '2026-10-02',
+          method: PaymentMethod.BANK_TRANSFER,
+          idempotencyKey: idem(),
+        },
+        U.T,
+      ),
+    ).rejects.toThrow('Chọn tài khoản thanh toán');
+    await expect(
+      ledger.recordPayment(
+        advanceId,
+        {
+          amount: 1,
+          date: '2026-10-02',
+          method: PaymentMethod.CASH,
+          cashAccountCode: '1121',
+          idempotencyKey: idem(),
+        },
+        U.T,
+      ),
+    ).rejects.toThrow('nhóm 111');
 
     const key1 = idem();
     const first = await ledger.recordPayment(
@@ -599,6 +612,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         amount: 2_000_000,
         date: '2026-10-02',
         method: PaymentMethod.BANK_TRANSFER,
+        cashAccountCode: '1121',
         idempotencyKey: key1,
       },
       U.T,
@@ -606,6 +620,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     expect(replay.id).toBe(first.id);
     let d = await requests.detail(U.A, advanceId);
     expect(d.paidAmount).toBe(2_000_000);
+    expect(d.paymentAccountCode).toBe('1121');
     expect(d.paymentStatus).toBe(PaymentStatus.PARTIALLY_PAID);
     expect(d.settlementStatus).toBe(SettlementStatus.NOT_SETTLED);
 
@@ -617,6 +632,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
           amount: 1_500_000,
           date: '2026-10-03',
           method: PaymentMethod.BANK_TRANSFER,
+          cashAccountCode: '1121',
           transactionRef: 'FT1',
           idempotencyKey: idem(),
         },
@@ -628,6 +644,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
           amount: 1_500_000,
           date: '2026-10-03',
           method: PaymentMethod.BANK_TRANSFER,
+          cashAccountCode: '1121',
           transactionRef: 'FT2',
           idempotencyKey: idem(),
         },
@@ -645,6 +662,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
           amount: 1,
           date: '2026-10-03',
           method: PaymentMethod.BANK_TRANSFER,
+          cashAccountCode: '1121',
           idempotencyKey: idem(),
         },
         U.T,
@@ -674,6 +692,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         amount: 700_000,
         date: '2026-10-10',
         method: PaymentMethod.CASH,
+        cashAccountCode: '1111',
         idempotencyKey: idem(),
       },
       U.T,
@@ -801,7 +820,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       salaryYear: 2026,
       salaryMonth: 10,
       requestedAmount: 6_000_000,
-      paymentMethod: PaymentMethod.CASH,
     });
     expect(tooMuch.expectedSalary).toBe(10_000_000);
     await expect(requests.submit(U.A, tooMuch.id)).rejects.toThrow(
@@ -818,7 +836,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       salaryMonth: 10,
       requestedAmount: 3_000_001,
       deductionPeriods: 2,
-      paymentMethod: PaymentMethod.CASH,
     });
     salaryId = created.id;
     expect(created.code).toMatch(/^UL-/);
@@ -836,7 +853,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       salaryYear: 2026,
       salaryMonth: 10,
       requestedAmount: 100_000,
-      paymentMethod: PaymentMethod.CASH,
     });
     await expect(requests.submit(U.A, second.id)).rejects.toThrow(
       /tối đa 1 lần\/tháng/,
@@ -848,6 +864,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         amount: 3_000_001,
         date: '2026-10-05',
         method: PaymentMethod.CASH,
+        cashAccountCode: '1111',
         idempotencyKey: idem(),
       },
       U.T,
@@ -926,7 +943,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       location: 'Đà Nẵng',
       tripStartDate: '2026-10-01',
       tripEndDate: '2026-10-05',
-      paymentMethod: PaymentMethod.BANK_TRANSFER,
       bankName: 'Vietcombank',
       bankAccountNumber: '0011223344',
       items: Array.from({ length: 80 }, (_, i) => ({
@@ -978,7 +994,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId: companyY,
       title: 'Tạm ứng công ty Y',
       directManagerId: U.M.id,
-      paymentMethod: PaymentMethod.CASH,
       items: [{ description: 'Chi phí', quantity: '1', unitPrice: '1000000' }],
     });
     await requests.submit(U.B, y.id);
@@ -994,6 +1009,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
           amount: 1,
           date: '2026-10-05',
           method: PaymentMethod.CASH,
+          cashAccountCode: '1111',
           idempotencyKey: idem(),
         },
         U.K,
@@ -1021,7 +1037,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     await requests.approve(U.M, req.id, { stepId: d.permissions.actionableStepId! });
 
     d = await requests.detail(U.C, req.id);
-    expect(d.permissions.requiresPaymentAccount).toBe(true);
+    expect(d.permissions.isControlStep).toBe(true);
     // Người lập / người ngoài không đính kèm chứng từ kiểm soát.
     await expect(
       requests.uploadAttachments(U.A, req.id, [file('x.pdf', PDF_BYTES)], {
@@ -1034,12 +1050,12 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     ).toHaveLength(1);
     await requests.approve(U.C, req.id, {
       stepId: d.permissions.actionableStepId!,
-      paymentAccountCode: controlAccount(d),
     });
     // Qua cấp kiểm soát rồi thì thôi.
     await expect(control()).rejects.toBeInstanceOf(ForbiddenException);
+    // Kiểm soát không chọn tài khoản — thủ quỹ chọn khi chi tiền.
     const after = await requests.detail(U.A, req.id);
-    expect(after.paymentAccountCode).toBe('1121');
+    expect(after.paymentAccountCode).toBeNull();
   });
 
   it('20. Tệp đính kèm (kiểm tra loại/quyền), nhật ký và lịch sử duyệt', async () => {
@@ -1157,7 +1173,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId: companyX,
       title: 'Thanh toán của kiểm soát viên',
       directManagerId: U.M.id,
-      paymentMethod: PaymentMethod.CASH,
       items: [
         { description: 'Văn phòng phẩm', quantity: '1', unitPrice: '100000' },
       ],
@@ -1252,7 +1267,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       companyId: companyX,
       title: 'Tạm ứng mua văn phòng phẩm',
       directManagerId: U.H.id,
-      paymentMethod: PaymentMethod.CASH,
       items: [{ description: 'Giấy in', quantity: '1', unitPrice: '200000' }],
     });
     expect(req.directManagerName).toBe(U.H.name);
@@ -1277,7 +1291,6 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         companyId: companyX,
         title: 'Chọn người không phải quản lý',
         directManagerId: U.O.id,
-        paymentMethod: PaymentMethod.CASH,
         items: [{ description: 'x', quantity: '1', unitPrice: '1000' }],
       }),
     ).rejects.toBeInstanceOf(BadRequestException);

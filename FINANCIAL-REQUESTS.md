@@ -40,7 +40,7 @@ Quyền theo thao tác:
 | Xem phiếu | Người đề nghị, người lập, quản lý trên phiếu, người duyệt (kể cả người được uỷ quyền), người có vai trò phủ công ty/phòng ban. Bản nháp chỉ người lập (và quản trị) xem được — áp dụng cả cho tệp, PDF, sao chép. |
 | Duyệt / từ chối / yêu cầu bổ sung | Chỉ người trong danh sách duyệt của **bước đang chờ**, hoặc người được uỷ quyền còn hiệu lực. Không duyệt sai thứ tự. Bấm lặp sẽ bị từ chối. |
 | Điều chỉnh số tiền chấp nhận theo dòng | Bước có bật `can_adjust_amounts`. Số chấp nhận không được vượt số kê khai; khác số kê khai phải ghi lý do. |
-| Ghi nhận chi / thu | Kế toán hoặc thủ quỹ trong phạm vi, không phải chính người nhận tiền |
+| Ghi nhận chi / thu | Kế toán hoặc thủ quỹ trong phạm vi, không phải chính người nhận tiền. Chi tiền bắt buộc chọn tài khoản thanh toán (tiền mặt → nhóm 111, chuyển khoản → nhóm 112) |
 | Huỷ phiếu chi / thu | Kế toán (bắt buộc lý do) |
 | Ghi nhận khấu trừ lương | Kế toán, `nhansu`, `ketoan_truong` |
 | Huỷ phiếu đã duyệt (chưa phát sinh tiền) | Kế toán hoặc quản trị (bắt buộc lý do) |
@@ -66,6 +66,7 @@ Tự phê duyệt — cấu hình theo quy trình:
 3. Cấp có `min_amount` lớn hơn tổng tiền thì tự bỏ qua (hạn mức).
 4. Trả về để bổ sung → người đề nghị sửa → gửi lại tạo **vòng mới**. Vòng cũ giữ nguyên làm lịch sử.
 5. Thao tác duyệt khoá dòng phiếu (`SELECT … FOR UPDATE`) và kiểm tra `stepId` thuộc bước đang chờ.
+6. Người lập chỉ khai người thụ hưởng và tài khoản ngân hàng nhận tiền, không chọn phương thức nhận. Bộ phận kiểm soát duyệt (được đính kèm chứng từ kiểm soát) nhưng không chọn tài khoản. Hình thức và tài khoản thanh toán do thủ quỹ chọn ở bước cuối, khi ghi nhận chi tiền.
 
 ## Tạm ứng → hoàn ứng → thanh toán
 

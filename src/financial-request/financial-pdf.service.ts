@@ -6,8 +6,6 @@ import { AuthUser } from '../type/auth-user.type';
 import {
   ApprovalStatus,
   FinancialRequestType,
-  PAYMENT_METHOD_LABELS,
-  PaymentMethod,
   PaymentStatus,
   RecoveryStatus,
   REQUEST_TYPE_TITLES,
@@ -223,19 +221,13 @@ export class FinancialPdfService {
       }
     }
     info.push(['Người thụ hưởng', detail.payeeName ?? '']);
-    if (detail.paymentMethod) {
-      info.push([
-        'Hình thức nhận',
-        PAYMENT_METHOD_LABELS[detail.paymentMethod],
-      ]);
-    }
     if (detail.paymentAccountCode) {
       info.push([
         'Tài khoản thanh toán',
         `${detail.paymentAccountCode}${detail.paymentAccountName ? ` — ${detail.paymentAccountName}` : ''}`,
       ]);
     }
-    if (detail.paymentMethod === PaymentMethod.BANK_TRANSFER) {
+    if (detail.bankName || detail.bankAccountNumber) {
       info.push(['Ngân hàng', detail.bankName ?? '']);
       info.push([
         'Số tài khoản',

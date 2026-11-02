@@ -19,7 +19,6 @@ import {
 import {
   FinancialRequestType,
   InvoiceType,
-  PaymentMethod,
 } from '../financial-request.constants';
 
 const DECIMAL = /^\d+(\.\d+)?$/;
@@ -220,11 +219,6 @@ class FinancialRequestBaseDto {
     message: 'Số tài khoản chỉ gồm chữ số/chữ cái, 4–50 ký tự',
   })
   bankAccountNumber?: string | null;
-
-  @IsOptional()
-  @Transform(emptyToNull)
-  @IsEnum(PaymentMethod)
-  paymentMethod?: PaymentMethod | null;
 
   @IsOptional()
   @Transform(emptyToNull)
