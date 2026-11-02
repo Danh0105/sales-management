@@ -12,6 +12,7 @@ import { FinancialApprovalStep } from './entities/financial-approval-step.entity
 import { FinancialApprovalWorkflow } from './entities/financial-approval-workflow.entity';
 import { FinancialAuditLog } from './entities/financial-audit-log.entity';
 import { FinancialCompany } from './entities/financial-company.entity';
+import { FinancialPayeeProfile } from './entities/financial-payee-profile.entity';
 import { FinancialDocumentSequence } from './entities/financial-document-sequence.entity';
 import { FinancialExpenseCategory } from './entities/financial-expense-category.entity';
 import { FinancialPayment } from './entities/financial-payment.entity';
@@ -56,6 +57,7 @@ import { FinancialRequestService } from './financial-request.service';
       FinancialAdvanceAllocation,
       FinancialSalaryAdvanceDeduction,
       FinancialAuditLog,
+      FinancialPayeeProfile,
       Employee,
       Department,
       Payroll,

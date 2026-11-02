@@ -1,3 +1,4 @@
+import { PickType } from '@nestjs/mapped-types';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -272,6 +273,14 @@ export class UpdateFinancialRequestDto extends FinancialRequestBaseDto {
   @MaxLength(500)
   title?: string;
 }
+
+/** Thông tin nhận tiền lưu để điền sẵn — cùng ràng buộc với phiếu. */
+export class SavePayeeProfileDto extends PickType(FinancialRequestBaseDto, [
+  'payeeName',
+  'bankAccountHolder',
+  'bankName',
+  'bankAccountNumber',
+] as const) {}
 
 export const LIST_SCOPES = ['mine', 'approvals', 'all', 'payments'] as const;
 export type ListScope = (typeof LIST_SCOPES)[number];

@@ -53,6 +53,7 @@ import {
   FinancialReportQueryDto,
   FinancialRequestQueryDto,
   SalaryAdvanceCheckQueryDto,
+  SavePayeeProfileDto,
   UpdateFinancialRequestDto,
 } from './dto/financial-request.dto';
 import { FinancialConfigService } from './financial-config.service';
@@ -184,6 +185,15 @@ export class FinancialRequestController {
   @Get('meta')
   meta(@Req() req: RequestWithUser) {
     return this.requests.meta(req.user);
+  }
+
+  /** Lưu thông tin nhận tiền của chính mình để điền sẵn cho đề nghị sau. */
+  @Put('payee-profile')
+  savePayeeProfile(
+    @Req() req: RequestWithUser,
+    @Body() dto: SavePayeeProfileDto,
+  ) {
+    return this.requests.savePayeeProfile(req.user, dto);
   }
 
   @Get('managers')

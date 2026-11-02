@@ -67,6 +67,7 @@ Tự phê duyệt — cấu hình theo quy trình:
 4. Trả về để bổ sung → người đề nghị sửa → gửi lại tạo **vòng mới**. Vòng cũ giữ nguyên làm lịch sử.
 5. Thao tác duyệt khoá dòng phiếu (`SELECT … FOR UPDATE`) và kiểm tra `stepId` thuộc bước đang chờ.
 6. Người lập chỉ khai người thụ hưởng và tài khoản ngân hàng nhận tiền, không chọn phương thức nhận. Bộ phận kiểm soát duyệt (được đính kèm chứng từ kiểm soát) nhưng không chọn tài khoản. Hình thức và tài khoản thanh toán do thủ quỹ chọn ở bước cuối, khi ghi nhận chi tiền.
+7. Thông tin nhận tiền mỗi người tự lưu ở `financial_payee_profiles` (`PUT /financial-requests/payee-profile`, trả về trong `meta.me.savedPayee`) và được điền sẵn trước tài khoản trong hồ sơ nhân viên. Lưu/sửa ở đây không đổi hồ sơ nhân viên (tài khoản nhận lương).
 
 ## Tạm ứng → hoàn ứng → thanh toán
 

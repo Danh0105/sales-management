@@ -1295,4 +1295,39 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  it('Lưu và sửa thông tin nhận tiền của chính mình (không sửa hồ sơ nhân viên)', async () => {
+    expect((await requests.meta(U.B)).me.savedPayee).toBeNull();
+    const saved = await requests.savePayeeProfile(U.B, {
+      payeeName: '  Người nhận B ',
+      bankAccountHolder: 'NGUOI NHAN B',
+      bankName: 'VCB',
+      bankAccountNumber: '0011223344',
+    });
+    expect(saved).toMatchObject({
+      payeeName: 'Người nhận B',
+      bankName: 'VCB',
+      bankAccountNumber: '0011223344',
+    });
+    // Sửa: ghi đè đúng một dòng của người đó.
+    await requests.savePayeeProfile(U.B, {
+      payeeName: 'Người nhận B',
+      bankAccountHolder: 'NGUOI NHAN B',
+      bankName: 'MB Bank',
+      bankAccountNumber: '9988776655',
+    });
+    expect((await requests.meta(U.B)).me.savedPayee).toMatchObject({
+      bankName: 'MB Bank',
+      bankAccountNumber: '9988776655',
+    });
+    const [{ n }] = await ds.query(
+      `SELECT count(*)::int AS n FROM financial_payee_profiles WHERE employee_id = $1`,
+      [U.B.id],
+    );
+    expect(n).toBe(1);
+    // Mỗi người một bản; tài khoản trong hồ sơ nhân viên (bảng lương) giữ nguyên.
+    expect((await requests.meta(U.O)).me.savedPayee).toBeNull();
+    const meB = (await requests.meta(U.B)).me;
+    expect(meB.bankAccountNumber).not.toBe('9988776655');
+  });
 });

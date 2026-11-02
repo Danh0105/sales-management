@@ -32,6 +32,7 @@ import {
   FinancialRequestItemDto,
   FinancialRequestQueryDto,
   SalaryAdvanceCheckQueryDto,
+  SavePayeeProfileDto,
   UpdateFinancialRequestDto,
 } from './dto/financial-request.dto';
 import { FinancialAdvanceAllocation } from './entities/financial-advance-allocation.entity';
@@ -40,6 +41,7 @@ import { FinancialApprovalWorkflow } from './entities/financial-approval-workflo
 import { FinancialAuditLog } from './entities/financial-audit-log.entity';
 import { FinancialCompany } from './entities/financial-company.entity';
 import { FinancialExpenseCategory } from './entities/financial-expense-category.entity';
+import { FinancialPayeeProfile } from './entities/financial-payee-profile.entity';
 import { FinancialPayment } from './entities/financial-payment.entity';
 import { FinancialPolicy } from './entities/financial-policy.entity';
 import { FinancialRefund } from './entities/financial-refund.entity';
@@ -173,7 +175,7 @@ export class FinancialRequestService {
 
   async meta(user: AuthUser) {
     const ctx = await this.access.context(user);
-    const [companies, categories, departments, cashAccounts, me] =
+    const [companies, categories, departments, cashAccounts, me, payee] =
       await Promise.all([
         this.companyRepo.find({
           where: { isActive: true },
@@ -194,6 +196,9 @@ export class FinancialRequestService {
           where: { id: ctx.userId },
           relations: ['department'],
         }),
+        this.dataSource
+          .getRepository(FinancialPayeeProfile)
+          .findOne({ where: { employeeId: ctx.userId } }),
       ]);
     const moneyRoles = [FinanceRole.ACCOUNTANT, FinanceRole.CASHIER];
     return {
@@ -218,6 +223,7 @@ export class FinancialRequestService {
         position: this.positionOf(me),
         bankName: me?.bankName ?? null,
         bankAccountNumber: me?.bankAccountNumber ?? null,
+        savedPayee: payee ? this.publicPayeeProfile(payee) : null,
       },
       capabilities: {
         isAdmin: ctx.isAdmin,
@@ -274,6 +280,37 @@ export class FinancialRequestService {
     return managers
       .filter((m) => m.id !== ctx.userId)
       .map((m) => ({ id: m.id, name: m.name, position: this.positionOf(m) }));
+  }
+
+  /** Lưu (ghi đè) thông tin nhận tiền của chính người dùng, không sửa hồ sơ nhân viên. */
+  async savePayeeProfile(user: AuthUser, dto: SavePayeeProfileDto) {
+    const ctx = await this.access.context(user);
+    const repo = this.dataSource.getRepository(FinancialPayeeProfile);
+    const clean = (value?: string | null) => value?.trim() || null;
+    await repo.upsert(
+      {
+        employeeId: ctx.userId,
+        payeeName: clean(dto.payeeName),
+        bankAccountHolder: clean(dto.bankAccountHolder),
+        bankName: clean(dto.bankName),
+        bankAccountNumber: clean(dto.bankAccountNumber),
+        updatedAt: new Date(),
+      },
+      ['employeeId'],
+    );
+    return this.publicPayeeProfile(
+      await repo.findOneByOrFail({ employeeId: ctx.userId }),
+    );
+  }
+
+  private publicPayeeProfile(p: FinancialPayeeProfile) {
+    return {
+      payeeName: p.payeeName,
+      bankAccountHolder: p.bankAccountHolder,
+      bankName: p.bankName,
+      bankAccountNumber: p.bankAccountNumber,
+      updatedAt: p.updatedAt,
+    };
   }
 
   private publicCompany(c: FinancialCompany) {
