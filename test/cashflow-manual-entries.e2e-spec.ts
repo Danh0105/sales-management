@@ -25,8 +25,10 @@ import { DataSource } from 'typeorm';
 import { CashAccount } from '../src/cashflow-report/cash-account.entity';
 import { CashManualEntry } from '../src/cashflow-report/cash-manual-entry.entity';
 import { CashManualEntryService } from '../src/cashflow-report/cash-manual-entry.service';
+import { CashDayClosingService } from '../src/cashflow-report/cash-day-closing.service';
 import { CashflowReportService } from '../src/cashflow-report/cashflow-report.service';
 import { SourceDeletionService } from '../src/cashflow-report/source-deletion.service';
+import { addDays, vnToday } from '../src/financial-request/financial-calculations';
 import { FinancialLedgerService } from '../src/financial-request/financial-ledger.service';
 import { absolutePath } from '../src/financial-request/financial-storage';
 import { contractCode } from '../src/other-cashflow/other-cashflow.constants';
@@ -73,6 +75,7 @@ suite('Tổng hợp thu chi — CRUD trên Postgres', () => {
         CashflowReportService,
         CashManualEntryService,
         SourceDeletionService,
+        CashDayClosingService,
         // Chỉ nhánh Đề nghị tài chính dùng tới (test trong financial-requests.e2e-spec).
         { provide: FinancialLedgerService, useValue: {} },
       ],
@@ -400,6 +403,83 @@ suite('Tổng hợp thu chi — CRUD trên Postgres', () => {
       }
       await ds.query(`DELETE FROM school_expenses WHERE id = $1`, [sheetId]);
       await ds.query(`DELETE FROM expense_periods WHERE id = $1`, [periodId]);
+    }
+  });
+
+  // ---- Chốt quỹ ngày (End of Day) ----
+  it('chốt quỹ: chốt / chốt bù / khoá ngày đã chốt / báo lệch / mở lại / tự chốt sau 0h', async () => {
+    const closing = moduleRef.get(CashDayClosingService);
+    const [{ max }] = await ds.query(`SELECT coalesce(max(id), 0) AS max FROM cash_day_closings`);
+    expect(await count(`SELECT count(*) AS n FROM cash_day_closings WHERE status = 'CLOSED'`, [])).toBe(0);
+    const today = vnToday();
+    const d0 = addDays(today, -3);
+    try {
+      expect((await closing.preview(d0)).days.map((d) => d.date)).toEqual([d0]);
+      const first = await closing.close(T, d0);
+      expect(first.closed).toEqual([expect.objectContaining({ date: d0, status: 'CLOSED', mode: 'MANUAL', closedByName: 'Thủ quỹ IT' })]);
+      expect(first.closed[0].balances.find((b) => b.code === CASH)).toBeDefined();
+      await expect(closing.close(T, d0)).rejects.toThrow('đã chốt quỹ');
+      await expect(closing.close(T, addDays(today, 1))).rejects.toThrow('tương lai');
+
+      // Ngày đã chốt: không thêm bút toán; ngày sau vẫn được.
+      const entry = { kind: 'IN' as const, accountCode: CASH, amount: '1000', description: 'Sau chốt' };
+      await expect(entries.create({ ...entry, entryDate: d0 }, T)).rejects.toThrow('đã chốt quỹ');
+      const later = await entries.create({ ...entry, entryDate: addDays(d0, 1) }, T);
+
+      // End of Day hôm nay chốt bù cả các ngày chưa chốt từ sau d0.
+      expect((await closing.preview()).days.map((d) => d.date)).toEqual([addDays(d0, 1), addDays(d0, 2), today]);
+      const eod = await closing.close(K);
+      expect(eod.closed.map((c) => c.date)).toEqual([addDays(d0, 1), addDays(d0, 2), today]);
+      const laterDay = eod.closed[0].balances.find((b) => b.code === CASH)!;
+      expect(laterDay.receipts).toBe('1000.00');
+      expect(await closing.status()).toMatchObject({ today, lockedThrough: today, todayClosed: true });
+
+      // Khoá: sửa / xoá bút toán, xoá dòng sổ thuộc ngày đã chốt.
+      await expect(entries.update(later.id, { amount: '2000' }, T)).rejects.toThrow('đã chốt quỹ');
+      await expect(entries.remove(later.id, T)).rejects.toThrow('đã chốt quỹ');
+      const plan = await deletion.plan('MANUAL_ENTRY', later.id);
+      expect(plan.blockers.join(' ')).toContain('đã chốt quỹ');
+      await expect(deletion.execute('MANUAL_ENTRY', later.id, T)).rejects.toThrow('đã chốt quỹ');
+
+      // Phân hệ khác đổi số liệu ngày đã chốt → cảnh báo lệch.
+      const [{ id: sneaky }] = await ds.query(
+        `INSERT INTO cash_manual_entries (kind, entry_date, account_code, amount, description, created_by) VALUES ('OUT', $1, $2, 500, 'ghi trễ', -1) RETURNING id`,
+        [addDays(d0, 1), CASH],
+      );
+      const issues = (await report.getIssues({ from: d0, to: today, accountCode: CASH })).issues;
+      const changed = issues.filter((i) => i.kind === 'CLOSED_DAY_CHANGED');
+      expect(changed).toEqual([expect.objectContaining({ date: addDays(d0, 1), accountCode: CASH, warningOnly: true, amount: '-500.00' })]);
+      await ds.query(`DELETE FROM cash_manual_entries WHERE id = $1`, [sneaky]);
+
+      // Mở lại (bắt buộc lý do) chỉ ngày gần nhất.
+      await expect(closing.reopen(K, '  ')).rejects.toBeInstanceOf(BadRequestException);
+      const reopened = await closing.reopen(K, 'Thu thiếu một khoản');
+      expect(reopened).toMatchObject({ reopened: { date: today, status: 'REOPENED', reopenedByName: 'KTT IT', reopenReason: 'Thu thiếu một khoản' }, lockedThrough: addDays(today, -1) });
+      const todayEntry = await entries.create({ ...entry, entryDate: today }, T);
+      await expect(entries.update(later.id, { amount: '2000' }, T)).rejects.toThrow('đã chốt quỹ');
+
+      // Cron 0h: tự chốt các ngày chưa chốt tới hết hôm qua (chỉ instance production).
+      await closing.reopen(K, 'Thử tự chốt');
+      expect((await closing.status()).lockedThrough).toBe(addDays(today, -2));
+      const env = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'test';
+      await closing.autoClose();
+      expect((await closing.status()).lockedThrough).toBe(addDays(today, -2));
+      process.env.NODE_ENV = 'production';
+      try {
+        await closing.autoClose();
+        await closing.autoClose(); // chạy lại: không chốt trùng
+      } finally {
+        process.env.NODE_ENV = env;
+      }
+      const status = await closing.status();
+      expect(status).toMatchObject({ lockedThrough: addDays(today, -1), todayClosed: false, latest: { mode: 'AUTO', closedByName: 'Tự động (sau 0h)' } });
+      const history = await closing.list(d0, today);
+      expect(history.filter((h) => h.status === 'REOPENED').map((h) => h.date).sort()).toEqual([addDays(today, -1), today]);
+      expect(await count(`SELECT count(*) AS n FROM cash_day_closings WHERE status = 'CLOSED' AND closing_date = $1`, [addDays(today, -1)])).toBe(1);
+      await entries.remove(todayEntry.id, T);
+    } finally {
+      await ds.query(`DELETE FROM cash_day_closings WHERE id > $1`, [max]);
     }
   });
 });

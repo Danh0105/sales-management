@@ -24,6 +24,9 @@ import {
   DIRECTION_LABELS,
 } from '../other-cashflow/other-cashflow.constants';
 import { AuthUser } from '../type/auth-user.type';
+import { cashLockedThrough, lockedMessage } from './cash-day-closing.service';
+import { CashflowReportService } from './cashflow-report.service';
+import { LedgerSourceRef } from './cashflow.types';
 import { manualDocumentNo } from './manual-entry-source';
 
 /** Nguồn của một dòng trên sổ mà thủ quỹ / kế toán trưởng được xoá. */
@@ -60,7 +63,20 @@ interface Prepared {
   plan: DeletionPlan;
   apply: (manager: EntityManager, actor: Actor) => Promise<void>;
   files: FileRef[];
+  /** id nguồn của các dòng sổ bị ảnh hưởng (mặc định chính id được xoá). */
+  ledgerIds?: number[];
 }
+
+/** Trường id trong nguồn của dòng sổ, theo loại nguồn. */
+const SOURCE_ID_FIELD: Record<DeletableSource, keyof LedgerSourceRef> = {
+  FINANCIAL_REQUEST: 'requestId',
+  EXPENSE_REQUEST: 'suggestId',
+  OTHER_CASHFLOW: 'otherCashflowId',
+  INVOICE: 'itemId',
+  SCHOOL_EXPENSE: 'itemId',
+  MANAGEMENT_EXPENSE: 'itemId',
+  MANUAL_ENTRY: 'manualEntryId',
+};
 
 const IRREVERSIBLE = 'Xoá vĩnh viễn, không khôi phục được.';
 const SUGGEST_UPLOAD = /^\/uploads\/suggest\/[^/]+$/;
@@ -103,6 +119,7 @@ export class SourceDeletionService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly ledger: FinancialLedgerService,
+    private readonly report: CashflowReportService,
   ) {}
 
   async plan(type: string, id: number): Promise<DeletionPlan> {
@@ -139,24 +156,59 @@ export class SourceDeletionService {
     return type as DeletableSource;
   }
 
-  private prepare(
+  private async prepare(
     manager: EntityManager,
     type: DeletableSource,
     id: number,
     lock: boolean,
   ): Promise<Prepared> {
+    let prepared: Prepared;
     switch (type) {
       case 'FINANCIAL_REQUEST':
-        return this.prepareFinancial(manager, id, lock);
+        prepared = await this.prepareFinancial(manager, id, lock);
+        break;
       case 'EXPENSE_REQUEST':
-        return this.prepareSuggest(manager, id, lock);
+        prepared = await this.prepareSuggest(manager, id, lock);
+        break;
       case 'OTHER_CASHFLOW':
-        return this.prepareOtherCashflow(manager, id, lock);
+        prepared = await this.prepareOtherCashflow(manager, id, lock);
+        break;
       case 'MANUAL_ENTRY':
-        return this.prepareManualEntry(manager, id, lock);
+        prepared = await this.prepareManualEntry(manager, id, lock);
+        break;
       default:
-        return this.prepareSheetRow(manager, type, id, lock);
+        prepared = await this.prepareSheetRow(manager, type, id, lock);
     }
+    const blocker = await this.closedDayBlocker(
+      manager,
+      type,
+      prepared.ledgerIds ?? [id],
+    );
+    if (blocker) prepared.plan.blockers.push(blocker);
+    return prepared;
+  }
+
+  /** Nguồn có dòng sổ thuộc ngày đã chốt quỹ → không xoá / gỡ được. */
+  private async closedDayBlocker(
+    manager: EntityManager,
+    type: DeletableSource,
+    ids: number[],
+  ): Promise<string | null> {
+    const lockedThrough = await cashLockedThrough(manager);
+    if (!lockedThrough) return null;
+    const accounts = await this.report.loadAccounts();
+    const { lines } = await this.report.collect(accounts);
+    const field = SOURCE_ID_FIELD[type];
+    const closed = lines
+      .filter(
+        (line) =>
+          line.source.type === type &&
+          ids.includes(line.source[field] as number) &&
+          line.postingDate <= lockedThrough,
+      )
+      .map((line) => line.postingDate)
+      .sort()[0];
+    return closed ? lockedMessage(closed, lockedThrough) : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -276,6 +328,7 @@ export class SourceDeletionService {
         blockers: [],
       },
       files: attachments.map((a) => ({ kind: 'storage', path: a.path })),
+      ledgerIds: ids,
       apply: async (m, actor) => {
         for (const request of requests) {
           if (

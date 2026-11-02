@@ -7,6 +7,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, Repository } from 'typeorm';
 import { AuthUser } from '../type/auth-user.type';
 import { CashAccount } from './cash-account.entity';
+import { assertCashDayOpen } from './cash-day-closing.service';
 import { CashManualEntry } from './cash-manual-entry.entity';
 import { centsToString, toCents } from './cashflow-money';
 import {
@@ -53,6 +54,7 @@ export class CashManualEntryService {
       createdByName: await this.actorName(user),
     });
     await this.validate(entry, null);
+    await assertCashDayOpen(this.dataSource, entry.entryDate);
     return this.toView(await this.entryRepository.save(entry));
   }
 
@@ -77,6 +79,7 @@ export class CashManualEntryService {
     // Đổi khỏi Chuyển nội bộ thì bỏ tài khoản nhận.
     if (entry.kind !== 'TRANSFER') entry.counterAccountCode = null;
     await this.validate(entry, before);
+    await assertCashDayOpen(this.dataSource, before.entryDate, entry.entryDate);
     entry.updatedBy = user.id;
     entry.updatedByName = await this.actorName(user);
     return this.toView(await this.entryRepository.save(entry));
@@ -85,6 +88,7 @@ export class CashManualEntryService {
   /** Xoá mềm: dòng ra khỏi sổ nhưng vẫn giữ để tra lại. */
   async remove(id: number, user: AuthUser) {
     const entry = await this.find(id);
+    await assertCashDayOpen(this.dataSource, entry.entryDate);
     entry.deletedAt = new Date();
     entry.deletedBy = user.id;
     entry.deletedByName = await this.actorName(user);

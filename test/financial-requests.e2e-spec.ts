@@ -25,6 +25,7 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 
 import { CashAccount } from '../src/cashflow-report/cash-account.entity';
+import { CashflowReportService } from '../src/cashflow-report/cashflow-report.service';
 import { SourceDeletionService } from '../src/cashflow-report/source-deletion.service';
 import { Department } from '../src/department/department.entity';
 import { Employee } from '../src/employee/employee.entity';
@@ -265,6 +266,7 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
         FinancialReportService,
         FinancialPdfService,
         SourceDeletionService,
+        CashflowReportService,
         { provide: NotificationService, useValue: notification },
       ],
     }).compile();

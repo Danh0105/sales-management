@@ -109,6 +109,24 @@ Bút toán nhập tay: số chứng từ trống thì sinh `PT-<id>` (thu) / `PC
 `CK-<id>` (chuyển). Chọn tài khoản mới phải đang sử dụng; giữ nguyên tài khoản cũ đã ngừng
 dùng thì vẫn sửa được. Xoá là xoá mềm (`deleted_at`, người xoá) — dòng ra khỏi sổ.
 
+### Chốt quỹ ngày (End of Day)
+
+Bảng `cash_day_closings` (migration `1795200000000`): mỗi ngày đã chốt một dòng `CLOSED`
+kèm ảnh số dư từng tài khoản (đầu ngày / thu / chi / cuối ngày, null = chưa xác minh).
+
+- Thủ quỹ / kế toán trưởng / giám đốc bấm **End of Day** → chốt hôm nay. Chốt liền mạch:
+  mọi ngày chưa chốt kể từ ngày chốt gần nhất được chốt cùng (lần chốt đầu tiên chỉ chốt
+  đúng ngày đó). Không chốt ngày tương lai.
+- Cron `5 0 * * *` (giờ VN, chỉ instance production) tự chốt tới hết hôm qua nếu chưa ai
+  bấm (`mode = AUTO`). Bấm và cron dùng chung advisory lock + index duy nhất có điều kiện
+  nên không chốt trùng.
+- Khoá: mọi ngày ≤ ngày `CLOSED` gần nhất — không thêm/sửa/xoá bút toán nhập tay, không xoá
+  dòng sổ (mục xoá ở trên) có ngày đó. Các phân hệ khác vẫn ghi ngày cũ được; nếu làm thu/chi
+  của ngày đã chốt khác ảnh lúc chốt thì báo `CLOSED_DAY_CHANGED` (cảnh báo) ở "Cần kiểm
+  tra". Sửa số dư gốc không bị khoá và không tính là lệch.
+- Mở lại: kế toán trưởng / giám đốc, chỉ ngày chốt gần nhất, bắt buộc lý do; dòng đổi thành
+  `REOPENED` (giữ lịch sử), chốt lại tạo dòng mới.
+
 ## 5. API (`/reports/cashflow`, JWT + role)
 
 Xem: `accountant`, `ketoan_congno`, `ketoan_truong`, `thuquy`, `troly_gd`, `director`.
@@ -129,6 +147,11 @@ Thêm/sửa/xoá (tài khoản, bút toán nhập tay): `ketoan_truong`, `thuquy
 | DELETE | `manual-entries/:id` | xoá mềm                                                                                                       |
 | GET    | `sources/:type/:id/deletion` | xem trước các khoản bị xoá/gỡ khi xoá dòng nguồn `type` (mục 4)                                       |
 | DELETE | `sources/:type/:id` | xoá chứng từ gốc / gỡ dòng khỏi sổ (mục 4)                                                                     |
+| GET    | `day-closings/status` | ngày chốt gần nhất (`lockedThrough`), hôm nay đã chốt chưa — mọi role xem                                    |
+| GET    | `day-closings?from&to` | lịch sử chốt / mở lại trong khoảng ngày                                                                     |
+| GET    | `day-closings/preview?date` | các ngày sẽ chốt + số dư từng tài khoản (quyền thêm/sửa/xoá)                                           |
+| POST   | `day-closings` | End of Day: `{ date? }` mặc định hôm nay (quyền thêm/sửa/xoá)                                                       |
+| POST   | `day-closings/reopen` | `{ reason }` mở lại ngày chốt gần nhất — `ketoan_truong`, `director`                                         |
 | GET    | `export`         | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
 
 Tham số chung: `from`, `to` (YYYY-MM-DD, bắt buộc), `accountType` (`all|cash|bank`),

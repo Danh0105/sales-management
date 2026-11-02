@@ -2,6 +2,7 @@ import { ROLES_KEY } from '../auth/roles.decorator';
 import {
   CashflowReportController,
   MANAGE_ROLES,
+  REOPEN_ROLES,
 } from './cashflow-report.controller';
 import { mapManualEntries, ManualEntryRow } from './manual-entry-source';
 
@@ -92,9 +93,20 @@ describe('Quyền Tổng hợp thu chi', () => {
       'deleteManualEntry',
       'sourceDeletionPlan',
       'deleteSource',
+      'dayClosingPreview',
+      'closeDay',
     ] as const) {
       expect(roles(method)).toEqual(MANAGE_ROLES);
     }
+  });
+
+  it('chốt quỹ: thủ quỹ chốt được; chỉ kế toán trưởng / giám đốc mở lại', () => {
+    expect(MANAGE_ROLES).toContain('thuquy');
+    expect(REOPEN_ROLES).toEqual(['ketoan_truong', 'director']);
+    expect(roles('reopenDay')).toEqual(REOPEN_ROLES);
+    // Trạng thái / lịch sử chốt: quyền xem chung của báo cáo.
+    expect(roles('dayClosingStatus')).toBeUndefined();
+    expect(roles('dayClosings')).toBeUndefined();
   });
 
   it('kế toán, KT công nợ, trợ lý GĐ chỉ xem (không có trong quyền ghi)', () => {

@@ -19,11 +19,17 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import { CashDayClosingService } from './cash-day-closing.service';
 import { CashManualEntryService } from './cash-manual-entry.service';
 import { CashflowReportService } from './cashflow-report.service';
 import { SourceDeletionService } from './source-deletion.service';
 import { CashflowQueryDto } from './dto/cashflow-query.dto';
 import { CreateCashAccountDto } from './dto/create-cash-account.dto';
+import {
+  CloseDayDto,
+  DayClosingRangeDto,
+  ReopenDayDto,
+} from './dto/day-closing.dto';
 import {
   CreateManualEntryDto,
   UpdateManualEntryDto,
@@ -48,6 +54,9 @@ const READ_ROLES = [
  */
 export const MANAGE_ROLES = ['ketoan_truong', 'thuquy', 'director'];
 
+/** Mở lại ngày đã chốt quỹ: kế toán trưởng, giám đốc. */
+export const REOPEN_ROLES = ['ketoan_truong', 'director'];
+
 @Controller('reports/cashflow')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(...READ_ROLES)
@@ -57,7 +66,38 @@ export class CashflowReportController {
     private readonly cashflowReportService: CashflowReportService,
     private readonly manualEntryService: CashManualEntryService,
     private readonly sourceDeletionService: SourceDeletionService,
+    private readonly dayClosingService: CashDayClosingService,
   ) {}
+
+  /** Trạng thái chốt quỹ (ngày chốt gần nhất) — mọi người xem báo cáo đều thấy. */
+  @Get('day-closings/status')
+  dayClosingStatus() {
+    return this.dayClosingService.status();
+  }
+
+  @Get('day-closings/preview')
+  @Roles(...MANAGE_ROLES)
+  dayClosingPreview(@Query() dto: CloseDayDto) {
+    return this.dayClosingService.preview(dto.date);
+  }
+
+  @Get('day-closings')
+  dayClosings(@Query() query: DayClosingRangeDto) {
+    return this.dayClosingService.list(query.from, query.to);
+  }
+
+  /** End of Day: chốt quỹ ngày (mặc định hôm nay) và các ngày chưa chốt trước đó. */
+  @Post('day-closings')
+  @Roles(...MANAGE_ROLES)
+  closeDay(@Body() dto: CloseDayDto, @Req() req: RequestWithUser) {
+    return this.dayClosingService.close(req.user, dto.date);
+  }
+
+  @Post('day-closings/reopen')
+  @Roles(...REOPEN_ROLES)
+  reopenDay(@Body() dto: ReopenDayDto, @Req() req: RequestWithUser) {
+    return this.dayClosingService.reopen(req.user, dto.reason);
+  }
 
   @Get('summary')
   summary(@Query() query: CashflowQueryDto) {

@@ -57,6 +57,8 @@ import {
   LedgerIssue,
   LedgerLine,
 } from './cashflow.types';
+import { DayClosingBalance } from './cash-day-closing.entity';
+import { closedDayIssues } from './day-closing';
 import { CashflowQueryDto } from './dto/cashflow-query.dto';
 import { CreateCashAccountDto } from './dto/create-cash-account.dto';
 import { UpdateCashAccountDto } from './dto/update-cash-account.dto';
@@ -186,7 +188,22 @@ export class CashflowReportService {
     const accounts = await this.loadAccounts();
     const { lines, issues } = await this.collect(accounts);
     const balances = computeBalances(accounts, lines, range);
-    return { range, accounts, balances, lines, issues };
+    // Ngày đã chốt quỹ trong kỳ mà thu/chi bị đổi sau khi chốt → cảnh báo.
+    const closings = await this.dataSource.query<
+      { date: string; balances: DayClosingBalance[] }[]
+    >(
+      `SELECT to_char(closing_date, 'YYYY-MM-DD') AS date, balances
+       FROM cash_day_closings
+       WHERE status = 'CLOSED' AND closing_date BETWEEN $1 AND $2`,
+      [range.from, range.to],
+    );
+    return {
+      range,
+      accounts,
+      balances,
+      lines,
+      issues: [...issues, ...closedDayIssues(closings, lines)],
+    };
   }
 
   scopeAccounts(dataset: CashflowDataset, query: CashflowQueryDto) {

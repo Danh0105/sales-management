@@ -22,7 +22,9 @@ export type LedgerSourceType =
   | 'EXPENSE_REQUEST'
   | 'FINANCIAL_REQUEST'
   | 'OTHER_CASHFLOW'
-  | 'MANUAL_ENTRY';
+  | 'MANUAL_ENTRY'
+  /** Cảnh báo ngày đã chốt quỹ bị đổi số liệu (không phải chứng từ). */
+  | 'DAY_CLOSING';
 
 /** Chỗ mở chứng từ gốc từ báo cáo. */
 export interface LedgerSourceRef {
@@ -80,7 +82,9 @@ export type LedgerIssueKind =
   /** Hai bút toán cùng định danh — chỉ tính một. */
   | 'DUPLICATE'
   /** Số tiền lớn bất thường — vẫn tính, cần kế toán xác nhận. */
-  | 'SUSPICIOUS_AMOUNT';
+  | 'SUSPICIOUS_AMOUNT'
+  /** Ngày đã chốt quỹ nhưng thu/chi bị phân hệ khác đổi sau khi chốt. */
+  | 'CLOSED_DAY_CHANGED';
 
 export interface LedgerIssue {
   key: string;
