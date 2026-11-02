@@ -118,6 +118,7 @@ import {
 } from './fuel-allowance-tier.service';
 import { effectiveRatePerPeriod } from './teaching-rate.util';
 import { HCM_OFFICE, isHcmRegionWard } from './company-departure';
+import { formatConfirmationPlace } from './confirmation-place.util';
 import {
   findHrStaff,
   findTeachingManagers as findTeachingManagersUtil,
@@ -3563,13 +3564,6 @@ export class TeachingSessionService {
   ): Promise<void> {
     if (!teacher.employeeId) return;
 
-    const slot =
-      `ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
-      `lúc ${toDisplayTime(session.startTime)}`;
-    const message =
-      reason === 'rescheduled'
-        ? `Buổi dạy của bạn đã đổi lịch sang ${slot}. Vui lòng xác nhận hoặc từ chối.`
-        : `Bạn được xếp buổi dạy ${slot}. Vui lòng xác nhận hoặc từ chối.`;
     const pushData = {
       kind: TEACHING_SCHEDULE_CONFIRM_REQUEST_KIND,
       module: TEACHING_MODULE,
@@ -3578,11 +3572,30 @@ export class TeachingSessionService {
     };
 
     try {
+      const place = await this.describeConfirmationPlace(session.id);
+      const detail =
+        `ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
+        `lúc ${toDisplayTime(session.startTime)}` +
+        `${place ? ` – ${place}` : ''}`;
+      const message =
+        reason === 'rescheduled'
+          ? `Buổi dạy của bạn đã đổi lịch sang ${detail}. Vui lòng xác nhận hoặc từ chối.`
+          : `Bạn được xếp buổi dạy ${detail}. Vui lòng xác nhận hoặc từ chối.`;
+
       await this.notificationService.create({
         receiverId: teacher.employeeId,
         type: NotificationType.TEACHING_SCHEDULE_CONFIRM_REQUEST,
         message,
-        meta: { ...pushData, entityType: 'session', sessionId: session.id },
+        meta: {
+          ...pushData,
+          entityType: 'session',
+          sessionId: session.id,
+          // Một dòng trong tin Zalo gộp khi Nhân sự xếp nhiều lịch liền nhau.
+          summary:
+            reason === 'rescheduled'
+              ? `Đổi lịch: buổi ${detail}`
+              : `Buổi ${detail}`,
+        },
       });
 
       const tokens = await this.employeeFcmTokenService.getTokens([
@@ -3601,6 +3614,27 @@ export class TeachingSessionService {
         'Gửi thông báo yêu cầu xác nhận buổi dạy lỗi',
         error as any,
       );
+    }
+  }
+
+  /** Môn – lớp, trường của buổi; tra lỗi thì bỏ trống chứ không chặn thông báo. */
+  private async describeConfirmationPlace(sessionId: number): Promise<string> {
+    try {
+      const row = await this.sessionRepo
+        .createQueryBuilder('ss')
+        .leftJoin('ss.school', 'sc')
+        .leftJoin('ss.class', 'cl')
+        .leftJoin('ss.subject', 'sub')
+        .select([
+          'sc.name AS "schoolName"',
+          'cl.name AS "className"',
+          'sub.name AS "subjectName"',
+        ])
+        .where('ss.id = :id', { id: sessionId })
+        .getRawOne();
+      return formatConfirmationPlace(row);
+    } catch {
+      return '';
     }
   }
 

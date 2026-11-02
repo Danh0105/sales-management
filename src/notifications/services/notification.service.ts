@@ -38,6 +38,51 @@ const TEACHING_ZALO_TYPES = new Set<NotificationType>([
 const isTeachingNotificationZaloEnabled = () =>
   process.env.TEACHING_NOTIFICATION_ZALO !== '0';
 
+/** Gốc web app — ghép với `meta.url` dạng "/#/..." thành link bấm được trong tin Zalo. */
+const teachingAppUrl = () =>
+  (process.env.TEACHING_APP_URL || 'https://kidoapp.kidoedu.vn').replace(/\/+$/, '');
+
+/** Tin Zalo không mở thẳng app như push — kèm link để người nhận bấm vào xử lý. */
+function withAppLink(message: string, meta?: Record<string, any> | null): string {
+  const url = meta?.url;
+  if (typeof url !== 'string' || !url.startsWith('/')) return message;
+  return `${message}\n👉 ${teachingAppUrl()}${url}`;
+}
+
+/**
+ * Yêu cầu xác nhận lịch dạy: Nhân sự hay xếp nhiều lịch liền nhau (lưu TKB hàng
+ * loạt, sửa từng ô liên tiếp) — mỗi lịch một tin Zalo là vài chục tin cho một
+ * giáo viên. Gom theo giáo viên: gửi khi đã yên 30 giây, chậm nhất 2 phút sau
+ * yêu cầu đầu tiên. Restart giữa chừng thì mất tin Zalo đang gom, thông báo
+ * trong app vẫn còn.
+ */
+const CONFIRM_DIGEST_QUIET_MS = 30_000;
+const CONFIRM_DIGEST_MAX_WAIT_MS = 120_000;
+/** Zalo giới hạn 2.000 ký tự mỗi tin. */
+const CONFIRM_DIGEST_MAX_LINES = 15;
+const CONFIRM_DIGEST_PREFIX = '📅 LỊCH DẠY CẦN XÁC NHẬN\n';
+
+type ConfirmDigestItem = {
+  message: string;
+  summary: string;
+  meta?: Record<string, any> | null;
+};
+
+function buildConfirmDigestText(items: ConfirmDigestItem[]): string {
+  if (items.length === 1) {
+    return withAppLink(`${CONFIRM_DIGEST_PREFIX}${items[0].message}`, items[0].meta);
+  }
+
+  const shown = items.slice(0, CONFIRM_DIGEST_MAX_LINES);
+  const more = items.length - shown.length;
+  const text =
+    `${CONFIRM_DIGEST_PREFIX}Bạn được xếp ${items.length} lịch dạy mới:\n` +
+    shown.map((item) => `• ${item.summary}`).join('\n') +
+    (more > 0 ? `\n… và ${more} lịch khác` : '') +
+    '\nVui lòng xác nhận hoặc từ chối.';
+  return withAppLink(text, items[0].meta);
+}
+
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
@@ -54,6 +99,12 @@ export class NotificationService {
     private readonly notifyService: NotifyService,
   ) {}
 
+  /** Yêu cầu xác nhận lịch dạy đang gom theo người nhận, chờ gửi Zalo một lần. */
+  private readonly confirmDigest = new Map<
+    number,
+    { items: ConfirmDigestItem[]; firstAt: number; timer?: NodeJS.Timeout }
+  >();
+
   /**
    * Gửi kèm Zalo OA cho thông báo giảng dạy — kênh phụ, không bao giờ được
    * làm hỏng việc tạo thông báo chính nên mọi lỗi đều bị nuốt ở đây.
@@ -62,10 +113,20 @@ export class NotificationService {
     receiverId: number,
     type: NotificationType,
     message?: string | null,
+    meta?: Record<string, any> | null,
   ) {
     if (!message || !TEACHING_ZALO_TYPES.has(type)) return;
     if (!isTeachingNotificationZaloEnabled()) return;
 
+    if (type === NotificationType.TEACHING_SCHEDULE_CONFIRM_REQUEST) {
+      this.queueConfirmDigest(receiverId, message, meta);
+      return;
+    }
+
+    await this.sendZaloToEmployee(receiverId, withAppLink(message, meta));
+  }
+
+  private async sendZaloToEmployee(receiverId: number, text: string) {
     try {
       const employee = await this.employeeRepo.findOne({
         where: { id: receiverId },
@@ -73,12 +134,50 @@ export class NotificationService {
       });
       if (!employee?.zaloUserId) return;
 
-      await this.notifyService.sendMessage(employee.zaloUserId, message);
+      await this.notifyService.sendMessage(employee.zaloUserId, text);
     } catch (error) {
       this.logger.warn(
         `Không gửi được Zalo OA cho nhân viên #${receiverId}: ${(error as Error).message}`,
       );
     }
+  }
+
+  private queueConfirmDigest(
+    receiverId: number,
+    message: string,
+    meta?: Record<string, any> | null,
+  ) {
+    const now = Date.now();
+    const entry = this.confirmDigest.get(receiverId) ?? {
+      items: [],
+      firstAt: now,
+    };
+    entry.items.push({
+      message,
+      summary: typeof meta?.summary === 'string' ? meta.summary : message,
+      meta,
+    });
+
+    if (entry.timer) clearTimeout(entry.timer);
+    const wait = Math.min(
+      CONFIRM_DIGEST_QUIET_MS,
+      entry.firstAt + CONFIRM_DIGEST_MAX_WAIT_MS - now,
+    );
+    entry.timer = setTimeout(
+      () => void this.flushConfirmDigest(receiverId),
+      Math.max(0, wait),
+    );
+    this.confirmDigest.set(receiverId, entry);
+  }
+
+  /** Gửi ngay tin gộp đang chờ của một người nhận (hẹn giờ gọi; test gọi thẳng). */
+  async flushConfirmDigest(receiverId: number) {
+    const entry = this.confirmDigest.get(receiverId);
+    if (!entry) return;
+    this.confirmDigest.delete(receiverId);
+    if (entry.timer) clearTimeout(entry.timer);
+
+    await this.sendZaloToEmployee(receiverId, buildConfirmDigestText(entry.items));
   }
 
   private getEventByType(type: NotificationType) {
@@ -151,7 +250,12 @@ export class NotificationService {
 
     this.gateway.emitToUser(saved.receiverId, event, saved);
 
-    await this.pushTeachingZalo(saved.receiverId, saved.type, saved.message);
+    await this.pushTeachingZalo(
+      saved.receiverId,
+      saved.type,
+      saved.message,
+      saved.meta,
+    );
 
     return saved;
   }
@@ -392,7 +496,10 @@ export class NotificationService {
           .filter((id): id is string => !!id);
 
         if (zaloUserIds.length) {
-          await this.notifyService.sendToMany(zaloUserIds, message);
+          await this.notifyService.sendToMany(
+            zaloUserIds,
+            withAppLink(message, meta),
+          );
         }
       } catch (error) {
         this.logger.warn(
