@@ -8,6 +8,10 @@ Bạn là Senior Frontend Developer của ứng dụng quản lý KIDO. Hãy th�
 - Menu “Phiếu lương”, bộ lọc tháng/năm/nhân viên, bảng phân trang server-side.
 - Nút “Tạo phiếu lương”; form chọn nhân viên rồi nhập đủ các nhóm theo mẫu:
   ngày công, thành phần lương, các khoản khấu trừ.
+- Trong danh sách/bảng xuất thanh toán, thêm hai cột `SỐ TÀI KHOẢN` và
+  `NGÂN HÀNG`, lấy từ `employee.bankAccountNumber` và `employee.bankName`.
+  Áp dụng cho toàn bộ nhân viên, không loại `giaovien_ctv`; số tài khoản phải
+  giữ kiểu chuỗi để không mất số 0 đầu.
 - Hiện ba tổng theo thời gian thực nhưng coi response backend là nguồn chuẩn.
 - Cho sửa/xoá có xác nhận. Bắt lỗi `409` và báo rõ nhân viên đã có phiếu kỳ đó.
 - `director`, `director_la` thấy danh sách/chi tiết nhưng không có nút ghi dữ liệu.

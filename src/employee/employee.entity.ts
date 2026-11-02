@@ -34,6 +34,19 @@ export class Employee {
   @Column({ unique: true, nullable: true })
   phone?: string;
 
+  /** Số tài khoản nhận lương; lưu dạng chuỗi để không mất số 0 ở đầu. */
+  @Column({
+    name: 'bank_account_number',
+    type: 'varchar',
+    length: 50,
+    nullable: true,
+  })
+  bankAccountNumber?: string | null;
+
+  /** Tên ngân hàng nhận lương (ví dụ: MB - Ngân hàng TMCP Quân Đội). */
+  @Column({ name: 'bank_name', type: 'varchar', length: 255, nullable: true })
+  bankName?: string | null;
+
   /** Ảnh đại diện, đường dẫn tương đối `/uploads/avatars/...` — cùng kho với giáo viên. */
   @Column({ name: 'avatar_url', type: 'varchar', length: 500, nullable: true })
   avatarUrl?: string | null;

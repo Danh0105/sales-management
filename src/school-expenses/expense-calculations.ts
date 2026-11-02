@@ -217,6 +217,23 @@ export function normalizeSharedFields(item: any, index = 0) {
   };
 }
 
+/**
+ * Số lượng dùng để tính doanh thu:
+ * - có nhập số học sinh (> 0): số học sinh × số tháng;
+ * - không nhập số học sinh nhưng có số tiết: số tiết × số tháng.
+ *
+ * Ưu tiên số học sinh khi cả hai cùng có giá trị để công thức luôn xác định.
+ */
+export function revenueBillingQuantity(shared: {
+  totalPeriods: number;
+  studentCount: number;
+  monthsCount: number;
+}): number {
+  const baseQuantity =
+    shared.studentCount > 0 ? shared.studentCount : shared.totalPeriods;
+  return baseQuantity * shared.monthsCount;
+}
+
 export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
   const shared = normalizeSharedFields(sharedItem, index);
   const unitPrice = toNumber(item?.unitPrice, 0);
@@ -227,7 +244,7 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
     paidAmount,
   });
 
-  const invoiceAmount = shared.studentCount * shared.monthsCount * unitPrice;
+  const invoiceAmount = revenueBillingQuantity(shared) * unitPrice;
   const remainingAmount = invoiceAmount - paidAmount;
   const invoiceType = normalizeRevenueInvoiceType(
     item?.invoiceType,
@@ -252,7 +269,10 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
         ? item?.invoiceNumber || null
         : null,
     invoiceDate: item?.invoiceDate || null,
-    invoiceUnit: String(item?.invoiceUnit ?? '').trim().slice(0, 50) || null,
+    invoiceUnit:
+      String(item?.invoiceUnit ?? '')
+        .trim()
+        .slice(0, 50) || null,
     invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),

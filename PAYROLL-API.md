@@ -121,6 +121,21 @@ người tạo và thời gian. Quan hệ `employee` chỉ trả thông tin an t
 ```
 
 Mật khẩu và roles của nhân viên không xuất hiện trong response phiếu lương.
+Thông tin nhận lương lấy từ hồ sơ nhân viên và có cho mọi role, bao gồm cả
+`giaovien_ctv`:
+
+```json
+{
+  "employee": {
+    "bankAccountNumber": "0914732580",
+    "bankName": "MB - Ngân hàng TMCP Quân Đội"
+  }
+}
+```
+
+Hai field này là chuỗi để giữ nguyên số `0` ở đầu. Có thể tạo/cập nhật qua
+`POST /employees`, `PATCH /employees/:id`; các luồng tạo/sửa giáo viên cũng
+nhận cùng hai field và lưu vào tài khoản nhân viên liên kết.
 
 ## Lỗi chính
 

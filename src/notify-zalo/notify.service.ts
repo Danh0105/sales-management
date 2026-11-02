@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
-import { ZaloTokenService } from '../zalo-token/zalo-token.service';
+import {
+    describeHttpError,
+    ZaloTokenError,
+    ZaloTokenService,
+} from '../zalo-token/zalo-token.service';
 
 @Injectable()
 export class NotifyService {
@@ -54,15 +58,16 @@ export class NotifyService {
                 },
             );
 
-            console.log("Zalo response:", res.data);
-
+            // Không log response (id người nhận) — và tuyệt đối không log token.
             return res.data;
         } catch (error) {
-            console.error(
-                'Zalo send error:',
-                error?.response?.data || error.message,
-            );
-            throw error;
+            // Lỗi axios mang `config.headers.access_token` — chỉ giữ mã, ném lỗi đã làm sạch.
+            const reason =
+                error instanceof ZaloTokenError
+                    ? error.message
+                    : describeHttpError(error);
+            this.logger.warn(`Zalo send error: ${reason}`);
+            throw new ZaloTokenError(`Gửi tin Zalo OA thất bại (${reason})`);
         }
     }
 }

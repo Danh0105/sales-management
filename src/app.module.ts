@@ -46,6 +46,8 @@ import { ActivityLogModule } from './activity-log/activity-log.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { HrModule } from './hr/hr.module';
+import { RecruitmentModule } from './recruitment/recruitment.module';
+import { resolveDatabaseOptions } from './database/database-options';
 
 @Module({
   imports: [
@@ -55,16 +57,8 @@ import { HrModule } from './hr/hr.module';
       rootPath: join(__dirname, '..', 'uploads', 'apk'),
       serveRoot: '/apk',
     }),
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: 'localhost',
-      port: 5432,
-      username: 'postgres',
-      password: 'postgres',
-      database: 'sales_db',
-      autoLoadEntities: true,
-      synchronize: true,
-    }),
+    // Chặn test trỏ vào DB production ngay lúc import — xem database-options.ts.
+    TypeOrmModule.forRoot(resolveDatabaseOptions()),
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
@@ -110,6 +104,7 @@ import { HrModule } from './hr/hr.module';
     WarehouseModule,
     PayrollModule,
     HrModule,
+    RecruitmentModule,
   ],
 })
 export class AppModule {}

@@ -8,6 +8,8 @@ export const DEFAULT_INVOICE_UNIT = 'Học sinh';
 export interface RevenueRowInput {
   content?: string | null;
   studentCount: number | string;
+  totalPeriods?: number | string;
+  monthsCount?: number | string;
   unitPrice: number | string;
   invoiceUnit?: string | null;
 }
@@ -47,12 +49,19 @@ export function companyUnitPrice(
   );
 }
 
-/** Số lượng = số học sinh; Thành tiền làm tròn tới đồng. */
+/**
+ * Số lượng = (số học sinh nếu có, ngược lại là số tiết) × số tháng.
+ * Thành tiền làm tròn tới đồng.
+ */
 export function invoiceLine(
   revenue: RevenueRowInput,
   school: SchoolRowInput,
 ): InvoiceLine {
-  const quantity = Number(revenue.studentCount || 0);
+  const studentCount = Number(revenue.studentCount || 0);
+  const totalPeriods = Number(revenue.totalPeriods || 0);
+  const monthsCount = Number(revenue.monthsCount ?? 1);
+  const quantity =
+    (studentCount > 0 ? studentCount : totalPeriods) * monthsCount;
   const unitPrice = round2(companyUnitPrice(revenue, school));
   return { quantity, unitPrice, amount: Math.round(quantity * unitPrice) };
 }
@@ -80,7 +89,6 @@ export interface BuyerSchool {
   budgetCode?: string | null;
   address: string;
   phone?: string | null;
-  representative?: string | null;
 }
 
 /** 1 dòng hàng trên hóa đơn — ứng với 1 dòng doanh thu "Xuất HĐ Cty". */
@@ -116,9 +124,7 @@ export function buildDraftPayload(input: {
     },
     buyerInfo: {
       buyerCode: `TRUONG-${school.id}`,
-      ...(school.representative
-        ? { buyerName: school.representative.slice(0, 800) }
-        : {}),
+      // Không ghi "Họ tên người mua hàng": bên mua là trường (tên đơn vị + MST).
       buyerLegalName: school.name.slice(0, 1200),
       buyerTaxCode: school.taxCode.trim(),
       ...(budgetCode ? { buyerBudgetCode: budgetCode } : {}),

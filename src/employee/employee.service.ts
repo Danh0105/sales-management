@@ -94,6 +94,10 @@ export class EmployeeService {
 
       phone: data.phone,
 
+      bankAccountNumber: data.bankAccountNumber ?? null,
+
+      bankName: data.bankName ?? null,
+
       password: hashedPassword,
 
       roles,
@@ -131,6 +135,8 @@ export class EmployeeService {
         'employee.name',
         'employee.email',
         'employee.phone',
+        'employee.bankAccountNumber',
+        'employee.bankName',
         'employee.roles',
       ]);
 
@@ -157,6 +163,8 @@ export class EmployeeService {
         'employee.name',
         'employee.email',
         'employee.phone',
+        'employee.bankAccountNumber',
+        'employee.bankName',
         'employee.roles',
       ])
       .where(':salesRole = ANY(employee.roles)', {
@@ -220,7 +228,17 @@ export class EmployeeService {
   findOne(id: number) {
     return this.repo.findOne({
       where: { id },
-      select: ['id', 'name', 'email', 'phone', 'avatarUrl', 'roles', 'isActive'],
+      select: [
+        'id',
+        'name',
+        'email',
+        'phone',
+        'bankAccountNumber',
+        'bankName',
+        'avatarUrl',
+        'roles',
+        'isActive',
+      ],
     });
   }
 

@@ -1,0 +1,121 @@
+# KIDO AI Recruiter — Phase 2 (staging). Không đụng production:
+#   staging-db   Postgres riêng: schema prod (không dữ liệu) + seed tuyển dụng
+#   staging-api  sales-management build từ tag release, bật API AI bằng key staging
+#   openclaw     gateway OpenClaw, chỉ có tool recruitment_* (xem scripts/bootstrap-openclaw.sh)
+#
+# Chạy từ thư mục này, secrets nằm ngoài repo:
+#   docker compose --env-file /opt/kido-recruiter/.env up -d
+name: kido-recruiter
+
+services:
+  staging-db:
+    image: postgres:16.10
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sales_db_staging
+      # Mật khẩu nằm ngoài repo; staging-api nhận cùng giá trị qua DB_PASSWORD.
+      # DB chỉ ở mạng internal, không publish cổng.
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?set STAGING_DB_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - staging-db-data:/var/lib/postgresql/data
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/staging-db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./staging/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    networks:
+      staging:
+        # staging-api dùng chung network namespace của DB (để localhost:5432 trỏ đúng DB),
+        # nên tên staging-api được gắn làm alias ở đây.
+        aliases: [staging-api]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales_db_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  staging-api:
+    image: kido-sales-staging:${STAGING_API_TAG:-sales-release-20261005}
+    restart: unless-stopped
+    network_mode: "service:staging-db"
+    depends_on:
+      staging-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: staging
+      PORT: "3021"
+      DB_NAME: sales_db_staging
+      DB_SYNCHRONIZE: "false"
+      DB_USER: postgres
+      DB_PASSWORD: ${STAGING_DB_PASSWORD:?set STAGING_DB_PASSWORD}
+      JWT_SECRET: ${STAGING_JWT_SECRET:?set STAGING_JWT_SECRET}
+      RECRUITMENT_AI_ENABLED: "true"
+      RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      # Phase 3: key của kênh tin cậy (plugin trong session do adapter Zalo tạo). Bật
+      # REQUIRE_SUBJECT thì key AI chung bị từ chối — production bắt buộc "true".
+      RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
+      RECRUITMENT_AI_REQUIRE_SUBJECT: ${RECRUITMENT_AI_REQUIRE_SUBJECT:-false}
+      # P3-3: webhook Zalo OA tuyển dụng với OA GIẢ — không phải OA thật, không có token
+      # gửi tin. Event ký bằng secret staging do bootstrap sinh.
+      RECRUITMENT_ZALO_ENABLED: "true"
+      RECRUITMENT_ZALO_APP_ID: stg-recruit-app
+      RECRUITMENT_ZALO_OA_ID: stg-recruit-oa
+      RECRUITMENT_ZALO_OA_SECRET_KEY: ${STAGING_ZALO_OA_SECRET_KEY:?set STAGING_ZALO_OA_SECRET_KEY}
+      # P3-4: worker inbox → OpenClaw → outbox. TẮT trên staging-api chính (acceptance bật
+      # trên instance tạm) để test webhook không kéo theo lượt model tốn tiền.
+      RECRUITMENT_WORKER_ENABLED: ${RECRUITMENT_WORKER_ENABLED:-false}
+      RECRUITMENT_OPENCLAW_URL: http://openclaw-gateway:18789
+      RECRUITMENT_OPENCLAW_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
+      # P3-5: gửi outbox ra Zalo — KILL SWITCH TẮT trên staging-api chính. Staging không có OA
+      # thật: API/OAuth trỏ vào Zalo GIẢ (staging/fake-zalo.js, cổng 3198) và network staging
+      # không ra internet — bật nhầm cũng không thể gửi tới Zalo thật.
+      RECRUITMENT_ZALO_OUTBOUND_ENABLED: ${RECRUITMENT_ZALO_OUTBOUND_ENABLED:-false}
+      RECRUITMENT_ZALO_APP_SECRET: ${STAGING_ZALO_APP_SECRET:?set STAGING_ZALO_APP_SECRET}
+      RECRUITMENT_ZALO_TOKEN_KEY: ${STAGING_ZALO_TOKEN_KEY:?set STAGING_ZALO_TOKEN_KEY}
+      RECRUITMENT_ZALO_API_URL: http://localhost:3198
+      RECRUITMENT_ZALO_OAUTH_URL: http://localhost:3198
+      # FcmService bắt buộc có service account lúc khởi động. Staging KHÔNG dùng
+      # credential Firebase thật: file giả do bootstrap sinh, không gửi được thông báo.
+      FIREBASE_SERVICE_ACCOUNT_PATH: /run/kido/fake-firebase.json
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/staging-fake-firebase.json:/run/kido/fake-firebase.json:ro
+
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    restart: unless-stopped
+    depends_on:
+      - staging-api
+    environment: &openclaw-env
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RECRUITMENT_AI_API_KEY: ${RECRUITMENT_AI_API_KEY:?set RECRUITMENT_AI_API_KEY}
+      RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
+      TZ: Asia/Ho_Chi_Minh
+    volumes: &openclaw-volumes
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/openclaw-state:/home/node/.openclaw
+      - ${KIDO_RECRUITER_DIR:-/opt/kido-recruiter}/build/plugin-build:/opt/kido/plugins/kido-recruitment:ro
+      - ./skills:/opt/kido/skills:ro
+      # Quy tắc + persona của trợ lý (AGENTS.md, SOUL.md...) — OpenClaw nạp vào prompt mỗi phiên.
+      - ./workspace:/opt/kido/workspace:ro
+    # Control UI chỉ nghe loopback của host — truy cập qua SSH tunnel.
+    ports:
+      - "127.0.0.1:18789:18789"
+    networks: [staging, egress]
+
+  # CLI một lần: docker compose --env-file ... run --rm openclaw-cli <lệnh>
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    profiles: [cli]
+    entrypoint: ["openclaw"]
+    environment: *openclaw-env
+    volumes: *openclaw-volumes
+    networks: [staging, egress]
+
+networks:
+  # Không có đường ra internet: staging-db/staging-api không gọi ra ngoài, không chạm Postgres prod.
+  staging:
+    internal: true
+  # Chỉ OpenClaw cần ra internet (gọi OpenAI).
+  egress: {}
+
+volumes:
+  staging-db-data: {}

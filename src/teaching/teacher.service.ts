@@ -334,12 +334,24 @@ export class TeacherService {
           name: dto.name,
           phone: dto.phone,
           email: dto.email,
+          bankAccountNumber: dto.bankAccountNumber ?? null,
+          bankName: dto.bankName ?? null,
           password: passwordHash,
           roles: [dto.teacherRole ?? TEACHER_STAFF_ROLE],
           department: { id: 1 },
         }),
       );
       employeeId = employee.id ?? null;
+    } else if (
+      employeeId &&
+      (dto.bankAccountNumber !== undefined || dto.bankName !== undefined)
+    ) {
+      await manager.getRepository(Employee).update(employeeId, {
+        ...(dto.bankAccountNumber !== undefined
+          ? { bankAccountNumber: dto.bankAccountNumber }
+          : {}),
+        ...(dto.bankName !== undefined ? { bankName: dto.bankName } : {}),
+      });
     }
 
     const teacher = await teacherRepo.save(
@@ -485,6 +497,20 @@ export class TeacherService {
 
     if (dto.teacherRole !== undefined && teacher.employeeId) {
       await this.changeTeacherRole(teacher.employeeId, dto.teacherRole);
+    }
+
+    if (dto.bankAccountNumber !== undefined || dto.bankName !== undefined) {
+      if (!teacher.employeeId) {
+        throw new BadRequestException(
+          'Giáo viên chưa có tài khoản nhân viên để lưu thông tin ngân hàng',
+        );
+      }
+      await this.employeeRepo.update(teacher.employeeId, {
+        ...(dto.bankAccountNumber !== undefined
+          ? { bankAccountNumber: dto.bankAccountNumber }
+          : {}),
+        ...(dto.bankName !== undefined ? { bankName: dto.bankName } : {}),
+      });
     }
 
     if (dto.name !== undefined) teacher.name = dto.name;
@@ -672,6 +698,12 @@ export class TeacherService {
           if (otherTeacher || otherEmployee)
             throw new ConflictException('Email đã được sử dụng');
           current.email = employee.email = dto.email;
+        }
+        if (dto.bankAccountNumber !== undefined) {
+          employee.bankAccountNumber = dto.bankAccountNumber?.trim() || null;
+        }
+        if (dto.bankName !== undefined) {
+          employee.bankName = dto.bankName?.trim() || null;
         }
         if (dto.name !== undefined) current.name = employee.name = dto.name;
         if (newAvatarUrl) current.avatarUrl = newAvatarUrl;
@@ -906,7 +938,10 @@ export class TeacherService {
     });
 
     if (approved) {
-      await this.applyNewLocation(result.teacherId, result.reviewedAt ?? new Date());
+      await this.applyNewLocation(
+        result.teacherId,
+        result.reviewedAt ?? new Date(),
+      );
     }
     await this.notifyLocationChangeResult(result.teacherId, approved, dto.note);
 
@@ -1027,6 +1062,8 @@ export class TeacherService {
         name: dto.name ?? teacher.name,
         phone: dto.phone ?? teacher.phone,
         email: dto.email ?? teacher.email,
+        bankAccountNumber: dto.bankAccountNumber,
+        bankName: dto.bankName,
         teacherRole: dto.teacherRole,
         passwordHash,
       }),
@@ -1053,7 +1090,14 @@ export class TeacherService {
 
     const saved = await this.accountRequestRepo.save(
       this.accountRequestRepo.create({
-        payload: { name, phone, email, teacherRole: dto.teacherRole },
+        payload: {
+          name,
+          phone,
+          email,
+          bankAccountNumber: dto.bankAccountNumber,
+          bankName: dto.bankName,
+          teacherRole: dto.teacherRole,
+        },
         passwordHash: await this.hashNewAccountPassword(dto.password),
         teacherId: teacher.id,
         name: name ?? '',
@@ -1093,6 +1137,8 @@ export class TeacherService {
       name?: string | null;
       phone?: string | null;
       email?: string | null;
+      bankAccountNumber?: string | null;
+      bankName?: string | null;
       teacherRole?: string;
       passwordHash: string;
     },
@@ -1112,6 +1158,8 @@ export class TeacherService {
         name: input.name ?? teacher.name,
         phone: input.phone ?? undefined,
         email: input.email ?? undefined,
+        bankAccountNumber: input.bankAccountNumber ?? null,
+        bankName: input.bankName ?? null,
         password: input.passwordHash,
         roles: [input.teacherRole ?? TEACHER_STAFF_ROLE],
         department: { id: 1 },
@@ -1226,6 +1274,9 @@ export class TeacherService {
           name: request.name,
           phone: request.phone,
           email: request.email,
+          bankAccountNumber: (request.payload as CreateTeacherDto)
+            .bankAccountNumber,
+          bankName: (request.payload as CreateTeacherDto).bankName,
           teacherRole: (request.payload as CreateTeacherDto).teacherRole,
           passwordHash: request.passwordHash ?? '',
         });
@@ -1446,6 +1497,8 @@ export class TeacherService {
         't.email AS "email"',
         't.employee_id AS "employeeId"',
         'e.name AS "employeeName"',
+        'e.bank_account_number AS "bankAccountNumber"',
+        'e.bank_name AS "bankName"',
         `${TEACHER_ROLE_SQL} AS "teacherRole"`,
         't.is_active AS "isActive"',
         't.note AS "note"',
@@ -1467,6 +1520,8 @@ export class TeacherService {
       name: row.name,
       phone: row.phone ?? null,
       email: row.email ?? null,
+      bankAccountNumber: row.bankAccountNumber ?? null,
+      bankName: row.bankName ?? null,
       avatarUrl: this.avatarStorage.publicUrl(row.avatarUrl),
       latitude: row.latitude === null ? null : Number(row.latitude),
       longitude: row.longitude === null ? null : Number(row.longitude),
@@ -1505,6 +1560,8 @@ export class TeacherService {
       email: row.email ?? null,
       employeeId: row.employeeId === null ? null : Number(row.employeeId),
       employeeName: row.employeeName ?? null,
+      bankAccountNumber: row.bankAccountNumber ?? null,
+      bankName: row.bankName ?? null,
       /** null chỉ xảy ra với hồ sơ cũ/thuê ngoài chưa gắn tài khoản. */
       teacherRole: row.teacherRole ?? null,
       isActive: row.isActive,

@@ -1,5 +1,14 @@
 import * as admin from 'firebase-admin';
+import { readFileSync } from 'fs';
 import { FcmService } from './fcm.service';
+
+jest.mock('fs', () => ({
+  readFileSync: jest.fn(() => JSON.stringify({
+    project_id: 'test-project',
+    client_email: 'firebase@example.test',
+    private_key: 'test-private-key',
+  })),
+}));
 
 /**
  * `sendToMultiple`/`sendToDevice` phải fan-out cho MỌI thiết bị (không dừng ở
@@ -31,6 +40,7 @@ function makeService() {
 
 describe('FcmService.sendToMultiple', () => {
   beforeEach(() => {
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH = '/run/secrets/firebase.json';
     mockSend().mockReset();
   });
 
@@ -107,6 +117,7 @@ describe('FcmService.sendToMultiple', () => {
 
 describe('FcmService.sendToDevice', () => {
   beforeEach(() => {
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH = '/run/secrets/firebase.json';
     mockSend().mockReset();
   });
 
@@ -117,5 +128,33 @@ describe('FcmService.sendToDevice', () => {
     await expect(service.sendToDevice('dead-token', 'T', 'B')).rejects.toBeDefined();
 
     expect(employeeFcmTokenService.removeInvalidTokens).toHaveBeenCalledWith(['dead-token']);
+  });
+});
+
+describe('FcmService credentials', () => {
+  const employeeFcmTokenService = {
+    removeInvalidTokens: jest.fn(),
+  };
+
+  beforeEach(() => {
+    delete process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+    (readFileSync as jest.Mock).mockClear();
+  });
+
+  it('fails closed when the external credential path is missing', () => {
+    expect(() => new FcmService(employeeFcmTokenService as any))
+      .toThrow('FIREBASE_SERVICE_ACCOUNT_PATH is required');
+  });
+
+  it('loads credentials from the configured external path', () => {
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH =
+      '/root/app-credentials/firebase.json';
+
+    new FcmService(employeeFcmTokenService as any);
+
+    expect(readFileSync).toHaveBeenCalledWith(
+      '/root/app-credentials/firebase.json',
+      'utf8',
+    );
   });
 });

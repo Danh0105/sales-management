@@ -54,7 +54,7 @@ describe('RevenueEInvoicesService.exportDrafts', () => {
         budgetCode: '1012345',
         address: '1 Lê Lợi, Q1',
         phone: null,
-        representative: null,
+        representative: 'Nguyễn Thị Ánh Mai',
       },
     };
     subject = { id: 7, schoolId: 12, name: 'Tiếng Anh', catalog: null };
@@ -170,6 +170,8 @@ describe('RevenueEInvoicesService.exportDrafts', () => {
       buyerTaxCode: '0312345678',
       buyerBudgetCode: '1012345',
     });
+    // Không in "Họ tên người mua hàng" (người đại diện) — bên mua là trường.
+    expect(payload.buyerInfo).not.toHaveProperty('buyerName');
     expect(payload.itemInfo).toEqual([
       expect.objectContaining({
         lineNumber: 1,
