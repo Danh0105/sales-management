@@ -1,9 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
+  ParseIntPipe,
   Patch,
+  Post,
   Query,
   Req,
   Res,
@@ -16,8 +19,14 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import { CashManualEntryService } from './cash-manual-entry.service';
 import { CashflowReportService } from './cashflow-report.service';
 import { CashflowQueryDto } from './dto/cashflow-query.dto';
+import { CreateCashAccountDto } from './dto/create-cash-account.dto';
+import {
+  CreateManualEntryDto,
+  UpdateManualEntryDto,
+} from './dto/manual-entry.dto';
 import { UpdateCashAccountDto } from './dto/update-cash-account.dto';
 
 type RequestWithUser = Request & { user: AuthUser };
@@ -32,15 +41,21 @@ const READ_ROLES = [
   'director',
 ];
 
-/** Sửa số dư gốc, trạng thái tài khoản: kế toán trưởng, giám đốc. */
-const MANAGE_ROLES = ['ketoan_truong', 'director'];
+/**
+ * Thêm/sửa/xoá dữ liệu của báo cáo (danh mục tài khoản, số dư gốc, bút toán
+ * nhập tay): kế toán trưởng, thủ quỹ, giám đốc. Phải khớp `canManage` ở giao diện.
+ */
+export const MANAGE_ROLES = ['ketoan_truong', 'thuquy', 'director'];
 
 @Controller('reports/cashflow')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(...READ_ROLES)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class CashflowReportController {
-  constructor(private readonly cashflowReportService: CashflowReportService) {}
+  constructor(
+    private readonly cashflowReportService: CashflowReportService,
+    private readonly manualEntryService: CashManualEntryService,
+  ) {}
 
   @Get('summary')
   summary(@Query() query: CashflowQueryDto) {
@@ -84,6 +99,15 @@ export class CashflowReportController {
     res.send(buffer);
   }
 
+  @Post('accounts')
+  @Roles(...MANAGE_ROLES)
+  createAccount(
+    @Body() dto: CreateCashAccountDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.cashflowReportService.createAccount(dto, req.user);
+  }
+
   @Patch('accounts/:code')
   @Roles(...MANAGE_ROLES)
   updateAccount(
@@ -92,5 +116,46 @@ export class CashflowReportController {
     @Req() req: RequestWithUser,
   ) {
     return this.cashflowReportService.updateAccount(code, dto, req.user);
+  }
+
+  @Delete('accounts/:code')
+  @Roles(...MANAGE_ROLES)
+  deleteAccount(@Param('code') code: string) {
+    return this.cashflowReportService.deleteAccount(code);
+  }
+
+  /** Bút toán thu/chi/chuyển nội bộ nhập tay (dòng nguồn MANUAL_ENTRY trên sổ). */
+  @Get('manual-entries/:id')
+  @Roles(...MANAGE_ROLES)
+  getManualEntry(@Param('id', ParseIntPipe) id: number) {
+    return this.manualEntryService.get(id);
+  }
+
+  @Post('manual-entries')
+  @Roles(...MANAGE_ROLES)
+  createManualEntry(
+    @Body() dto: CreateManualEntryDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.manualEntryService.create(dto, req.user);
+  }
+
+  @Patch('manual-entries/:id')
+  @Roles(...MANAGE_ROLES)
+  updateManualEntry(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateManualEntryDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.manualEntryService.update(id, dto, req.user);
+  }
+
+  @Delete('manual-entries/:id')
+  @Roles(...MANAGE_ROLES)
+  deleteManualEntry(
+    @Param('id', ParseIntPipe) id: number,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.manualEntryService.remove(id, req.user);
   }
 }

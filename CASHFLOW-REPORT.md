@@ -19,6 +19,7 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
 | Đề xuất chi: xuất tiền    | `suggest_history` (`CONFIRM_CASH_RELEASED`) | Chi                         | ngày của sự kiện                  | `data.cashAccount`; lần xuất cuối cùng lấy thêm từ `suggest_payment_order.cashAccount` | snapshot lệnh chi gần nhất trước lần xuất (`CREATE_PAYMENT_ORDER.data.paymentOrder.amount`), nếu không có thì lấy số tiền lệnh chi hiện tại |
 | Đề xuất chi: nhận lại quỹ | `suggest_history` (`CONFIRM_FUND_RETURNED`) | Thu                         | ngày của sự kiện                  | cùng tài khoản với lần xuất đang mở                                                    | cùng số tiền với lần xuất đang mở                                                                                                           |
 | Thu Chi ngoài             | `other_cashflow_entries` (`RECORDED`)       | Thu (`flow` `IN`) / Chi (`OUT`) | `entry_date`                  | `cash_account_code` thủ quỹ chọn ở từng lần thu/chi                                    | `amount`                                                                                                                                    |
+| Bút toán nhập tay         | `cash_manual_entries` (chưa xoá)            | Thu / Chi / Chuyển nội bộ (2 bút toán) | `entry_date`           | `account_code` (Chuyển nội bộ: chi ở `account_code`, thu ở `counter_account_code`)     | `amount`                                                                                                                                    |
 
 - "Đã thu" (`revenue_items.paidAmount`) **không** được cộng thẳng vào sổ: chỉ khoản ở
   Hóa Đơn được tính, để không ghi trùng. Dòng có Đã thu mà chưa có khoản Thu ở Hóa Đơn sẽ
@@ -41,16 +42,20 @@ Bảng `cash_accounts` (migration `1794200000000`) gồm mã (định danh ổn 
 nhóm `111` / `112`, thứ tự, trạng thái sử dụng, và số dư gốc kèm ngày đối chiếu. Migration
 seed 13 tài khoản từ `INVOICE_CASH_ACCOUNTS`, số dư gốc để NULL.
 
-- Số dư gốc là số dư tại **đầu** ngày đối chiếu. Chỉ kế toán trưởng / giám đốc sửa được
-  (`PATCH /reports/cashflow/accounts/:code`). Người và thời điểm sửa được lưu trên dòng;
-  activity log ghi request.
+- Kế toán trưởng / thủ quỹ / giám đốc thêm, sửa (tên, thứ tự, trạng thái, số dư gốc, ghi
+  chú), xoá tài khoản. Mã và nhóm không đổi được (nhóm suy từ 3 số đầu của mã). Chỉ xoá được
+  tài khoản chưa có chứng từ/bút toán nào (kể cả đã huỷ/xoá) và không thuộc
+  `INVOICE_CASH_ACCOUNTS`; còn lại chuyển "Ngừng sử dụng".
+- Số dư gốc là số dư tại **đầu** ngày đối chiếu (`PATCH /reports/cashflow/accounts/:code`).
+  Người và thời điểm sửa được lưu trên dòng; activity log ghi request.
 - Chưa có số dư gốc thì dư đầu/cuối của tài khoản là `null` ("Chưa xác minh"),
   **không** coi là 0. Tổng dư đầu/cuối kỳ cũng là `null` khi trong phạm vi còn tài khoản
   chưa xác minh. Giao diện vẫn hiện riêng tổng của các tài khoản đã xác minh.
 - Tài khoản ngừng sử dụng vẫn hiện trên sổ nếu còn số dư hoặc còn phát sinh trong kỳ.
 - Giới hạn: kiểm tra mã ở các ô nhập (Hóa Đơn, Chi Trường, Chi Ngoài, xuất tiền) vẫn dùng
-  danh sách trong code. Thêm tài khoản mới hiện phải thêm cả dòng `cash_accounts` lẫn
-  `INVOICE_CASH_ACCOUNTS` (BE) và `invoiceCashAccounts.ts` (FE).
+  danh sách trong code. Tài khoản thêm ở báo cáo dùng được ngay cho bút toán nhập tay, Đề
+  nghị tài chính và Thu Chi ngoài (đọc `cash_accounts`); muốn chọn ở các ô kia vẫn phải thêm
+  vào `INVOICE_CASH_ACCOUNTS` (BE) và `invoiceCashAccounts.ts` (FE).
 
 ## 3. Quy tắc tính (hàm thuần trong `cashflow-ledger.ts`)
 
@@ -76,14 +81,18 @@ thực. Mọi tổng tính trên toàn bộ bút toán đã lọc, không tính 
 | `SUPERSEDED_RELEASE`                                                        | Cảnh báo | Lệnh chi bị sửa sau khi đã xuất tiền rồi xác nhận lại (không hoàn quỹ xen giữa): chỉ tính lần sau |
 | `SUSPICIOUS_AMOUNT`                                                         | Cảnh báo | Một khoản ≥ 10 tỷ đồng                                                                            |
 
-Chuyển tiền nội bộ: hệ thống chưa có nghiệp vụ này. Bút toán đã có cờ
-`isInternalTransfer` để sau này bổ sung (hai chân liên kết cùng số chứng từ, tổng thu chi
-thực tế không nhân đôi); hiện cờ luôn là `false`.
+Chuyển tiền nội bộ: chỉ có ở bút toán nhập tay loại Chuyển nội bộ — hai bút toán cùng số
+chứng từ `CK-<id>` (hoặc số người nhập), cờ `isInternalTransfer = true`; `excludeInternal`
+bỏ cả hai chân khỏi tổng thu chi. Các nguồn khác luôn `false`.
+
+Bút toán nhập tay: số chứng từ trống thì sinh `PT-<id>` (thu) / `PC-<id>` (chi) /
+`CK-<id>` (chuyển). Chọn tài khoản mới phải đang sử dụng; giữ nguyên tài khoản cũ đã ngừng
+dùng thì vẫn sửa được. Xoá là xoá mềm (`deleted_at`, người xoá) — dòng ra khỏi sổ.
 
 ## 5. API (`/reports/cashflow`, JWT + role)
 
 Xem: `accountant`, `ketoan_congno`, `ketoan_truong`, `thuquy`, `troly_gd`, `director`.
-Sửa danh mục: `ketoan_truong`, `director`.
+Thêm/sửa/xoá (tài khoản, bút toán nhập tay): `ketoan_truong`, `thuquy`, `director`.
 
 | Method | Đường dẫn        | Ghi chú                                                                                                           |
 | ------ | ---------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -91,7 +100,13 @@ Sửa danh mục: `ketoan_truong`, `director`.
 | GET    | `accounts`       | danh mục + dư đầu / thu / chi / dư cuối từng tài khoản, cộng theo nhóm                                            |
 | GET    | `cash`, `bank`   | sổ chi tiết nhóm 111 / 112; `page`, `limit` ≤ 500; tổng không phụ thuộc trang                                     |
 | GET    | `issues`         | chứng từ chưa phân loại / cảnh báo                                                                                |
-| PATCH  | `accounts/:code` | `openingBalance` + `openingBalanceDate` (đi theo cặp), `isActive`, `note`                                         |
+| POST   | `accounts`       | `code` (111…/112…), `name`, tuỳ chọn `sortOrder`, `isActive`, số dư gốc, `note`                                   |
+| PATCH  | `accounts/:code` | `name`, `sortOrder`, `openingBalance` + `openingBalanceDate` (đi theo cặp), `isActive`, `note`                    |
+| DELETE | `accounts/:code` | chỉ tài khoản chưa dùng và ngoài `INVOICE_CASH_ACCOUNTS`                                                          |
+| GET    | `manual-entries/:id` | một bút toán nhập tay (để sửa)                                                                                |
+| POST   | `manual-entries` | `kind` (`IN`/`OUT`/`TRANSFER`), `entryDate`, `accountCode`, `counterAccountCode` (chuyển), `amount`, `description`, tuỳ chọn `documentNo`, `partnerName`, `note` |
+| PATCH  | `manual-entries/:id` | sửa từng trường như POST                                                                                      |
+| DELETE | `manual-entries/:id` | xoá mềm                                                                                                       |
 | GET    | `export`         | Excel 3 sheet theo file mẫu (mục 7), cùng bộ lọc, toàn bộ kết quả — tên `Tong_Hop_Thu_Chi_YYYYMMDD_YYYYMMDD.xlsx` |
 
 Tham số chung: `from`, `to` (YYYY-MM-DD, bắt buộc), `accountType` (`all|cash|bank`),

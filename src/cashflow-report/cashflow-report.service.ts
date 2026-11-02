@@ -1,10 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { INVOICE_CASH_ACCOUNT_CODES } from '../revenue-item/invoice-cash-account';
 import { AuthUser } from '../type/auth-user.type';
 import { CashAccount } from './cash-account.entity';
 import {
@@ -39,6 +41,11 @@ import {
   SuggestEventRow,
 } from './cashflow-sources';
 import {
+  MANUAL_ENTRIES_SQL,
+  ManualEntryRow,
+  mapManualEntries,
+} from './manual-entry-source';
+import {
   mapOtherCashflowEntries,
   OTHER_CASHFLOW_ENTRIES_SQL,
   OtherCashflowEntryRow,
@@ -51,6 +58,7 @@ import {
   LedgerLine,
 } from './cashflow.types';
 import { CashflowQueryDto } from './dto/cashflow-query.dto';
+import { CreateCashAccountDto } from './dto/create-cash-account.dto';
 import { UpdateCashAccountDto } from './dto/update-cash-account.dto';
 
 export const CASH_GROUP_TITLES: Record<CashGroup, string> = {
@@ -60,6 +68,20 @@ export const CASH_GROUP_TITLES: Record<CashGroup, string> = {
 
 const money = (value: Cents | null) =>
   value === null ? null : centsToString(value);
+
+/** Mã tài khoản đã được chứng từ / bút toán nào dùng chưa (kể cả đã huỷ). */
+const ACCOUNT_USAGE_SQL = `
+SELECT EXISTS (SELECT 1 FROM revenue_items WHERE "invoiceCashAccount" = $1)
+  OR EXISTS (SELECT 1 FROM school_expense_items WHERE "cashAccount" = $1)
+  OR EXISTS (SELECT 1 FROM management_expense_items WHERE "cashAccount" = $1)
+  OR EXISTS (SELECT 1 FROM suggest_payment_order WHERE "cashAccount" = $1)
+  OR EXISTS (SELECT 1 FROM suggest_history WHERE data->>'cashAccount' = $1)
+  OR EXISTS (SELECT 1 FROM financial_payments WHERE cash_account_code = $1)
+  OR EXISTS (SELECT 1 FROM financial_refunds WHERE cash_account_code = $1)
+  OR EXISTS (SELECT 1 FROM financial_requests WHERE control_cash_account_code = $1)
+  OR EXISTS (SELECT 1 FROM other_cashflow_entries WHERE cash_account_code = $1)
+  OR EXISTS (SELECT 1 FROM cash_manual_entries WHERE account_code = $1 OR counter_account_code = $1)
+  AS used`;
 
 /** Dữ liệu đã tổng hợp cho một khoảng ngày — giao diện và Excel dùng chung. */
 export interface CashflowDataset {
@@ -118,7 +140,7 @@ export class CashflowReportService {
     }));
   }
 
-  /** Gom bút toán từ 6 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
+  /** Gom bút toán từ 7 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
   async collect(accounts: CashAccountInfo[]): Promise<CollectedLedger> {
     const [
       invoiceRows,
@@ -127,6 +149,7 @@ export class CashflowReportService {
       suggestEvents,
       financialMovements,
       otherCashflowEntries,
+      manualEntries,
     ] = await Promise.all([
       this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
       this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
@@ -136,6 +159,7 @@ export class CashflowReportService {
       this.dataSource.query<OtherCashflowEntryRow[]>(
         OTHER_CASHFLOW_ENTRIES_SQL,
       ),
+      this.dataSource.query<ManualEntryRow[]>(MANUAL_ENTRIES_SQL),
     ]);
 
     const parts = [
@@ -145,6 +169,7 @@ export class CashflowReportService {
       mapSuggestEvents(suggestEvents),
       mapFinancialMovements(financialMovements),
       mapOtherCashflowEntries(otherCashflowEntries),
+      mapManualEntries(manualEntries),
     ];
 
     return validateLines(
@@ -393,12 +418,90 @@ export class CashflowReportService {
     };
   }
 
+  /** Thêm tài khoản; thứ tự mặc định đứng cuối nhóm. */
+  async createAccount(dto: CreateCashAccountDto, user: AuthUser) {
+    if (await this.accountRepository.findOne({ where: { code: dto.code } })) {
+      throw new ConflictException(`Mã tài khoản ${dto.code} đã có`);
+    }
+    const groupCode = dto.code.slice(0, 3);
+    const account = this.accountRepository.create({
+      code: dto.code,
+      name: dto.name,
+      groupCode,
+      isActive: dto.isActive ?? true,
+      openingBalance: null,
+      openingBalanceDate: null,
+      note: dto.note ?? null,
+    });
+    if (dto.sortOrder !== undefined) {
+      account.sortOrder = dto.sortOrder;
+    } else {
+      const last = await this.accountRepository.findOne({
+        where: { groupCode },
+        order: { sortOrder: 'DESC' },
+      });
+      account.sortOrder = (last?.sortOrder ?? 0) + 1;
+    }
+    this.applyOpening(account, dto, user);
+    return this.accountRepository.save(account);
+  }
+
+  /**
+   * Chỉ xoá được tài khoản chưa có chứng từ / bút toán nào và không thuộc danh
+   * mục cố định của Hóa Đơn, Chi Trường, Chi Ngoài, Đề xuất chi — còn lại thì
+   * chuyển "Ngừng sử dụng".
+   */
+  async deleteAccount(code: string) {
+    const account = await this.accountRepository.findOne({ where: { code } });
+    if (!account) {
+      throw new NotFoundException('Không tìm thấy tài khoản');
+    }
+    if (INVOICE_CASH_ACCOUNT_CODES.includes(code)) {
+      throw new BadRequestException(
+        `Tài khoản ${code} thuộc danh mục Nguồn thu chi của Hóa Đơn / Chi Trường / Chi Ngoài / Đề xuất chi — chỉ chuyển "Ngừng sử dụng" được, không xoá`,
+      );
+    }
+    const [{ used }] = await this.dataSource.query<{ used: boolean }[]>(
+      ACCOUNT_USAGE_SQL,
+      [code],
+    );
+    if (used) {
+      throw new BadRequestException(
+        `Tài khoản ${code} đã có chứng từ hoặc bút toán — chỉ chuyển "Ngừng sử dụng" được, không xoá`,
+      );
+    }
+    await this.accountRepository.delete({ code });
+    return { code, deleted: true };
+  }
+
   async updateAccount(code: string, dto: UpdateCashAccountDto, user: AuthUser) {
     const account = await this.accountRepository.findOne({ where: { code } });
     if (!account) {
       throw new NotFoundException('Không tìm thấy tài khoản');
     }
 
+    this.applyOpening(account, dto, user);
+    if (dto.name !== undefined) {
+      account.name = dto.name;
+    }
+    if (dto.sortOrder !== undefined) {
+      account.sortOrder = dto.sortOrder;
+    }
+    if (dto.isActive !== undefined) {
+      account.isActive = dto.isActive;
+    }
+    if (dto.note !== undefined) {
+      account.note = dto.note;
+    }
+
+    return this.accountRepository.save(account);
+  }
+
+  private applyOpening(
+    account: CashAccount,
+    dto: Pick<UpdateCashAccountDto, 'openingBalance' | 'openingBalanceDate'>,
+    user: AuthUser,
+  ) {
     const touchesOpening =
       dto.openingBalance !== undefined || dto.openingBalanceDate !== undefined;
 
@@ -428,13 +531,5 @@ export class CashflowReportService {
       account.openingBalanceUpdatedByName = user.name ?? null;
       account.openingBalanceUpdatedAt = new Date();
     }
-    if (dto.isActive !== undefined) {
-      account.isActive = dto.isActive;
-    }
-    if (dto.note !== undefined) {
-      account.note = dto.note;
-    }
-
-    return this.accountRepository.save(account);
   }
 }

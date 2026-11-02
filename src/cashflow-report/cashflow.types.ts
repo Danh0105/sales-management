@@ -21,7 +21,8 @@ export type LedgerSourceType =
   | 'MANAGEMENT_EXPENSE'
   | 'EXPENSE_REQUEST'
   | 'FINANCIAL_REQUEST'
-  | 'OTHER_CASHFLOW';
+  | 'OTHER_CASHFLOW'
+  | 'MANUAL_ENTRY';
 
 /** Chỗ mở chứng từ gốc từ báo cáo. */
 export interface LedgerSourceRef {
@@ -33,6 +34,8 @@ export interface LedgerSourceRef {
   requestId?: number;
   /** Hợp đồng Thu Chi ngoài. */
   otherCashflowId?: number;
+  /** Bút toán nhập tay trên Tổng hợp thu chi (sửa/xoá ngay tại báo cáo). */
+  manualEntryId?: number;
 }
 
 /** Một bút toán ghi tăng (thu) hoặc ghi giảm (chi) đúng một tài khoản. */
@@ -50,7 +53,7 @@ export interface LedgerLine {
   payment: Cents;
   partnerCode: string | null;
   partnerName: string | null;
-  /** Chuyển tiền nội bộ — chưa có nguồn dữ liệu, luôn false ở đợt này. */
+  /** Chuyển tiền nội bộ — hiện chỉ bút toán nhập tay loại chuyển khoản nội bộ. */
   isInternalTransfer: boolean;
   source: LedgerSourceRef;
 }
