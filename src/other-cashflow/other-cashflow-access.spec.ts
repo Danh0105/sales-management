@@ -20,9 +20,11 @@ import {
   OtherCashflowStatus,
 } from './other-cashflow.constants';
 import {
-  buildCommercialLines,
+  buildLines,
   parseContractCode,
+  profitOf,
   statusForProgress,
+  vatOf,
 } from './other-cashflow.service';
 
 const sales: AuthUser = { id: 10, roles: ['sales'] };
@@ -145,7 +147,7 @@ describe('Thu Chi ngoài — quyền', () => {
 });
 
 describe('Thu Chi ngoài — tiện ích', () => {
-  it('trạng thái theo số đã thu/chi — đơn Thương mại cần đủ cả tiền hàng lẫn chi phí', () => {
+  it('trạng thái theo số đã thu/chi — cần đủ cả tổng phải thu lẫn các khoản chi', () => {
     const p = (recordedAmount: number, paidCostAmount = 0, costAmount = 0) =>
       statusForProgress({ amount: 100, recordedAmount, costAmount, paidCostAmount });
     expect(p(0)).toBe(OtherCashflowStatus.APPROVED);
@@ -154,30 +156,70 @@ describe('Thu Chi ngoài — tiện ích', () => {
     expect(p(100, 0, 30)).toBe(OtherCashflowStatus.IN_PROGRESS);
     expect(p(0, 10, 30)).toBe(OtherCashflowStatus.IN_PROGRESS);
     expect(p(100, 30, 30)).toBe(OtherCashflowStatus.COMPLETED);
+    // Hợp đồng chỉ có khoản chi.
+    const onlyCosts = (paidCostAmount: number) =>
+      statusForProgress({ amount: 0, recordedAmount: 0, costAmount: 30, paidCostAmount });
+    expect(onlyCosts(0)).toBe(OtherCashflowStatus.APPROVED);
+    expect(onlyCosts(10)).toBe(OtherCashflowStatus.IN_PROGRESS);
+    expect(onlyCosts(30)).toBe(OtherCashflowStatus.COMPLETED);
   });
 
-  it('đơn Thương mại: thành tiền = SL × đơn giá (làm tròn đồng), tổng tiền hàng và chi phí', () => {
-    const built = buildCommercialLines(
+  it('thuế VAT làm tròn nửa lên tới đồng; không thuế = 0', () => {
+    expect(vatOf(10_000_000, 10)).toBe(1_000_000);
+    expect(vatOf(2_501, 8)).toBe(200); // 200,08
+    expect(vatOf(2_506, 10)).toBe(251); // 250,6
+    expect(vatOf(2_505, 10)).toBe(251); // 250,5 → lên
+    expect(vatOf(1_000, 0)).toBe(0);
+    expect(vatOf(1_000, null)).toBe(0);
+  });
+
+  it('khoản thu + khoản chi: thành tiền = SL × đơn giá, cộng thuế từng khoản; lợi nhuận không tính VAT', () => {
+    const built = buildLines(
       [
-        { itemCode: 'SGK-01', itemName: 'Sách Tin học 3', unit: 'quyển', quantity: '120', unitPrice: '35500' },
-        { itemCode: 'BUT', itemName: 'Bút', unit: '', quantity: '2.5', unitPrice: '1000.5' },
+        { itemCode: 'SGK-01', itemName: 'Sách Tin học 3', unit: 'quyển', quantity: '120', unitPrice: '35500', vatRate: 5 },
+        { itemName: 'Phí đào tạo', quantity: '1', unitPrice: '2000000' },
+        { itemCode: '', itemName: 'Bút', unit: '', quantity: '2.5', unitPrice: '1000.5', vatRate: 0 },
       ],
-      [{ description: 'Vận chuyển', payee: 'Nhà xe A', amount: 300_000 }],
+      [
+        { description: 'Mua sách NXB', payee: 'NXB GD', quantity: '120', unitPrice: '25000', vatRate: 5 },
+        { description: 'Vận chuyển', payee: '', quantity: '1', unitPrice: '300000' },
+      ],
     );
-    expect(built.items.map((i) => [i.lineNo, i.amount, i.unit])).toEqual([
-      [1, 4_260_000, 'quyển'],
-      [2, 2_501, null],
+    expect(
+      built.items.map((i) => [i.lineNo, i.itemCode, i.amount, i.vatRate, i.vatAmount, i.totalAmount, i.unit]),
+    ).toEqual([
+      [1, 'SGK-01', 4_260_000, 5, 213_000, 4_473_000, 'quyển'],
+      [2, null, 2_000_000, null, 0, 2_000_000, null],
+      [3, null, 2_501, 0, 0, 2_501, null],
     ]);
-    expect(built.amount).toBe(4_262_501);
-    expect(built.costAmount).toBe(300_000);
-    expect(built.costs[0]).toMatchObject({ lineNo: 1, paidAmount: 0, payee: 'Nhà xe A' });
-    expect(() => buildCommercialLines([], [])).toThrow('ít nhất một dòng hàng');
-    expect(() =>
-      buildCommercialLines([{ itemCode: 'A', itemName: 'A', quantity: '0', unitPrice: '1' }], []),
-    ).toThrow('số lượng phải lớn hơn 0');
-    expect(() =>
-      buildCommercialLines([{ itemCode: 'A', itemName: 'A', quantity: '1', unitPrice: '0' }], []),
-    ).toThrow('Tổng tiền hàng phải lớn hơn 0');
+    expect(built.costs.map((c) => [c.lineNo, c.amount, c.vatAmount, c.totalAmount, c.payee, c.paidAmount])).toEqual([
+      [1, 3_000_000, 150_000, 3_150_000, 'NXB GD', 0],
+      [2, 300_000, 0, 300_000, null, 0],
+    ]);
+    expect(built).toMatchObject({
+      amount: 6_475_501,
+      incomeVatAmount: 213_000,
+      costAmount: 3_450_000,
+      costVatAmount: 150_000,
+    });
+    // (6.475.501 − 213.000) − (3.450.000 − 150.000)
+    expect(profitOf(built)).toBe(2_962_501);
+  });
+
+  it('cần ít nhất một khoản; chỉ có khoản chi cũng được; khoản chi phải > 0', () => {
+    expect(() => buildLines([], [])).toThrow('ít nhất một khoản thu hoặc khoản chi');
+    const onlyCosts = buildLines([], [{ description: 'Thuê xe', quantity: '2', unitPrice: '500000', vatRate: 8 }]);
+    expect(onlyCosts).toMatchObject({ amount: 0, costAmount: 1_080_000, costVatAmount: 80_000 });
+    expect(profitOf(onlyCosts)).toBe(-1_000_000);
+    expect(() => buildLines([{ itemName: 'A', quantity: '0', unitPrice: '1' }], [])).toThrow(
+      'Khoản thu 1: số lượng phải lớn hơn 0',
+    );
+    expect(() => buildLines([], [{ description: 'A', quantity: '1', unitPrice: '0' }])).toThrow(
+      'Khoản chi 1: số tiền phải lớn hơn 0',
+    );
+    expect(() => buildLines([{ itemName: 'A', quantity: '1', unitPrice: '0' }], [])).toThrow(
+      'Tổng tiền hợp đồng phải lớn hơn 0',
+    );
   });
 
   it('mã hợp đồng', () => {
@@ -237,7 +279,7 @@ describe('Thu Chi ngoài — bút toán báo cáo thu chi', () => {
     });
   });
 
-  it('đơn Thương mại: thu tiền hàng ghi đối tác + trường; chi chi phí ghi người nhận chi phí', () => {
+  it('thu ghi đối tác + trường; chi một khoản ghi người nhận của khoản (không có thì đối tác)', () => {
     const { lines } = mapOtherCashflowEntries([
       { ...base, entry_id: 3, form: 'COMMERCIAL', school_id: 9, flow: CashflowDirection.IN, amount: '4000000' },
       {
@@ -258,11 +300,42 @@ describe('Thu Chi ngoài — bút toán báo cáo thu chi', () => {
       partnerName: 'Công ty A',
     });
     expect(lines[1]).toMatchObject({
-      description: 'Chi phí đơn thương mại — Vận chuyển — Cho thuê sân bóng',
+      description: 'Chi ngoài (thương mại) — Vận chuyển — Cho thuê sân bóng — Nhà xe A',
       receipt: 0n,
       payment: 30_000_000n,
       partnerCode: null,
       partnerName: 'Nhà xe A',
+    });
+  });
+
+  it('khoản chi không có người nhận → đối tác + trường; HĐ Chi cũ (khoản trùng tên hợp đồng) giữ diễn giải cũ', () => {
+    const { lines } = mapOtherCashflowEntries([
+      {
+        ...base,
+        entry_id: 5,
+        school_id: 9,
+        flow: CashflowDirection.OUT,
+        amount: '100000',
+        cost_description: 'Thuê xe',
+      },
+      {
+        ...base,
+        entry_id: 6,
+        school_id: 9,
+        flow: CashflowDirection.OUT,
+        amount: '100000',
+        cost_description: base.title,
+      },
+    ]);
+    expect(lines[0]).toMatchObject({
+      description: 'Chi ngoài — Thuê xe — Cho thuê sân bóng — Công ty A',
+      partnerCode: 'TR9',
+      partnerName: 'Công ty A',
+    });
+    expect(lines[1]).toMatchObject({
+      description: 'Chi ngoài — Cho thuê sân bóng — Công ty A',
+      partnerCode: 'TR9',
+      partnerName: 'Công ty A',
     });
   });
 });

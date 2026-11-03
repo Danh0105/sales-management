@@ -105,15 +105,19 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
       .map(([arg]) => arg)
       .filter((arg) => arg.meta?.action === action);
 
+  /** Một khoản thu SL 1 × số tiền, không thuế. */
+  const income = (amount: number, itemName = 'Cho thuê sân bóng') => [
+    { itemName, quantity: '1', unitPrice: String(amount) },
+  ];
+
   async function newContract(
     by: AuthUser = U.A,
     extra: Partial<Parameters<OtherCashflowService['create']>[1]> = {},
   ) {
     return service.create(by, {
-      direction: CashflowDirection.IN,
       title: 'Cho thuê sân bóng',
       partnerName: 'Công ty Thử nghiệm',
-      amount: 3_000_000,
+      items: income(3_000_000),
       ...extra,
     });
   }
@@ -204,7 +208,10 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     expect(created).toMatchObject({
       status: OtherCashflowStatus.PENDING,
       code: `TCN-${String(created.id).padStart(5, '0')}`,
+      direction: null,
       amount: 3_000_000,
+      costAmount: 0,
+      profit: 3_000_000,
       recordedAmount: 0,
       remainingAmount: 3_000_000,
       createdById: U.A.id,
@@ -276,11 +283,11 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     expect(toCreator.message).toContain('Thiếu hợp đồng ký');
 
     await expect(
-      service.update(U.B, created.id, { amount: 1 }),
+      service.update(U.B, created.id, { items: income(1) }),
     ).rejects.toBeInstanceOf(ForbiddenException);
     notification.createNotifications.mockClear();
     const resubmitted = await service.update(U.A, created.id, {
-      amount: 2_500_000,
+      items: income(2_500_000),
       schoolId,
     });
     expect(resubmitted).toMatchObject({
@@ -333,7 +340,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     await expect(
       service.review(U.L, created.id, { decision: OtherCashflowStatus.REJECTED, note: 'x' }),
     ).rejects.toBeInstanceOf(ConflictException);
-    await expect(service.update(U.A, created.id, { amount: 1 })).rejects.toBeInstanceOf(
+    await expect(service.update(U.A, created.id, { items: income(1) })).rejects.toBeInstanceOf(
       ForbiddenException,
     );
   });
@@ -342,6 +349,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     const contract = await approved();
     const record = (amount: number, extra: Record<string, unknown> = {}) =>
       service.recordEntry(U.T, contract.id, {
+        flow: CashflowDirection.IN,
         date: '2026-10-29',
         amount,
         cashAccountCode: '1111',
@@ -352,6 +360,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     const pendingOne = await newContract();
     await expect(
       service.recordEntry(U.T, pendingOne.id, {
+        flow: CashflowDirection.IN,
         date: '2026-10-29',
         amount: 1,
         cashAccountCode: '1111',
@@ -360,6 +369,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
     await expect(
       service.recordEntry(U.D, contract.id, {
+        flow: CashflowDirection.IN,
         date: '2026-10-29',
         amount: 1,
         cashAccountCode: '1111',
@@ -438,19 +448,108 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     });
   });
 
-  it('hợp đồng Chi vào báo cáo thành bút toán chi', async () => {
-    const contract = await approved({ direction: CashflowDirection.OUT, amount: 500_000 });
+  it('hợp đồng chỉ có khoản chi vào báo cáo thành bút toán chi', async () => {
+    const contract = await approved({
+      items: [],
+      costs: [{ description: 'Thuê xe đưa đón', quantity: '1', unitPrice: '500000' }],
+    });
+    expect(contract).toMatchObject({ amount: 0, costAmount: 500_000, profit: -500_000 });
     await service.recordEntry(U.T, contract.id, {
+      flow: CashflowDirection.OUT,
+      costId: contract.costs[0].id,
       date: '2026-10-30',
       amount: 500_000,
       cashAccountCode: '1111',
       idempotencyKey: idem(),
     });
+    const detail = await service.detail(U.A, contract.id);
+    expect(detail).toMatchObject({ status: OtherCashflowStatus.COMPLETED, paidCostAmount: 500_000 });
     const rows = await ds.query<OtherCashflowEntryRow[]>(OTHER_CASHFLOW_ENTRIES_SQL);
     const [line] = mapOtherCashflowEntries(rows).lines.filter(
       (l) => l.source.otherCashflowId === contract.id,
     );
     expect(line).toMatchObject({ receipt: 0n, payment: 50_000_000n, accountCode: '1111' });
+  });
+
+  it('gộp thu chi có thuế: lợi nhuận = thu chưa thuế − chi chưa thuế; thủ quỹ thu tổng, chi từng khoản', async () => {
+    const contract = await approved({
+      title: 'Liên kết dạy kỹ năng',
+      items: [
+        { itemName: 'Học phí kỹ năng', unit: 'học sinh', quantity: '50', unitPrice: '200000', vatRate: 10 },
+        { itemName: 'Tài liệu', quantity: '50', unitPrice: '40000' },
+      ],
+      costs: [
+        { description: 'Thù lao giáo viên', payee: 'GV Thử nghiệm', quantity: '10', unitPrice: '500000' },
+        { description: 'Mua tài liệu', quantity: '50', unitPrice: '25000', vatRate: 5 },
+      ],
+    });
+    expect(contract).toMatchObject({
+      amount: 13_000_000, // 10.000.000 + 1.000.000 VAT + 2.000.000
+      incomeVatAmount: 1_000_000,
+      incomeNetAmount: 12_000_000,
+      costAmount: 6_312_500, // 5.000.000 + 1.250.000 + 62.500 VAT
+      costVatAmount: 62_500,
+      costNetAmount: 6_250_000,
+      vatPayable: 937_500,
+      profit: 5_750_000,
+    });
+    expect(contract.items.map((i) => [i.vatRate, i.amount, i.vatAmount, i.totalAmount])).toEqual([
+      [10, 10_000_000, 1_000_000, 11_000_000],
+      [null, 2_000_000, 0, 2_000_000],
+    ]);
+    const [teacherFee, material] = contract.costs;
+    expect(material).toMatchObject({ vatRate: 5, amount: 1_250_000, vatAmount: 62_500, totalAmount: 1_312_500 });
+    expect(sentTo('RECORD_REQUIRED')[0].message).toContain('cần thu, chi');
+
+    const record = (flow: CashflowDirection, amount: number, costId?: number) =>
+      service.recordEntry(U.T, contract.id, {
+        flow,
+        costId,
+        date: '2026-10-30',
+        amount,
+        cashAccountCode: '1111',
+        idempotencyKey: idem(),
+      });
+    await expect(record(CashflowDirection.OUT, 1)).rejects.toBeInstanceOf(BadRequestException);
+    const other = await approved();
+    await expect(
+      record(CashflowDirection.OUT, 1, other.items[0].id),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(record(CashflowDirection.OUT, 1_312_501, material.id)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    await expect(record(CashflowDirection.IN, 13_000_001)).rejects.toBeInstanceOf(BadRequestException);
+
+    notification.createNotifications.mockClear();
+    const paid = await record(CashflowDirection.OUT, 1_312_500, material.id);
+    expect(paid).toMatchObject({ flow: 'OUT', costId: material.id, orderId: null });
+    expect(sentTo('RECORDED')[0].message).toContain('chi khoản "Mua tài liệu"');
+    await record(CashflowDirection.IN, 13_000_000);
+    let detail = await service.detail(U.A, contract.id);
+    expect(detail).toMatchObject({
+      status: OtherCashflowStatus.IN_PROGRESS, // còn thù lao giáo viên
+      recordedAmount: 13_000_000,
+      paidCostAmount: 1_312_500,
+      remainingCostAmount: 5_000_000,
+    });
+    const teacherEntry = await record(CashflowDirection.OUT, 5_000_000, teacherFee.id);
+    detail = await service.detail(U.A, contract.id);
+    expect(detail.status).toBe(OtherCashflowStatus.COMPLETED);
+    expect(detail.costs.map((c) => c.paidAmount)).toEqual([5_000_000, 1_312_500]);
+
+    // Huỷ lần chi → khoản chi + tổng đã chi giảm, hợp đồng về đang thu/chi.
+    const voided = await service.voidEntry(U.T, contract.id, teacherEntry.id, { reason: 'Sai TK' });
+    expect(voided).toMatchObject({ status: OtherCashflowStatus.IN_PROGRESS, paidCostAmount: 1_312_500 });
+    expect(voided.costs.find((c) => c.id === teacherFee.id)?.paidAmount).toBe(0);
+
+    const rows = await ds.query<OtherCashflowEntryRow[]>(OTHER_CASHFLOW_ENTRIES_SQL);
+    const lines = mapOtherCashflowEntries(rows).lines.filter(
+      (l) => l.source.otherCashflowId === contract.id,
+    );
+    expect(lines.map((l) => [l.receipt, l.payment, l.description])).toEqual([
+      [0n, 131_250_000n, 'Chi ngoài — Mua tài liệu — Liên kết dạy kỹ năng — Công ty Thử nghiệm'],
+      [1_300_000_000n, 0n, 'Thu ngoài — Liên kết dạy kỹ năng — Công ty Thử nghiệm'],
+    ]);
   });
 
   it('huỷ: người lập khi chờ duyệt; giám đốc khi đã duyệt mà chưa ghi nhận', async () => {
@@ -474,6 +573,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     expect(sentTo('CANCELLED')[0].receiverIds).toEqual([U.A.id]);
     await expect(
       service.recordEntry(U.T, contract.id, {
+        flow: CashflowDirection.IN,
         date: '2026-10-29',
         amount: 1,
         cashAccountCode: '1111',
@@ -483,6 +583,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
 
     const started = await approved();
     await service.recordEntry(U.T, started.id, {
+      flow: CashflowDirection.IN,
       date: '2026-10-29',
       amount: 1,
       cashAccountCode: '1111',
@@ -535,6 +636,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
 
     const entry = await service.recordEntry(U.T, created.id, {
+      flow: CashflowDirection.IN,
       date: '2026-10-30',
       amount: 1_000_000,
       cashAccountCode: '1111',
@@ -556,24 +658,22 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
     ).toMatchObject({ entryId: entry.id, originalName: 'phieu-thu.pdf', uploadedById: U.T.id });
   });
 
-  describe('Thu khác hình thức Thương mại', () => {
+  describe('Hình thức Thương mại', () => {
     const ITEMS = [
       { itemCode: 'SGK-TH3', itemName: 'Sách Tin học 3', unit: 'quyển', quantity: '100', unitPrice: '35000' },
       { itemCode: 'BP-01', itemName: 'Bộ lắp ghép', unit: 'bộ', quantity: '2.5', unitPrice: '1000000' },
     ];
     const COSTS = [
-      { description: 'Vận chuyển', payee: 'Nhà xe A', amount: 300_000 },
-      { description: 'Hoa hồng', amount: 200_000 },
+      { description: 'Vận chuyển', payee: 'Nhà xe A', quantity: '1', unitPrice: '300000' },
+      { description: 'Hoa hồng', quantity: '1', unitPrice: '200000' },
     ];
 
     async function commercial(extra: Record<string, unknown> = {}) {
       return service.create(U.A, {
-        direction: CashflowDirection.IN,
         form: OtherCashflowForm.COMMERCIAL,
         title: 'Bán sách học kỳ I',
         documentNo: `DDH-${run}`,
         partnerName: 'Trường TH Thử nghiệm',
-        amount: 1, // bị bỏ qua — tính từ dòng hàng
         items: ITEMS,
         costs: COSTS,
         ...extra,
@@ -588,20 +688,8 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
         ...extra,
       });
 
-    it('lập đơn: số tiền = tổng thành tiền dòng hàng; chi phí và lãi gộp; chỉ dùng cho Thu', async () => {
-      await expect(
-        commercial({ direction: CashflowDirection.OUT }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      await expect(commercial({ items: [] })).rejects.toBeInstanceOf(BadRequestException);
-      await expect(
-        service.create(U.A, {
-          direction: CashflowDirection.IN,
-          title: 'x',
-          partnerName: 'y',
-          amount: 5,
-          items: ITEMS,
-        } as Parameters<OtherCashflowService['create']>[1]),
-      ).rejects.toBeInstanceOf(BadRequestException);
+    it('lập đơn: số tiền = tổng thành tiền khoản thu; khoản chi và lợi nhuận', async () => {
+      await expect(commercial({ items: [], costs: [] })).rejects.toBeInstanceOf(BadRequestException);
 
       const created = await commercial();
       expect(created).toMatchObject({
@@ -609,16 +697,18 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
         documentNo: `DDH-${run}`,
         amount: 6_000_000,
         costAmount: 500_000,
-        grossProfit: 5_500_000,
+        profit: 5_500_000,
         remainingCostAmount: 500_000,
       });
       expect(created.items.map((i) => [i.itemCode, i.quantity, i.amount])).toEqual([
         ['SGK-TH3', '100.0000', 3_500_000],
         ['BP-01', '2.5000', 2_500_000],
       ]);
-      expect(created.costs.map((c) => [c.description, c.payee, c.amount, c.paidAmount])).toEqual([
-        ['Vận chuyển', 'Nhà xe A', 300_000, 0],
-        ['Hoa hồng', null, 200_000, 0],
+      expect(
+        created.costs.map((c) => [c.description, c.payee, c.amount, c.totalAmount, c.paidAmount]),
+      ).toEqual([
+        ['Vận chuyển', 'Nhà xe A', 300_000, 300_000, 0],
+        ['Hoa hồng', null, 200_000, 200_000, 0],
       ]);
 
       // Sửa khi chờ duyệt: thay cả bộ dòng hàng; không gửi lại thì giữ nguyên.
@@ -630,17 +720,20 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
       expect(edited.costs).toHaveLength(2);
       const kept = await service.update(U.A, created.id, { title: 'Bán sách cả năm' });
       expect(kept).toMatchObject({ amount: 7_000_000, costAmount: 500_000 });
-      // Chuyển về Thông thường phải nhập số tiền; dòng hàng/chi phí bị bỏ.
-      await expect(
-        service.update(U.A, created.id, { form: OtherCashflowForm.STANDARD }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      // Đổi hình thức chỉ đổi luồng tiền, khoản thu/chi giữ nguyên.
       const standard = await service.update(U.A, created.id, {
         form: OtherCashflowForm.STANDARD,
-        amount: 900_000,
+        costs: [{ ...COSTS[0], vatRate: 8 }],
       });
-      expect(standard).toMatchObject({ amount: 900_000, costAmount: 0 });
-      expect(standard.items).toHaveLength(0);
-      expect(standard.costs).toHaveLength(0);
+      expect(standard).toMatchObject({
+        form: OtherCashflowForm.STANDARD,
+        amount: 7_000_000,
+        costAmount: 324_000,
+        costVatAmount: 24_000,
+        profit: 6_700_000,
+      });
+      expect(standard.items).toHaveLength(1);
+      expect(standard.costs).toHaveLength(1);
     });
 
     it('duyệt → báo kế toán công nợ; KT công nợ lập phiếu thu/lệnh chi; thủ quỹ thu/chi theo phiếu tới hoàn tất', async () => {
@@ -656,6 +749,7 @@ suite('Thu Chi ngoài — tích hợp trên Postgres', () => {
       // Thủ quỹ không ghi nhận trực tiếp đơn Thương mại.
       await expect(
         service.recordEntry(U.T, created.id, {
+          flow: CashflowDirection.IN,
           date: '2026-10-30',
           amount: 1,
           cashAccountCode: '1111',

@@ -26,6 +26,7 @@ import {
   OrderKind,
   OtherCashflowForm,
   OtherCashflowStatus,
+  VAT_RATES,
 } from '../other-cashflow.constants';
 
 const trim = ({ value }: { value: unknown }) =>
@@ -46,19 +47,17 @@ const toDecimalString = ({ value }: { value: unknown }) =>
     ? String(value).trim()
     : value;
 
-/** Dòng hàng của đơn Thương mại — thành tiền do backend tính. */
-export class OtherCashflowItemDto {
-  @Transform(trim)
-  @IsString()
-  @MinLength(1, { message: 'Vui lòng nhập mã hàng' })
-  @MaxLength(50)
-  itemCode!: string;
+/** Thuế suất từ form: rỗng / null = không thuế. */
+const toVatRate = ({ value }: { value: unknown }) =>
+  value === '' || value === undefined || value === null ? null : Number(value);
 
+/** SL × đơn giá + thuế của một khoản — thành tiền do backend tính. */
+abstract class OtherCashflowLineDto {
+  @IsOptional()
   @Transform(trim)
   @IsString()
-  @MinLength(1, { message: 'Vui lòng nhập tên hàng' })
-  @MaxLength(255)
-  itemName!: string;
+  @MaxLength(50)
+  itemCode?: string | null;
 
   @IsOptional()
   @Transform(trim)
@@ -73,13 +72,27 @@ export class OtherCashflowItemDto {
   @Transform(toDecimalString)
   @Matches(DECIMAL, { message: 'Đơn giá phải là số không âm' })
   unitPrice!: string;
+
+  @IsOptional()
+  @Transform(toVatRate)
+  @IsIn(VAT_RATES, { message: `Thuế suất chỉ nhận ${VAT_RATES.join('/')}% hoặc không thuế` })
+  vatRate?: number | null;
 }
 
-/** Khoản chi phí của đơn Thương mại — công ty chi qua quỹ. */
-export class OtherCashflowCostDto {
+/** Khoản thu (bán hàng, dịch vụ…). */
+export class OtherCashflowItemDto extends OtherCashflowLineDto {
   @Transform(trim)
   @IsString()
-  @MinLength(1, { message: 'Vui lòng nhập nội dung chi phí' })
+  @MinLength(1, { message: 'Vui lòng nhập nội dung khoản thu' })
+  @MaxLength(255)
+  itemName!: string;
+}
+
+/** Khoản chi — công ty chi qua quỹ. */
+export class OtherCashflowCostDto extends OtherCashflowLineDto {
+  @Transform(trim)
+  @IsString()
+  @MinLength(1, { message: 'Vui lòng nhập nội dung khoản chi' })
   @MaxLength(255)
   description!: string;
 
@@ -88,19 +101,10 @@ export class OtherCashflowCostDto {
   @IsString()
   @MaxLength(255)
   payee?: string | null;
-
-  @Type(() => Number)
-  @IsInt({ message: 'Chi phí phải là số nguyên (đồng)' })
-  @Min(1, { message: 'Chi phí phải lớn hơn 0' })
-  @Max(MAX_AMOUNT)
-  amount!: number;
 }
 
 export class CreateOtherCashflowDto {
-  @IsEnum(CashflowDirection, { message: 'Vui lòng chọn Thu hoặc Chi' })
-  direction!: CashflowDirection;
-
-  /** Mặc định Thông thường; Thương mại chỉ cho Thu. */
+  /** Mặc định Thông thường. */
   @IsOptional()
   @IsEnum(OtherCashflowForm)
   form?: OtherCashflowForm;
@@ -111,7 +115,7 @@ export class CreateOtherCashflowDto {
   @MaxLength(100)
   documentNo?: string | null;
 
-  /** Đơn Thương mại: bắt buộc ≥ 1 dòng; số tiền = tổng thành tiền. */
+  /** Khoản thu + khoản chi: cần ít nhất một khoản; số tiền hợp đồng tính từ các khoản. */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_ITEMS)
@@ -144,14 +148,6 @@ export class CreateOtherCashflowDto {
   @IsInt()
   @Min(1)
   schoolId?: number | null;
-
-  /** Đơn Thương mại bỏ qua — tính từ dòng hàng. */
-  @ValidateIf((dto: CreateOtherCashflowDto) => dto.form !== OtherCashflowForm.COMMERCIAL)
-  @Type(() => Number)
-  @IsInt({ message: 'Số tiền phải là số nguyên (đồng)' })
-  @Min(1, { message: 'Số tiền phải lớn hơn 0' })
-  @Max(MAX_AMOUNT)
-  amount?: number;
 
   @IsOptional()
   @Transform(emptyToNull)
@@ -193,7 +189,17 @@ export class ReasonDto {
   reason!: string;
 }
 
+/** Thủ quỹ thu/chi trực tiếp (hình thức Thông thường). */
 export class RecordEntryDto {
+  @IsEnum(CashflowDirection, { message: 'Vui lòng chọn thu hay chi' })
+  flow!: CashflowDirection;
+
+  /** Lần chi: khoản chi được chi (bắt buộc). */
+  @ValidateIf((dto: RecordEntryDto) => dto.flow === CashflowDirection.OUT)
+  @Type(() => Number)
+  @IsInt({ message: 'Vui lòng chọn khoản chi' })
+  costId?: number;
+
   @IsDateString({ strict: true }, { message: 'Ngày thu/chi không hợp lệ' })
   date!: string;
 
@@ -219,7 +225,7 @@ export class RecordEntryDto {
   idempotencyKey!: string;
 }
 
-/** Kế toán công nợ lập phiếu thu (tiền hàng) / lệnh chi (một khoản chi phí). */
+/** Kế toán công nợ lập phiếu thu (tổng phải thu) / lệnh chi (một khoản chi). */
 export class CreateOrderDto {
   @IsEnum(OrderKind)
   kind!: OrderKind;
@@ -227,7 +233,7 @@ export class CreateOrderDto {
   /** Bắt buộc với lệnh chi. */
   @ValidateIf((dto: CreateOrderDto) => dto.kind === OrderKind.PAYMENT)
   @Type(() => Number)
-  @IsInt({ message: 'Vui lòng chọn khoản chi phí' })
+  @IsInt({ message: 'Vui lòng chọn khoản chi' })
   costId?: number;
 
   @Type(() => Number)
@@ -284,8 +290,8 @@ export class ListOtherCashflowDto {
   status?: OtherCashflowStatus;
 
   @IsOptional()
-  @IsEnum(CashflowDirection)
-  direction?: CashflowDirection;
+  @IsEnum(OtherCashflowForm)
+  form?: OtherCashflowForm;
 
   /** Tìm theo tên hợp đồng, đối tác, người lập, mã TCN-xxxxx. */
   @IsOptional()

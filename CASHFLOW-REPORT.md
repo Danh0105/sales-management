@@ -29,10 +29,11 @@ Hệ thống không có sổ quỹ hay bảng phiếu thu/chi riêng. Báo cáo 
   `HD|CT|CN-<phiếu thu chi>-<môn>-<dòng>`.
 - Đối tượng: trường → `TR<id>`; người đề xuất → `NV<id>`. Trường và nhân viên chưa có cột
   mã riêng.
-- Thu Chi ngoài: số chứng từ = mã hợp đồng `TCN-<id>`, đối tượng = trường gắn với hợp đồng
-  (`TR<id>`, không gắn thì để trống) + tên đối tác. Đơn Thương mại: thu tiền hàng là bút toán
-  thu; chi từng khoản chi phí là bút toán chi, đối tượng = người nhận chi phí. Lần thu/chi đã
-  huỷ (`VOIDED`) không vào sổ. Xem `OTHER-CASHFLOW.md`.
+- Thu Chi ngoài: số chứng từ = mã hợp đồng `TCN-<id>`; mỗi hợp đồng có cả lần thu (bút toán
+  thu) lẫn lần chi từng khoản chi (bút toán chi). Đối tượng = trường gắn với hợp đồng
+  (`TR<id>`, không gắn thì để trống) + tên đối tác; lần chi một khoản có người nhận thì đối
+  tượng = người nhận (không mã). Lần thu/chi đã huỷ (`VOIDED`) không vào sổ. Xem
+  `OTHER-CASHFLOW.md`.
 - Ngày: tính theo giờ Việt Nam (timezone của DB là `Asia/Ho_Chi_Minh`). Khoảng ngày lọc
   tính cả ngày đầu và ngày cuối.
 
@@ -96,8 +97,8 @@ xoá xác nhận; khi thực hiện, các dòng bị khoá trong một transacti
   ghi thêm dòng `DELETED` có người xoá.
 - Đề xuất chi (`suggestId`): xoá hẳn đề xuất (lệnh chi, tệp, phân công theo CASCADE),
   `suggest_history`, thông báo `SUGGEST`. Đề xuất có phiếu xuất/nhập kho thì chặn (tồn kho).
-- Thu Chi ngoài (`otherCashflowId`): xoá hẳn hợp đồng và mọi lần thu/chi, phiếu, chi phí,
-  nhật ký, dòng hàng, tệp, thông báo.
+- Thu Chi ngoài (`otherCashflowId`): xoá hẳn hợp đồng và mọi lần thu/chi, phiếu, khoản thu,
+  khoản chi, nhật ký, tệp, thông báo.
 - Hóa Đơn / Chi Trường / Chi Ngoài (`itemId`): chỉ gỡ khỏi sổ — Hóa Đơn xoá Thu/Chi, Số
   tiền, Ngày chi, Khoản thu/chi; Chi Trường/Ngoài đưa "Đã chi" về 0 (`remaining` cộng lại),
   xoá Ngày chi, Nguồn chi. Doanh thu, chi phí, hoá đơn của trường giữ nguyên.

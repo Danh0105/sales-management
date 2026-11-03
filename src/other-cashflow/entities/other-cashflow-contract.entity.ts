@@ -19,10 +19,11 @@ import {
 } from '../other-cashflow.constants';
 
 /**
- * Hợp đồng thu/chi ngoài. `recordedAmount` = tổng các lần ghi nhận còn hiệu
- * lực theo chiều của hợp đồng (đơn Thương mại: tiền hàng đã thu);
- * `paidCostAmount` = chi phí đã chi (chỉ đơn Thương mại). Cập nhật trong cùng
- * transaction (khoá dòng) với lần ghi nhận/huỷ.
+ * Hợp đồng thu chi ngoài — gồm nhiều khoản thu và nhiều khoản chi.
+ * `amount` = tổng phải thu GỒM thuế (Σ khoản thu), `costAmount` = tổng phải chi
+ * gồm thuế (Σ khoản chi); `recordedAmount` = đã thu, `paidCostAmount` = đã chi
+ * — cập nhật trong cùng transaction (khoá dòng) với lần thu/chi hoặc huỷ.
+ * Lợi nhuận = (amount − incomeVatAmount) − (costAmount − costVatAmount).
  */
 @Entity('other_cashflow_contracts')
 @Index('IDX_other_cashflow_contracts_status', ['status'])
@@ -32,10 +33,14 @@ import {
   'CHK_other_cashflow_contracts_status',
   `"status" IN ('PENDING','REJECTED','APPROVED','IN_PROGRESS','COMPLETED','CANCELLED')`,
 )
-@Check('CHK_other_cashflow_contracts_amount', `"amount" > 0`)
 @Check(
-  'CHK_other_cashflow_contracts_form',
-  `"form" IN ('STANDARD','COMMERCIAL') AND ("form" = 'STANDARD' OR "direction" = 'IN')`,
+  'CHK_other_cashflow_contracts_amount',
+  `"amount" >= 0 AND "amount" + "cost_amount" > 0`,
+)
+@Check('CHK_other_cashflow_contracts_form', `"form" IN ('STANDARD','COMMERCIAL')`)
+@Check(
+  'CHK_other_cashflow_contracts_vat',
+  `"income_vat_amount" >= 0 AND "income_vat_amount" <= "amount" AND "cost_vat_amount" >= 0 AND "cost_vat_amount" <= "cost_amount"`,
 )
 @Check(
   'CHK_other_cashflow_contracts_costs',
@@ -51,8 +56,12 @@ export class OtherCashflowContract {
   })
   id!: number;
 
-  @Column({ type: 'varchar', length: 10 })
-  direction!: CashflowDirection;
+  /**
+   * Chỉ hợp đồng lập trước khi gộp thu chi (Thu hoặc Chi); hợp đồng mới và
+   * hợp đồng cũ đã sửa lại để trống.
+   */
+  @Column({ type: 'varchar', length: 10, nullable: true })
+  direction!: CashflowDirection | null;
 
   @Column({ type: 'varchar', length: 20, default: OtherCashflowForm.STANDARD })
   form!: OtherCashflowForm;
@@ -100,7 +109,16 @@ export class OtherCashflowContract {
   })
   recordedAmount!: number;
 
-  /** Tổng các khoản chi phí của đơn Thương mại. */
+  /** Tiền thuế VAT trong `amount` (thuế đầu ra). */
+  @Column({
+    name: 'income_vat_amount',
+    type: 'bigint',
+    default: 0,
+    transformer: bigintTransformer,
+  })
+  incomeVatAmount!: number;
+
+  /** Tổng các khoản chi, gồm thuế. */
   @Column({
     name: 'cost_amount',
     type: 'bigint',
@@ -116,6 +134,15 @@ export class OtherCashflowContract {
     transformer: bigintTransformer,
   })
   paidCostAmount!: number;
+
+  /** Tiền thuế VAT trong `costAmount` (thuế đầu vào). */
+  @Column({
+    name: 'cost_vat_amount',
+    type: 'bigint',
+    default: 0,
+    transformer: bigintTransformer,
+  })
+  costVatAmount!: number;
 
   @Column({ name: 'created_by_id', type: 'int' })
   createdById!: number;

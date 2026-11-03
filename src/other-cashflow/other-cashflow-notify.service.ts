@@ -10,10 +10,11 @@ import { Notification } from '../notifications/entities/notification.entity';
 import { NotificationType } from '../notifications/enums/notification-type.enum';
 import { NotificationService } from '../notifications/services/notification.service';
 import { OtherCashflowContract } from './entities/other-cashflow-contract.entity';
+import { OtherCashflowEntry } from './entities/other-cashflow-entry.entity';
 import { OtherCashflowOrder } from './entities/other-cashflow-order.entity';
 import {
+  CashflowDirection,
   contractCode,
-  DIRECTION_LABELS,
   NOTIFICATION_KIND,
   OrderKind,
   OTHER_CASHFLOW_APPROVE_ROLES,
@@ -58,8 +59,22 @@ export class OtherCashflowNotifyService {
     const kind =
       contract.form === OtherCashflowForm.COMMERCIAL
         ? 'Đơn thương mại'
-        : `HĐ ${DIRECTION_LABELS[contract.direction].toLowerCase()} ngoài`;
-    return `${kind} ${contractCode(contract.id)} "${contract.title}" (${formatVnd(contract.amount)} đ)`;
+        : 'HĐ thu chi ngoài';
+    const money = [
+      contract.amount > 0 ? `thu ${formatVnd(contract.amount)} đ` : null,
+      contract.costAmount > 0 ? `chi ${formatVnd(contract.costAmount)} đ` : null,
+    ].filter(Boolean);
+    return `${kind} ${contractCode(contract.id)} "${contract.title}" (${money.join(' · ')})`;
+  }
+
+  /** "thu, chi" / "thu" / "chi" — việc còn phải làm của hợp đồng. */
+  private flows(contract: OtherCashflowContract) {
+    return [
+      contract.amount > 0 ? 'thu' : null,
+      contract.costAmount > 0 ? 'chi' : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
   }
 
   async idsWithRoles(roles: string[]): Promise<number[]> {
@@ -93,7 +108,6 @@ export class OtherCashflowNotifyService {
           action,
           contractId: contract.id,
           code: contractCode(contract.id),
-          direction: contract.direction,
           status: contract.status,
         },
       });
@@ -140,13 +154,17 @@ export class OtherCashflowNotifyService {
       actor.id,
     );
     if (!approved) return;
-    // Đơn Thương mại đi luồng công nợ: kế toán công nợ lập phiếu trước.
+    // Hình thức Thương mại đi luồng công nợ: kế toán công nợ lập phiếu trước.
     if (contract.form === OtherCashflowForm.COMMERCIAL) {
+      const orders = [
+        contract.amount > 0 ? 'phiếu thu' : null,
+        contract.costAmount > 0 ? 'lệnh chi' : null,
+      ].filter(Boolean);
       await this.send(
         await this.idsWithRoles(OTHER_CASHFLOW_DEBT_ROLES),
         contract,
         'DEBT_REQUIRED',
-        `${this.describe(contract)} đã được duyệt — cần lập phiếu thu tiền hàng${contract.costAmount > 0 ? ` và lệnh chi ${formatVnd(contract.costAmount)} đ chi phí` : ''}.`,
+        `${this.describe(contract)} đã được duyệt — cần lập ${orders.join(' và ')}.`,
         actor.id,
       );
       return;
@@ -156,7 +174,7 @@ export class OtherCashflowNotifyService {
       cashiers,
       contract,
       'RECORD_REQUIRED',
-      `${this.describe(contract)} đã được duyệt — cần ghi nhận ${DIRECTION_LABELS[contract.direction].toLowerCase()}.`,
+      `${this.describe(contract)} đã được duyệt — cần ${this.flows(contract)}.`,
       actor.id,
     );
   }
@@ -169,8 +187,8 @@ export class OtherCashflowNotifyService {
   ) {
     const what =
       order.kind === OrderKind.RECEIPT
-        ? `phiếu thu ${formatVnd(order.amount)} đ tiền hàng`
-        : `lệnh chi ${formatVnd(order.amount)} đ chi phí "${costLabel ?? ''}"`;
+        ? `phiếu thu ${formatVnd(order.amount)} đ`
+        : `lệnh chi ${formatVnd(order.amount)} đ khoản "${costLabel ?? ''}"`;
     await this.send(
       await this.idsWithRoles(OTHER_CASHFLOW_RECORD_ROLES),
       contract,
@@ -185,29 +203,36 @@ export class OtherCashflowNotifyService {
     order: OtherCashflowOrder,
     actor: { id: number; name: string | null },
   ) {
-    const verb = order.kind === OrderKind.RECEIPT ? 'thu' : 'chi';
+    const receipt = order.kind === OrderKind.RECEIPT;
     await this.send(
       [contract.createdById, order.createdById],
       contract,
       'ORDER_EXECUTED',
-      `Thủ quỹ đã ${verb} ${formatVnd(order.amount)} đ theo ${order.kind === OrderKind.RECEIPT ? 'phiếu thu' : 'lệnh chi'} của ${this.describe(contract)} — đã thu ${formatVnd(contract.recordedAmount)}/${formatVnd(contract.amount)} đ tiền hàng.`,
+      `Thủ quỹ đã ${receipt ? 'thu' : 'chi'} ${formatVnd(order.amount)} đ theo ${receipt ? 'phiếu thu' : 'lệnh chi'} của ${this.describe(contract)} — ${this.progress(contract, receipt)}.`,
       actor.id,
     );
   }
 
   async recorded(
     contract: OtherCashflowContract,
-    amount: number,
+    entry: Pick<OtherCashflowEntry, 'flow' | 'amount'>,
+    costLabel: string | null,
     actor: { id: number; name: string | null },
   ) {
-    const verb = DIRECTION_LABELS[contract.direction].toLowerCase();
+    const receipt = entry.flow === CashflowDirection.IN;
     await this.send(
       [contract.createdById],
       contract,
       'RECORDED',
-      `Thủ quỹ đã ghi nhận ${verb} ${formatVnd(amount)} đ cho ${this.describe(contract)} — đã ${verb} ${formatVnd(contract.recordedAmount)}/${formatVnd(contract.amount)} đ.`,
+      `Thủ quỹ đã ${receipt ? 'thu' : `chi khoản "${costLabel ?? ''}"`} ${formatVnd(entry.amount)} đ cho ${this.describe(contract)} — ${this.progress(contract, receipt)}.`,
       actor.id,
     );
+  }
+
+  private progress(contract: OtherCashflowContract, receipt: boolean) {
+    return receipt
+      ? `đã thu ${formatVnd(contract.recordedAmount)}/${formatVnd(contract.amount)} đ`
+      : `đã chi ${formatVnd(contract.paidCostAmount)}/${formatVnd(contract.costAmount)} đ`;
   }
 
   async cancelled(contract: OtherCashflowContract, actor: { id: number; name: string | null }) {

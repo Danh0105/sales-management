@@ -1,15 +1,17 @@
 /**
- * Thu Chi ngoài — hợp đồng thu/chi khác ngoài chính sách trường:
- * NV kinh doanh lập → Giám đốc duyệt → Thủ quỹ ghi nhận thu/chi (nhiều lần
- * tới khi đủ số tiền hợp đồng). Mỗi lần ghi nhận là một bút toán trong báo
- * cáo Tổng hợp thu chi theo tài khoản thủ quỹ chọn.
+ * Thu Chi ngoài — hợp đồng thu chi khác ngoài chính sách trường: NV kinh
+ * doanh lập → Giám đốc duyệt → tiền thu/chi qua quỹ. Một hợp đồng có nhiều
+ * khoản thu và nhiều khoản chi, mỗi khoản SL × đơn giá + thuế VAT riêng;
+ * lợi nhuận = tổng thu chưa thuế − tổng chi chưa thuế. Mỗi lần thu/chi là
+ * một bút toán trong báo cáo Tổng hợp thu chi theo tài khoản thủ quỹ chọn.
  *
- * Thu khác hình thức Thương mại (đơn đặt hàng / hợp đồng bán hàng): có dòng
- * hàng (mã, SL, đơn giá) và các khoản chi phí; sau khi duyệt đi luồng công nợ
- * như Đề xuất chi — kế toán công nợ lập phiếu thu (tiền hàng) / lệnh chi
- * (từng khoản chi phí), thủ quỹ thực thu / thực chi theo phiếu.
+ * Hình thức Thông thường: thủ quỹ thu/chi trực tiếp (nhiều lần tới đủ).
+ * Hình thức Thương mại (đơn đặt hàng / hợp đồng bán hàng): đi luồng công nợ
+ * như Đề xuất chi — kế toán công nợ lập phiếu thu / lệnh chi (từng khoản
+ * chi), thủ quỹ thực thu / thực chi theo phiếu.
  */
 
+/** Chiều tiền của một lần thu/chi (và của hợp đồng lập trước khi gộp). */
 export enum CashflowDirection {
   /** Thu: công ty nhận tiền. */
   IN = 'IN',
@@ -26,7 +28,7 @@ export enum OtherCashflowStatus {
   APPROVED = 'APPROVED',
   /** Đã ghi nhận một phần. */
   IN_PROGRESS = 'IN_PROGRESS',
-  /** Đã ghi nhận đủ số tiền hợp đồng. */
+  /** Đã thu đủ các khoản thu và chi đủ các khoản chi. */
   COMPLETED = 'COMPLETED',
   CANCELLED = 'CANCELLED',
 }
@@ -34,14 +36,14 @@ export enum OtherCashflowStatus {
 export enum OtherCashflowForm {
   /** Thu/chi thông thường — thủ quỹ ghi nhận trực tiếp. */
   STANDARD = 'STANDARD',
-  /** Thương mại (chỉ Thu): đơn đặt hàng/hợp đồng có dòng hàng + chi phí, qua kế toán công nợ. */
+  /** Thương mại: đơn đặt hàng/hợp đồng bán hàng, thu/chi qua kế toán công nợ. */
   COMMERCIAL = 'COMMERCIAL',
 }
 
 export enum OrderKind {
-  /** Phiếu thu tiền hàng. */
+  /** Phiếu thu (trên tổng phải thu của hợp đồng). */
   RECEIPT = 'RECEIPT',
-  /** Lệnh chi một khoản chi phí. */
+  /** Lệnh chi một khoản chi. */
   PAYMENT = 'PAYMENT',
 }
 
@@ -125,9 +127,12 @@ export const OTHER_CASHFLOW_VIEW_ALL_ROLES = [
 /** Giống MAX_MONEY của đề nghị tài chính — luôn < Number.MAX_SAFE_INTEGER. */
 export const MAX_AMOUNT = 999_999_999_999_999;
 
-/** Số dòng tối đa của một đơn Thương mại. */
+/** Số khoản thu / khoản chi tối đa của một hợp đồng. */
 export const MAX_ITEMS = 200;
 export const MAX_COSTS = 50;
+
+/** Thuế suất VAT chọn được cho một khoản (%); không gửi / null = không thuế. */
+export const VAT_RATES = [0, 5, 8, 10];
 
 export const ATTACHMENT_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
 export const ATTACHMENT_MAX_FILES_PER_UPLOAD = 10;

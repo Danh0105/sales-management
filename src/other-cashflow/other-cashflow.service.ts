@@ -17,6 +17,7 @@ import {
   formatVnd,
   lineAmount,
   sumMoney,
+  toSafeMoney,
 } from '../financial-request/financial-money';
 import {
   absolutePath,
@@ -71,7 +72,6 @@ import {
   ATTACHMENT_MAX_FILES_PER_UPLOAD,
   CashflowDirection,
   contractCode,
-  DIRECTION_LABELS,
   EntryStatus,
   OrderKind,
   OrderStatus,
@@ -93,8 +93,8 @@ type Progress = Pick<
 >;
 
 /**
- * Trạng thái sau khi số đã thu/chi thay đổi. Đơn Thương mại chỉ hoàn tất khi
- * đã thu đủ tiền hàng VÀ đã chi đủ các khoản chi phí.
+ * Trạng thái sau khi số đã thu/chi thay đổi: hoàn tất khi đã thu đủ tổng phải
+ * thu VÀ đã chi đủ các khoản chi.
  */
 export function statusForProgress(progress: Progress): OtherCashflowStatus {
   if (progress.recordedAmount <= 0 && progress.paidCostAmount <= 0) {
@@ -114,44 +114,89 @@ export function parseContractCode(search: string): number | null {
 
 const ZERO_DECIMAL = /^0+(\.0+)?$/;
 
-/** Dòng hàng + chi phí của đơn Thương mại, thành tiền tính lại ở backend. */
-export function buildCommercialLines(
+/** Thuế VAT của số tiền chưa thuế, làm tròn nửa lên tới đồng; trống = không thuế. */
+export function vatOf(net: number, rate: number | null | undefined): number {
+  if (!rate) return 0;
+  return toSafeMoney((BigInt(net) * BigInt(rate) * 2n + 100n) / 200n);
+}
+
+/** Lợi nhuận dự kiến = tổng thu chưa thuế − tổng chi chưa thuế (VAT không phải lãi). */
+export function profitOf(
+  contract: Pick<
+    OtherCashflowContract,
+    'amount' | 'incomeVatAmount' | 'costAmount' | 'costVatAmount'
+  >,
+): number {
+  return (
+    contract.amount -
+    contract.incomeVatAmount -
+    (contract.costAmount - contract.costVatAmount)
+  );
+}
+
+function priceLine(
+  line: OtherCashflowItemDto | OtherCashflowCostDto,
+  label: string,
+) {
+  if (ZERO_DECIMAL.test(line.quantity)) {
+    throw new BadRequestException(`${label}: số lượng phải lớn hơn 0`);
+  }
+  const amount = lineAmount(line.quantity, line.unitPrice);
+  const vatRate = line.vatRate ?? null;
+  const vatAmount = vatOf(amount, vatRate);
+  return {
+    itemCode: line.itemCode || null,
+    unit: line.unit || null,
+    quantity: line.quantity,
+    unitPrice: line.unitPrice,
+    amount,
+    vatRate,
+    vatAmount,
+    totalAmount: toSafeMoney(amount + vatAmount, `${label}: thành tiền`),
+  };
+}
+
+/**
+ * Khoản thu + khoản chi của hợp đồng, thành tiền và thuế tính lại ở backend.
+ * Số tiền hợp đồng: tổng phải thu / phải chi gồm thuế.
+ */
+export function buildLines(
   items: OtherCashflowItemDto[],
   costs: OtherCashflowCostDto[],
 ) {
-  if (!items.length) {
-    throw new BadRequestException('Đơn Thương mại cần ít nhất một dòng hàng');
+  if (!items.length && !costs.length) {
+    throw new BadRequestException('Hợp đồng cần ít nhất một khoản thu hoặc khoản chi');
   }
-  const itemRows = items.map((item, index) => {
-    if (ZERO_DECIMAL.test(item.quantity)) {
-      throw new BadRequestException(`Dòng hàng ${index + 1}: số lượng phải lớn hơn 0`);
+  const itemRows = items.map((item, index) => ({
+    lineNo: index + 1,
+    itemName: item.itemName,
+    ...priceLine(item, `Khoản thu ${index + 1}`),
+  }));
+  const costRows = costs.map((cost, index) => {
+    const priced = priceLine(cost, `Khoản chi ${index + 1}`);
+    if (priced.totalAmount <= 0) {
+      throw new BadRequestException(`Khoản chi ${index + 1}: số tiền phải lớn hơn 0`);
     }
     return {
       lineNo: index + 1,
-      itemCode: item.itemCode,
-      itemName: item.itemName,
-      unit: item.unit || null,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      amount: lineAmount(item.quantity, item.unitPrice),
+      description: cost.description,
+      payee: cost.payee || null,
+      ...priced,
+      paidAmount: 0,
     };
   });
-  const amount = sumMoney(itemRows.map((row) => row.amount));
-  if (amount <= 0) {
-    throw new BadRequestException('Tổng tiền hàng phải lớn hơn 0');
+  const amount = sumMoney(itemRows.map((row) => row.totalAmount));
+  const costAmount = sumMoney(costRows.map((row) => row.totalAmount));
+  if (amount + costAmount <= 0) {
+    throw new BadRequestException('Tổng tiền hợp đồng phải lớn hơn 0');
   }
-  const costRows = costs.map((cost, index) => ({
-    lineNo: index + 1,
-    description: cost.description,
-    payee: cost.payee || null,
-    amount: cost.amount,
-    paidAmount: 0,
-  }));
   return {
     items: itemRows,
     costs: costRows,
     amount,
-    costAmount: sumMoney(costRows.map((row) => row.amount)),
+    incomeVatAmount: sumMoney(itemRows.map((row) => row.vatAmount)),
+    costAmount,
+    costVatAmount: sumMoney(costRows.map((row) => row.vatAmount)),
   };
 }
 
@@ -196,8 +241,8 @@ export class OtherCashflowService {
       if (!canViewAll(user)) {
         qb.andWhere('c.createdById = :me', { me: user.id });
       }
-      if (query.direction) {
-        qb.andWhere('c.direction = :direction', { direction: query.direction });
+      if (query.form) {
+        qb.andWhere('c.form = :form', { form: query.form });
       }
       if (query.search) {
         const id = parseContractCode(query.search);
@@ -291,13 +336,18 @@ export class OtherCashflowService {
   }
 
   private present(contract: OtherCashflowContract) {
+    const incomeNetAmount = contract.amount - contract.incomeVatAmount;
+    const costNetAmount = contract.costAmount - contract.costVatAmount;
     return {
       ...contract,
       code: contractCode(contract.id),
       remainingAmount: contract.amount - contract.recordedAmount,
       remainingCostAmount: contract.costAmount - contract.paidCostAmount,
-      /** Lãi gộp dự kiến của đơn Thương mại = tiền hàng − chi phí. */
-      grossProfit: contract.amount - contract.costAmount,
+      incomeNetAmount,
+      costNetAmount,
+      /** VAT phải nộp = đầu ra − đầu vào (âm = được khấu trừ). */
+      vatPayable: contract.incomeVatAmount - contract.costVatAmount,
+      profit: profitOf(contract),
       school: contract.school
         ? { id: contract.school.id, name: contract.school.name }
         : null,
@@ -315,27 +365,23 @@ export class OtherCashflowService {
       );
     }
     const form = dto.form ?? OtherCashflowForm.STANDARD;
-    const lines = this.resolveLines(
-      form,
-      dto.direction,
-      dto.amount,
-      dto.items,
-      dto.costs,
-    );
+    const lines = buildLines(dto.items ?? [], dto.costs ?? []);
     const actor = await this.actor(user);
     const saved = await this.dataSource.transaction(async (manager) => {
       await this.assertSchool(manager, dto.schoolId);
       const repo = manager.getRepository(OtherCashflowContract);
       const contract = await repo.save(
         repo.create({
-          direction: dto.direction,
+          direction: null,
           form,
           title: dto.title,
           documentNo: dto.documentNo || null,
           partnerName: dto.partnerName,
           schoolId: dto.schoolId ?? null,
           amount: lines.amount,
+          incomeVatAmount: lines.incomeVatAmount,
           costAmount: lines.costAmount,
+          costVatAmount: lines.costVatAmount,
           paidCostAmount: 0,
           signedDate: dto.signedDate ?? null,
           expectedDate: dto.expectedDate ?? null,
@@ -373,38 +419,24 @@ export class OtherCashflowService {
         }
         const before = this.snapshot(contract);
         const from = contract.status;
-        const form = dto.form ?? contract.form;
-        const direction = dto.direction ?? contract.direction;
-        // Không gửi lại dòng hàng/chi phí = giữ nguyên bộ đang có.
-        const keepCommercial =
-          form === OtherCashflowForm.COMMERCIAL &&
-          contract.form === OtherCashflowForm.COMMERCIAL;
-        const items =
-          dto.items ??
-          (keepCommercial ? await this.itemDtos(manager, id) : undefined);
-        const costs =
-          dto.costs ??
-          (keepCommercial ? await this.costDtos(manager, id) : undefined);
-        const lines = this.resolveLines(
-          form,
-          direction,
-          dto.amount ??
-            (contract.form === OtherCashflowForm.STANDARD
-              ? contract.amount
-              : undefined),
-          items,
-          costs,
+        // Không gửi lại khoản thu / khoản chi = giữ nguyên bộ đang có.
+        const lines = buildLines(
+          dto.items ?? (await this.itemDtos(manager, id)),
+          dto.costs ?? (await this.costDtos(manager, id)),
         );
 
-        contract.direction = direction;
-        contract.form = form;
+        // Sửa lại hợp đồng lập trước khi gộp → thành hợp đồng gộp thu chi.
+        contract.direction = null;
+        if (dto.form !== undefined) contract.form = dto.form;
         if (dto.title !== undefined) contract.title = dto.title;
         if (dto.documentNo !== undefined)
           contract.documentNo = dto.documentNo || null;
         if (dto.partnerName !== undefined) contract.partnerName = dto.partnerName;
         if (dto.schoolId !== undefined) contract.schoolId = dto.schoolId ?? null;
         contract.amount = lines.amount;
+        contract.incomeVatAmount = lines.incomeVatAmount;
         contract.costAmount = lines.costAmount;
+        contract.costVatAmount = lines.costVatAmount;
         if (dto.signedDate !== undefined)
           contract.signedDate = dto.signedDate ?? null;
         if (dto.expectedDate !== undefined)
@@ -516,7 +548,7 @@ export class OtherCashflowService {
   }
 
   // ---------------------------------------------------------------------------
-  // Thủ quỹ: ghi nhận trực tiếp (hợp đồng thường) / huỷ ghi nhận
+  // Thủ quỹ: thu/chi trực tiếp (hình thức Thông thường) / huỷ lần thu/chi
   // ---------------------------------------------------------------------------
 
   async recordEntry(user: AuthUser, id: number, dto: RecordEntryDto) {
@@ -528,7 +560,7 @@ export class OtherCashflowService {
     const result = await this.dataSource.transaction(async (manager) => {
       const contract = await this.lock(manager, id);
       const existing = await this.replayed(manager, id, dto.idempotencyKey);
-      if (existing) return { contract, entry: existing, replay: true };
+      if (existing) return { contract, entry: existing, cost: null, replay: true };
       if (contract.form === OtherCashflowForm.COMMERCIAL) {
         throw new BadRequestException(
           'Đơn Thương mại thu/chi theo phiếu thu, lệnh chi của kế toán công nợ',
@@ -536,23 +568,42 @@ export class OtherCashflowService {
       }
       if (!canRecordEntry(user, contract)) {
         throw new BadRequestException(
-          'Chỉ ghi nhận cho hợp đồng đã duyệt và chưa thu/chi đủ',
+          'Chỉ thu/chi cho hợp đồng đã duyệt và chưa thu/chi đủ',
         );
       }
-      const remaining = contract.amount - contract.recordedAmount;
-      if (dto.amount > remaining) {
-        throw new BadRequestException(
-          `Số tiền ${formatVnd(dto.amount)} đ vượt số còn phải ${DIRECTION_LABELS[contract.direction].toLowerCase()} ${formatVnd(remaining)} đ`,
-        );
+      const receipt = dto.flow === CashflowDirection.IN;
+      let cost: OtherCashflowCost | null = null;
+      if (receipt) {
+        const remaining = contract.amount - contract.recordedAmount;
+        if (dto.amount > remaining) {
+          throw new BadRequestException(
+            `Số tiền ${formatVnd(dto.amount)} đ vượt số còn phải thu ${formatVnd(remaining)} đ`,
+          );
+        }
+      } else {
+        // findOne với id undefined trả dòng bất kỳ — chặn trước.
+        if (!dto.costId) throw new BadRequestException('Vui lòng chọn khoản chi');
+        cost = await manager
+          .getRepository(OtherCashflowCost)
+          .findOne({ where: { id: dto.costId, contractId: id } });
+        if (!cost) {
+          throw new BadRequestException('Khoản chi không thuộc hợp đồng này');
+        }
+        const remaining = cost.totalAmount - cost.paidAmount;
+        if (dto.amount > remaining) {
+          throw new BadRequestException(
+            `Số tiền ${formatVnd(dto.amount)} đ vượt khoản chi "${cost.description}" còn phải chi ${formatVnd(remaining)} đ`,
+          );
+        }
       }
       await this.assertCashAccount(manager, dto.cashAccountCode);
       const entries = manager.getRepository(OtherCashflowEntry);
       const entry = await entries.save(
         entries.create({
           contractId: id,
-          flow: contract.direction,
+          flow: dto.flow,
           orderId: null,
-          costId: null,
+          costId: cost?.id ?? null,
           entryDate: dto.date,
           amount: dto.amount,
           cashAccountCode: dto.cashAccountCode,
@@ -564,7 +615,13 @@ export class OtherCashflowService {
         }),
       );
       const from = contract.status;
-      contract.recordedAmount += dto.amount;
+      if (cost) {
+        cost.paidAmount += dto.amount;
+        await manager.getRepository(OtherCashflowCost).save(cost);
+        contract.paidCostAmount += dto.amount;
+      } else {
+        contract.recordedAmount += dto.amount;
+      }
       contract.status = statusForProgress(contract);
       await manager.getRepository(OtherCashflowContract).save(contract);
       await this.log(manager, id, actor, 'ENTRY_RECORDED', {
@@ -573,15 +630,22 @@ export class OtherCashflowService {
         note: dto.note || null,
         changes: {
           entryId: entry.id,
+          flow: dto.flow,
+          costId: entry.costId,
           date: dto.date,
           amount: dto.amount,
           cashAccountCode: dto.cashAccountCode,
         },
       });
-      return { contract, entry, replay: false };
+      return { contract, entry, cost, replay: false };
     });
     if (!result.replay) {
-      await this.notify.recorded(result.contract, dto.amount, actor);
+      await this.notify.recorded(
+        result.contract,
+        result.entry,
+        result.cost?.description ?? null,
+        actor,
+      );
     }
     return result.entry;
   }
@@ -641,7 +705,7 @@ export class OtherCashflowService {
   }
 
   // ---------------------------------------------------------------------------
-  // Đơn Thương mại: kế toán công nợ lập phiếu → thủ quỹ thu/chi theo phiếu
+  // Hình thức Thương mại: kế toán công nợ lập phiếu → thủ quỹ thu/chi theo phiếu
   // ---------------------------------------------------------------------------
 
   async createOrder(user: AuthUser, id: number, dto: CreateOrderDto) {
@@ -654,7 +718,7 @@ export class OtherCashflowService {
         const contract = await this.lock(manager, id);
         if (!canCreateOrder(user, contract)) {
           throw new BadRequestException(
-            'Chỉ lập phiếu cho đơn Thương mại đã duyệt và chưa hoàn tất',
+            'Chỉ lập phiếu cho hợp đồng Thương mại đã duyệt và chưa hoàn tất',
           );
         }
         const orders = manager.getRepository(OtherCashflowOrder);
@@ -669,27 +733,27 @@ export class OtherCashflowService {
           const open = contract.amount - contract.recordedAmount - queued;
           if (dto.amount > open) {
             throw new BadRequestException(
-              `Số tiền ${formatVnd(dto.amount)} đ vượt tiền hàng còn phải thu chưa lập phiếu ${formatVnd(Math.max(0, open))} đ`,
+              `Số tiền ${formatVnd(dto.amount)} đ vượt số còn phải thu chưa lập phiếu ${formatVnd(Math.max(0, open))} đ`,
             );
           }
         } else {
           // findOne với id undefined trả dòng bất kỳ — chặn trước.
           if (!dto.costId) {
-            throw new BadRequestException('Vui lòng chọn khoản chi phí');
+            throw new BadRequestException('Vui lòng chọn khoản chi');
           }
           const cost = await manager
             .getRepository(OtherCashflowCost)
             .findOne({ where: { id: dto.costId, contractId: id } });
           if (!cost) {
-            throw new BadRequestException('Khoản chi phí không thuộc đơn này');
+            throw new BadRequestException('Khoản chi không thuộc hợp đồng này');
           }
           const queued = sumMoney(
             pending.filter((o) => o.costId === cost.id).map((o) => o.amount),
           );
-          const open = cost.amount - cost.paidAmount - queued;
+          const open = cost.totalAmount - cost.paidAmount - queued;
           if (dto.amount > open) {
             throw new BadRequestException(
-              `Số tiền ${formatVnd(dto.amount)} đ vượt chi phí "${cost.description}" còn phải chi chưa lập lệnh ${formatVnd(Math.max(0, open))} đ`,
+              `Số tiền ${formatVnd(dto.amount)} đ vượt khoản chi "${cost.description}" còn phải chi chưa lập lệnh ${formatVnd(Math.max(0, open))} đ`,
             );
           }
           costLabel = cost.description;
@@ -779,20 +843,20 @@ export class OtherCashflowService {
         throw new ConflictException('Phiếu đã được thu/chi hoặc đã huỷ — tải lại để xem');
       }
       if (!canExecuteOrder(user, contract)) {
-        throw new BadRequestException('Đơn không còn thu/chi được');
+        throw new BadRequestException('Hợp đồng không còn thu/chi được');
       }
       await this.assertCashAccount(manager, dto.cashAccountCode);
       const receipt = order.kind === OrderKind.RECEIPT;
       if (receipt) {
         if (contract.recordedAmount + order.amount > contract.amount) {
-          throw new BadRequestException('Phiếu thu vượt tiền hàng còn phải thu');
+          throw new BadRequestException('Phiếu thu vượt số còn phải thu');
         }
         contract.recordedAmount += order.amount;
       } else {
         const costs = manager.getRepository(OtherCashflowCost);
         const cost = await costs.findOneOrFail({ where: { id: order.costId! } });
-        if (cost.paidAmount + order.amount > cost.amount) {
-          throw new BadRequestException('Lệnh chi vượt chi phí còn phải chi');
+        if (cost.paidAmount + order.amount > cost.totalAmount) {
+          throw new BadRequestException('Lệnh chi vượt khoản chi còn phải chi');
         }
         cost.paidAmount += order.amount;
         await costs.save(cost);
@@ -973,31 +1037,6 @@ export class OtherCashflowService {
   // Tiện ích
   // ---------------------------------------------------------------------------
 
-  /** Số tiền + dòng hàng/chi phí theo hình thức; kiểm tra ràng buộc nghiệp vụ. */
-  private resolveLines(
-    form: OtherCashflowForm,
-    direction: CashflowDirection,
-    amount: number | undefined,
-    items: OtherCashflowItemDto[] | undefined,
-    costs: OtherCashflowCostDto[] | undefined,
-  ) {
-    if (form === OtherCashflowForm.COMMERCIAL) {
-      if (direction !== CashflowDirection.IN) {
-        throw new BadRequestException('Hình thức Thương mại chỉ dùng cho hợp đồng Thu');
-      }
-      return buildCommercialLines(items ?? [], costs ?? []);
-    }
-    if (items?.length || costs?.length) {
-      throw new BadRequestException(
-        'Dòng hàng và chi phí chỉ dùng cho hình thức Thương mại',
-      );
-    }
-    if (!amount || amount <= 0) {
-      throw new BadRequestException('Vui lòng nhập số tiền hợp đồng');
-    }
-    return { items: [], costs: [], amount, costAmount: 0 };
-  }
-
   private async replaceLines(
     manager: EntityManager,
     contractId: number,
@@ -1018,7 +1057,10 @@ export class OtherCashflowService {
     }
   }
 
-  private async itemDtos(manager: EntityManager, contractId: number) {
+  private async itemDtos(
+    manager: EntityManager,
+    contractId: number,
+  ): Promise<OtherCashflowItemDto[]> {
     const rows = await manager
       .getRepository(OtherCashflowItem)
       .find({ where: { contractId }, order: { lineNo: 'ASC' } });
@@ -1028,17 +1070,25 @@ export class OtherCashflowService {
       unit: row.unit,
       quantity: row.quantity,
       unitPrice: row.unitPrice,
+      vatRate: row.vatRate,
     }));
   }
 
-  private async costDtos(manager: EntityManager, contractId: number) {
+  private async costDtos(
+    manager: EntityManager,
+    contractId: number,
+  ): Promise<OtherCashflowCostDto[]> {
     const rows = await manager
       .getRepository(OtherCashflowCost)
       .find({ where: { contractId }, order: { lineNo: 'ASC' } });
     return rows.map((row) => ({
+      itemCode: row.itemCode,
       description: row.description,
       payee: row.payee,
-      amount: row.amount,
+      unit: row.unit,
+      quantity: row.quantity,
+      unitPrice: row.unitPrice,
+      vatRate: row.vatRate,
     }));
   }
 
@@ -1103,14 +1153,15 @@ export class OtherCashflowService {
 
   private snapshot(contract: OtherCashflowContract) {
     return {
-      direction: contract.direction,
       form: contract.form,
       title: contract.title,
       documentNo: contract.documentNo,
       partnerName: contract.partnerName,
       schoolId: contract.schoolId,
       amount: contract.amount,
+      incomeVatAmount: contract.incomeVatAmount,
       costAmount: contract.costAmount,
+      costVatAmount: contract.costVatAmount,
       signedDate: contract.signedDate,
       expectedDate: contract.expectedDate,
       note: contract.note,

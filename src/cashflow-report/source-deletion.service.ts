@@ -18,11 +18,7 @@ import {
   REQUEST_TYPE_LABELS,
 } from '../financial-request/financial-request.constants';
 import { absolutePath } from '../financial-request/financial-storage';
-import {
-  CashflowDirection,
-  contractCode,
-  DIRECTION_LABELS,
-} from '../other-cashflow/other-cashflow.constants';
+import { contractCode } from '../other-cashflow/other-cashflow.constants';
 import { AuthUser } from '../type/auth-user.type';
 import { cashLockedThrough, lockedMessage } from './cash-day-closing.service';
 import { CashflowReportService } from './cashflow-report.service';
@@ -483,11 +479,11 @@ export class SourceDeletionService {
       {
         title: string;
         partner_name: string;
-        direction: CashflowDirection;
         amount: string;
+        cost_amount: string;
       }[]
     >(
-      `SELECT title, partner_name, direction, amount::text AS amount
+      `SELECT title, partner_name, amount::text AS amount, cost_amount::text AS cost_amount
        FROM other_cashflow_contracts WHERE id = $1 ${lock ? 'FOR UPDATE' : ''}`,
       [id],
     );
@@ -499,6 +495,7 @@ export class SourceDeletionService {
         entry_sum: string;
         voided: number;
         orders: number;
+        items: number;
         costs: number;
       }[]
     >(
@@ -507,6 +504,7 @@ export class SourceDeletionService {
         (SELECT coalesce(sum(amount), 0)::text FROM other_cashflow_entries WHERE contract_id = $1 AND status = 'RECORDED') AS entry_sum,
         (SELECT count(*)::int FROM other_cashflow_entries WHERE contract_id = $1 AND status <> 'RECORDED') AS voided,
         (SELECT count(*)::int FROM other_cashflow_orders WHERE contract_id = $1) AS orders,
+        (SELECT count(*)::int FROM other_cashflow_items WHERE contract_id = $1) AS items,
         (SELECT count(*)::int FROM other_cashflow_costs WHERE contract_id = $1) AS costs`,
       [id],
     );
@@ -516,16 +514,17 @@ export class SourceDeletionService {
     );
     const code = contractCode(id);
     const items = [
-      `Hợp đồng ${DIRECTION_LABELS[contract.direction] ?? ''} ngoài ${code} — "${contract.title}" — ${contract.partner_name} — ${money(contract.amount)}`,
+      `Hợp đồng Thu Chi ngoài ${code} — "${contract.title}" — ${contract.partner_name} — thu ${money(contract.amount)} · chi ${money(contract.cost_amount)}`,
     ];
+    if (stats.items) items.push(`${stats.items} khoản thu`);
     if (stats.entries) {
       items.push(`${stats.entries} lần thu/chi (${money(stats.entry_sum)})`);
     }
     if (stats.voided) items.push(`${stats.voided} lần thu/chi đã huỷ`);
     if (stats.orders) items.push(`${stats.orders} phiếu thu / lệnh chi`);
-    if (stats.costs) items.push(`${stats.costs} khoản chi phí`);
+    if (stats.costs) items.push(`${stats.costs} khoản chi`);
     if (attachments.length) items.push(`${attachments.length} tệp đính kèm`);
-    items.push('Dòng hàng, lịch sử xử lý và thông báo của hợp đồng');
+    items.push('Lịch sử xử lý và thông báo của hợp đồng');
 
     return {
       plan: {

@@ -12,15 +12,21 @@ import { bigintTransformer } from '../../financial-request/financial-money';
 import { OtherCashflowContract } from './other-cashflow-contract.entity';
 
 /**
- * Dòng hàng của đơn Thương mại. `quantity`/`unitPrice` là numeric chính xác
- * (đọc ra dạng chuỗi); `amount` = SL × đơn giá làm tròn tới đồng, do backend
- * tính (`lineAmount`). Chỉ thay được cả bộ khi đơn còn chờ duyệt / bị từ chối.
+ * Khoản thu của hợp đồng. `quantity`/`unitPrice` là numeric chính xác (đọc ra
+ * dạng chuỗi); `amount` = SL × đơn giá chưa thuế làm tròn tới đồng
+ * (`lineAmount`), `vatAmount` = thuế VAT theo `vatRate` (trống = không thuế),
+ * `totalAmount` = amount + vatAmount — đều do backend tính. Chỉ thay được cả
+ * bộ khi hợp đồng còn chờ duyệt / bị từ chối.
  */
 @Entity('other_cashflow_items')
 @Index('IDX_other_cashflow_items_contract', ['contractId'])
 @Check(
   'CHK_other_cashflow_items_values',
   `"quantity" > 0 AND "unit_price" >= 0 AND "amount" >= 0`,
+)
+@Check(
+  'CHK_other_cashflow_items_vat',
+  `("vat_rate" IS NULL OR "vat_rate" BETWEEN 0 AND 100) AND ("vat_rate" IS NOT NULL OR "vat_amount" = 0) AND "vat_amount" >= 0 AND "total_amount" = "amount" + "vat_amount"`,
 )
 export class OtherCashflowItem {
   @PrimaryGeneratedColumn({ primaryKeyConstraintName: 'PK_other_cashflow_items' })
@@ -42,9 +48,11 @@ export class OtherCashflowItem {
   @Column({ name: 'line_no', type: 'int' })
   lineNo!: number;
 
-  @Column({ name: 'item_code', type: 'varchar', length: 50 })
-  itemCode!: string;
+  /** Mã hàng (không bắt buộc). */
+  @Column({ name: 'item_code', type: 'varchar', length: 50, nullable: true })
+  itemCode!: string | null;
 
+  /** Nội dung khoản thu / tên hàng. */
   @Column({ name: 'item_name', type: 'varchar', length: 255 })
   itemName!: string;
 
@@ -59,4 +67,19 @@ export class OtherCashflowItem {
 
   @Column({ type: 'bigint', transformer: bigintTransformer })
   amount!: number;
+
+  /** Thuế suất VAT (%); trống = không thuế. */
+  @Column({ name: 'vat_rate', type: 'smallint', nullable: true })
+  vatRate!: number | null;
+
+  @Column({
+    name: 'vat_amount',
+    type: 'bigint',
+    default: 0,
+    transformer: bigintTransformer,
+  })
+  vatAmount!: number;
+
+  @Column({ name: 'total_amount', type: 'bigint', transformer: bigintTransformer })
+  totalAmount!: number;
 }
