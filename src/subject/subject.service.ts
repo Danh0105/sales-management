@@ -5,7 +5,7 @@ import {
     NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { Brackets, In, Repository } from 'typeorm';
 
 import { Subject } from './subject.entity';
 import { School } from '../school/schools.entity';
@@ -61,6 +61,13 @@ export class SubjectsService {
             { catalogId: dto.catalogId, name: dto.name },
             { requireActive: true },
         );
+
+        await this.assertNoDuplicateSubject({
+            schoolId: dto.schoolId,
+            schoolYear: dto.schoolYear,
+            name: catalog.name,
+            catalogId: catalog.id,
+        });
 
         const subject = this.subjectRepo.create({
             name: catalog.name,
@@ -294,6 +301,11 @@ export class SubjectsService {
 
         const { schoolId, startDate, contractDuration, catalogId, name, ...rest } =
             dto;
+        const before = {
+            name: subject.name,
+            schoolYear: subject.schoolYear,
+            schoolId: subject.schoolId,
+        };
 
         Object.assign(subject, {
             ...rest,
@@ -318,7 +330,75 @@ export class SubjectsService {
             subject.school = { id: schoolId } as School;
         }
 
+        // FE luôn gửi kèm trường + năm học khi sửa, nên chỉ kiểm tra trùng khi
+        // môn / năm học / trường thực sự đổi — sửa số học sinh thì không cần.
+        const targetSchoolId = schoolId ?? before.schoolId;
+        if (
+            subject.name !== before.name ||
+            subject.schoolYear !== before.schoolYear ||
+            targetSchoolId !== before.schoolId
+        ) {
+            await this.assertNoDuplicateSubject({
+                schoolId: targetSchoolId,
+                schoolYear: subject.schoolYear,
+                name: subject.name,
+                catalogId: subject.catalogId,
+                excludeId: subject.id,
+            });
+        }
+
         return this.subjectRepo.save(subject);
+    }
+
+    /**
+     * Mỗi trường trong một năm học chỉ có 1 môn cùng tên. Môn trùng là kinh
+     * doanh nhập hai lần: chính sách nằm ở môn này, lịch dạy ở môn kia, báo
+     * cáo đếm đôi. Dữ liệu cũ đã gộp ngày 03/11/2026 — chặn ở đây để không
+     * phát sinh lại.
+     */
+    private async assertNoDuplicateSubject(input: {
+        schoolId: number;
+        schoolYear?: string | null;
+        name: string;
+        catalogId?: number | null;
+        excludeId?: number;
+    }) {
+        const qb = this.subjectRepo
+            .createQueryBuilder('subject')
+            .where('subject.school_id = :schoolId', { schoolId: input.schoolId })
+            .andWhere(
+                new Brackets((w) => {
+                    w.where('lower(btrim(subject.name)) = lower(btrim(:name))', {
+                        name: input.name,
+                    });
+                    if (input.catalogId != null) {
+                        w.orWhere('subject.catalog_id = :catalogId', {
+                            catalogId: input.catalogId,
+                        });
+                    }
+                }),
+            );
+
+        if (input.schoolYear) {
+            qb.andWhere('subject.school_year = :schoolYear', {
+                schoolYear: input.schoolYear,
+            });
+        } else {
+            qb.andWhere('subject.school_year IS NULL');
+        }
+        if (input.excludeId) {
+            qb.andWhere('subject.id <> :excludeId', { excludeId: input.excludeId });
+        }
+
+        const existing = await qb.getOne();
+        if (existing) {
+            throw new ConflictException(
+                `Trường đã có môn "${existing.name}"` +
+                (input.schoolYear ? ` trong năm học ${input.schoolYear}` : '') +
+                '. Mỗi trường chỉ có 1 môn cùng tên trong một năm học — ' +
+                'hãy sửa môn hiện có thay vì tạo mới.',
+            );
+        }
     }
 
     /**
