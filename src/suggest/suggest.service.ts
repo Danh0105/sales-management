@@ -42,7 +42,10 @@ import { NotificationType } from '../notifications/enums/notification-type.enum'
 // ===== ĐỀ XUẤT CHI (EXPENSE_REQUEST) =====
 import { SuggestType } from './enums/suggest-type.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
-import { ExpenseRole } from './constants/expense-roles';
+import {
+  EXPENSE_REQUESTER_ROLES,
+  ExpenseRole,
+} from './constants/expense-roles';
 import {
   EXPENSE_TRANSITIONS,
   assertExpenseTransition,
@@ -138,10 +141,8 @@ export class SuggestService {
     if (dto.type === SuggestType.EXPENSE_REQUEST) {
       const actor = this.ensureUser(user as AuthUser);
 
-      if (!actor.roles?.includes(ExpenseRole.SALES)) {
-        throw new ForbiddenException(
-          'Chỉ kinh doanh (sales) được tạo đề xuất chi',
-        );
+      if (!actor.roles?.some((role) => EXPENSE_REQUESTER_ROLES.includes(role))) {
+        throw new ForbiddenException('Bạn không có quyền tạo đề nghị tài chính');
       }
       if (!dto.content) {
         throw new BadRequestException('Thiếu tiêu đề/nội dung đề xuất');
@@ -150,6 +151,17 @@ export class SuggestService {
         throw new BadRequestException('Thiếu ngày dự kiến chi');
       }
       const hasSchool = dto.schoolId !== undefined && dto.schoolId !== null;
+      const internalTeacher =
+        actor.roles?.includes(ExpenseRole.STAFF_TEACHER) &&
+        !actor.roles?.includes(ExpenseRole.SALES);
+      if (
+        internalTeacher &&
+        (hasSchool || dto.wardId !== undefined || dto.schoolYear !== undefined)
+      ) {
+        throw new BadRequestException(
+          'Giáo viên công ty chỉ tạo đề nghị tài chính nội bộ',
+        );
+      }
       // Năm học mặc định theo kỳ hiện tại để người tạo không cần tự chọn,
       // nhưng vẫn cho chọn năm khác — trường có thể chưa có môn học khai báo
       // cho năm hiện tại (chỉ có năm trước/sau), lúc đó phải tự đổi được.
@@ -159,7 +171,11 @@ export class SuggestService {
       if (hasSchool && schoolYear && !isValidSchoolYear(schoolYear)) {
         throw new BadRequestException('Năm học không hợp lệ');
       }
-      if (!hasSchool && (dto.wardId === undefined || dto.wardId === null)) {
+      if (
+        !internalTeacher &&
+        !hasSchool &&
+        (dto.wardId === undefined || dto.wardId === null)
+      ) {
         throw new BadRequestException('Thiếu xã/phường');
       }
       if (dto.expectedPaymentDate < vnToday()) {
@@ -191,7 +207,7 @@ export class SuggestService {
               'Trường không có môn học trong năm học đã chọn',
             );
           }
-        } else {
+        } else if (!internalTeacher) {
           ward = (await manager.findOne(Ward, {
             where: { id: dto.wardId },
           })) ?? undefined;
@@ -1153,6 +1169,7 @@ export class SuggestService {
     [ExpenseRole.TREASURER]: 'Thủ quỹ',
     [ExpenseRole.TECHNICAL]: 'Phòng kỹ thuật',
     [ExpenseRole.SALES]: 'Kinh doanh',
+    [ExpenseRole.STAFF_TEACHER]: 'Giáo viên công ty',
   };
 
   /**
@@ -2111,6 +2128,9 @@ export class SuggestService {
     user: AuthUser,
   ) {
     const actor = this.ensureUser(user);
+    const internalTeacher =
+      actor.roles?.includes(ExpenseRole.STAFF_TEACHER) &&
+      !actor.roles?.includes(ExpenseRole.SALES);
 
     const saved = await this.dataSource.transaction(async (manager) => {
       const suggest = await manager.findOne(Suggest, { where: { id } });
@@ -2162,6 +2182,15 @@ export class SuggestService {
       let schoolYear = dto.schoolYear ?? suggest.schoolYear ?? null;
       let wardId = suggest.wardId ?? null;
 
+      if (
+        internalTeacher &&
+        (changesSchool || changesWard || dto.schoolYear !== undefined)
+      ) {
+        throw new BadRequestException(
+          'Giáo viên công ty chỉ sửa đề nghị tài chính nội bộ',
+        );
+      }
+
       if (changesSchool) {
         schoolId = dto.schoolId!;
         wardId = null;
@@ -2190,7 +2219,7 @@ export class SuggestService {
       } else if (wardId) {
         const ward = await manager.findOne(Ward, { where: { id: wardId } });
         if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
-      } else {
+      } else if (!internalTeacher) {
         throw new BadRequestException('Thiếu xã/phường');
       }
 
@@ -3521,6 +3550,7 @@ export class SuggestService {
     if (!roles.includes(ExpenseRole.TECHNICAL)) return false;
     const otherExpenseRoles: string[] = [
       ExpenseRole.SALES,
+      ExpenseRole.STAFF_TEACHER,
       ExpenseRole.DIRECTOR,
       ExpenseRole.DEBT_ACCOUNTANT,
       ExpenseRole.TREASURER,
@@ -3531,6 +3561,24 @@ export class SuggestService {
     return !roles.some((r) => otherExpenseRoles.includes(r));
   }
 
+  /** Chủ đơn thuần chỉ được xem đề nghị do chính mình tạo. */
+  private isRequesterOnly(actor?: AuthUser): boolean {
+    const roles = actor?.roles ?? [];
+    if (!roles.some((role) => EXPENSE_REQUESTER_ROLES.includes(role))) {
+      return false;
+    }
+    const broadRoles: string[] = [
+      ExpenseRole.DIRECTOR,
+      ExpenseRole.DEBT_ACCOUNTANT,
+      ExpenseRole.TREASURER,
+      ExpenseRole.SALES_ADMIN,
+      ExpenseRole.CHIEF_ACCOUNTANT,
+      ExpenseRole.ACCOUNTANT,
+      ExpenseRole.TECHNICAL,
+    ];
+    return !roles.some((role) => broadRoles.includes(role));
+  }
+
   /**
    * Phòng kỹ thuật chỉ xem đề xuất thiết bị/sửa chữa. Nếu Giám đốc đã chỉ
    * định người phụ trách thì chỉ kỹ thuật viên đó nhìn thấy đề xuất.
@@ -3539,6 +3587,11 @@ export class SuggestService {
     qb: SelectQueryBuilder<Suggest>,
     actor?: AuthUser,
   ) {
+    if (this.isRequesterOnly(actor)) {
+      return qb.andWhere('s.createdBy = :requesterId', {
+        requesterId: actor!.id,
+      });
+    }
     if (!this.isTechnicalOnly(actor)) return qb;
 
     return qb
@@ -3714,6 +3767,10 @@ export class SuggestService {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
 
+    if (this.isRequesterOnly(actor) && s.createdBy !== actor!.id) {
+      throw new ForbiddenException('Bạn chỉ được xem đề nghị của chính mình');
+    }
+
     if (
       this.isTechnicalOnly(actor) &&
       ![ExpenseRequestKind.EQUIPMENT, ExpenseRequestKind.REPAIR].includes(
@@ -3884,7 +3941,7 @@ export class SuggestService {
       params.techRepairStatus = SuggestStatus.APPROVED;
       params.stockSource = EquipmentSource.STOCK;
     }
-    if (roles.includes(ExpenseRole.SALES)) {
+    if (roles.some((role) => EXPENSE_REQUESTER_ROLES.includes(role))) {
       conditions.push(
         '(s.createdBy = :meId AND s.status IN (:...saleStatuses))',
       );

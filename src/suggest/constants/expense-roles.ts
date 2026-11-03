@@ -3,6 +3,9 @@ export const ExpenseRole = {
     /** Kinh doanh — tạo đề xuất, xác nhận nhận tiền, xác nhận đã chi / chưa chi */
     SALES: 'sales',
 
+    /** Giáo viên công ty — được tạo và xử lý đề nghị của chính mình. */
+    STAFF_TEACHER: 'giaovien_congty',
+
     /** Giám đốc — duyệt hoặc từ chối đề xuất */
     DIRECTOR: 'director',
 
@@ -34,3 +37,9 @@ export const ExpenseRole = {
      */
     TECHNICAL: 'ky_thuat',
 } as const;
+
+/** Vai trò chủ đơn, không bao gồm quyền duyệt/kế toán/thủ quỹ. */
+export const EXPENSE_REQUESTER_ROLES: string[] = [
+    ExpenseRole.SALES,
+    ExpenseRole.STAFF_TEACHER,
+];

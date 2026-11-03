@@ -15,6 +15,10 @@ import { EquipmentSource } from './enums/equipment-source.enum';
 
 const salesOwner = { actorRoles: [ExpenseRole.SALES], isOwner: true };
 const salesOther = { actorRoles: [ExpenseRole.SALES], isOwner: false };
+const staffTeacherOwner = {
+  actorRoles: [ExpenseRole.STAFF_TEACHER],
+  isOwner: true,
+};
 const director = { actorRoles: [ExpenseRole.DIRECTOR], isOwner: false };
 const debtAccountant = {
   actorRoles: [ExpenseRole.DEBT_ACCOUNTANT],
@@ -24,6 +28,23 @@ const treasurer = { actorRoles: [ExpenseRole.TREASURER], isOwner: false };
 const salesAdmin = { actorRoles: [ExpenseRole.SALES_ADMIN], isOwner: false };
 
 describe('Expense flow state machine (trong Suggest)', () => {
+  it('giáo viên công ty thực hiện được các bước của chính chủ đơn', () => {
+    expect(
+      assertExpenseTransition(
+        ExpenseAction.CONFIRM_CASH_RECEIVED,
+        SuggestStatus.CASH_RELEASED,
+        staffTeacherOwner,
+      ),
+    ).toBe(SuggestStatus.CASH_RECEIVED);
+    expect(
+      assertExpenseTransition(
+        ExpenseAction.CONFIRM_SPENT,
+        SuggestStatus.CASH_RECEIVED,
+        staffTeacherOwner,
+      ),
+    ).toBe(SuggestStatus.SPENT);
+  });
+
   // ===== Nhánh A — happy path: duyệt → chi → SPENT =====
   // (tạo đề xuất vào thẳng PENDING_APPROVAL, không còn bước DRAFT/submit)
   it('đi hết luồng đã chi: PENDING_APPROVAL → ... → SPENT', () => {
@@ -249,7 +270,7 @@ describe('Expense flow state machine (trong Suggest)', () => {
       owner: false,
     });
     expect(expenseActorForStatus(SuggestStatus.CASH_RELEASED)).toEqual({
-      roles: [ExpenseRole.SALES],
+      roles: [ExpenseRole.SALES, ExpenseRole.STAFF_TEACHER],
       owner: true,
     });
     expect(expenseActorForStatus(SuggestStatus.DRAFT)).toBeNull();

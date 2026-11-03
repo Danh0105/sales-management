@@ -190,6 +190,57 @@ describe('Expense request school mapping', () => {
       expect(createdSuggest).not.toHaveProperty('schoolYear');
     });
 
+    it('giáo viên công ty tạo đề nghị nội bộ không cần trường hoặc xã/phường', async () => {
+      let createdSuggest: any;
+      const manager = {
+        create: jest.fn((_entity, data) => {
+          createdSuggest = data;
+          return data;
+        }),
+        save: jest.fn().mockImplementation(async (data) => ({ ...data, id: 125 })),
+      };
+      const service = makeService(manager);
+      (service as any).generateCode = jest.fn().mockResolvedValue('DX-209909-0002');
+      (service as any).writeExpenseLog = jest.fn();
+      (service as any).notifyExpense = jest.fn();
+      (service as any).findOneExpense = jest.fn().mockResolvedValue({ id: 125 });
+
+      await expect(
+        service.create(
+          {
+            content: 'Đề nghị hỗ trợ tài chính',
+            expectedPaymentDate: '2099-09-15',
+            type: SuggestType.EXPENSE_REQUEST,
+          },
+          undefined,
+          { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
+        ),
+      ).resolves.toEqual({ id: 125 });
+
+      expect(createdSuggest).toEqual(
+        expect.objectContaining({ createdBy: 19 }),
+      );
+      expect(createdSuggest).not.toHaveProperty('schoolId');
+      expect(createdSuggest).not.toHaveProperty('wardId');
+    });
+
+    it('giáo viên công ty không giả lập đề xuất theo địa bàn', async () => {
+      const service = makeService({});
+
+      await expect(
+        service.create(
+          {
+            content: 'Đề nghị sai phạm vi',
+            expectedPaymentDate: '2099-09-15',
+            wardId: 12,
+            type: SuggestType.EXPENSE_REQUEST,
+          },
+          undefined,
+          { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
+        ),
+      ).rejects.toThrow('chỉ tạo đề nghị tài chính nội bộ');
+    });
+
     it('từ chối năm kết thúc không liền sau năm bắt đầu', async () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue({ id: 445, name: 'TH ABC' }),
@@ -366,6 +417,49 @@ describe('Expense request school mapping', () => {
     });
     expect(qb.skip).toHaveBeenCalledWith(100);
     expect(qb.take).toHaveBeenCalledWith(100);
+  });
+
+  it('giáo viên công ty chỉ được query đề nghị của chính mình', async () => {
+    const qb: any = {};
+    for (const method of [
+      'leftJoinAndSelect',
+      'where',
+      'andWhere',
+      'orderBy',
+      'skip',
+      'take',
+    ]) {
+      qb[method] = jest.fn().mockReturnValue(qb);
+    }
+    qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+    const service = Object.create(SuggestService.prototype) as SuggestService;
+    (service as any).repo = {
+      createQueryBuilder: jest.fn().mockReturnValue(qb),
+    };
+
+    await service.findAllExpense(
+      { page: 1, limit: 20 },
+      { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
+    );
+
+    expect(qb.andWhere).toHaveBeenCalledWith(
+      's.createdBy = :requesterId',
+      { requesterId: 19 },
+    );
+  });
+
+  it('giáo viên công ty không xem được chi tiết đề nghị của người khác', async () => {
+    const service = Object.create(SuggestService.prototype) as SuggestService;
+    (service as any).repo = {
+      findOne: jest.fn().mockResolvedValue({ id: 8, createdBy: 77 }),
+    };
+
+    await expect(
+      service.findOneExpense(8, {
+        id: 19,
+        roles: [ExpenseRole.STAFF_TEACHER],
+      } as any),
+    ).rejects.toThrow('chỉ được xem đề nghị của chính mình');
   });
 });
 

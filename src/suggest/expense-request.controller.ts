@@ -24,7 +24,10 @@ import { extname } from 'path';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
-import { ExpenseRole } from './constants/expense-roles';
+import {
+    EXPENSE_REQUESTER_ROLES,
+    ExpenseRole,
+} from './constants/expense-roles';
 import { SuggestType } from './enums/suggest-type.enum';
 
 import { SuggestService, UploadedAttachment } from './suggest.service';
@@ -91,7 +94,7 @@ export class ExpenseRequestController {
     // ================= SALES =================
 
     @Post()
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(singleUpload)
     create(
         @Body() dto: CreateExpenseRequestDto,
@@ -113,7 +116,7 @@ export class ExpenseRequestController {
      * `SuggestService.updateExpense`).
      */
     @Patch(':id')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(singleUpload)
     update(
         @Param('id', ParseIntPipe) id: number,
@@ -127,7 +130,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/cash-received')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     cashReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -137,7 +140,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/confirm-spent')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(multiUpload)
     confirmSpent(
         @Param('id', ParseIntPipe) id: number,
@@ -154,7 +157,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/confirm-not-spent')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     confirmNotSpent(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNotSpentDto,
@@ -209,7 +212,7 @@ export class ExpenseRequestController {
      * riêng role DIRECTOR — xem `overrideRoles` trong expense-flow.state-machine.ts).
      */
     @Post(':id/withdraw')
-    @Roles(ExpenseRole.SALES, ExpenseRole.DIRECTOR)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR)
     withdraw(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: WithdrawExpenseDto,
@@ -268,7 +271,7 @@ export class ExpenseRequestController {
 
     /** Kinh doanh xác nhận đã nhận thiết bị (nhánh đề xuất thiết bị) */
     @Post(':id/equipment-received')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     equipmentReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,

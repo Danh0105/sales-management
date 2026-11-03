@@ -2,7 +2,10 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 
 import { SuggestStatus } from './SuggestStatus.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
-import { ExpenseRole } from './constants/expense-roles';
+import {
+  EXPENSE_REQUESTER_ROLES,
+  ExpenseRole,
+} from './constants/expense-roles';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 import { EquipmentSource } from './enums/equipment-source.enum';
 
@@ -118,7 +121,7 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.WITHDRAW]: {
     from: [SuggestStatus.DRAFT, SuggestStatus.PENDING_APPROVAL],
     to: SuggestStatus.WITHDRAWN,
-    roles: [ExpenseRole.SALES, ExpenseRole.DIRECTOR],
+    roles: [...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR],
     ownerOnly: true,
     overrideRoles: [ExpenseRole.DIRECTOR],
   },
@@ -161,7 +164,7 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_CASH_RECEIVED]: {
     from: [SuggestStatus.CASH_RELEASED],
     to: SuggestStatus.CASH_RECEIVED,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
     kinds: [ExpenseRequestKind.CASH],
   },
@@ -169,14 +172,14 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_SPENT]: {
     from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.SPENT,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
   },
 
   [ExpenseAction.CONFIRM_NOT_SPENT]: {
     from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.NOT_SPENT,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
   },
 
@@ -204,7 +207,7 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED]: {
     from: [SuggestStatus.STOCK_ISSUE_ORDERED],
     to: SuggestStatus.EQUIPMENT_RECEIVED,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
     kinds: [ExpenseRequestKind.EQUIPMENT],
   },
@@ -430,7 +433,7 @@ export function expenseActorForStatus(
     case SuggestStatus.CASH_RECEIVED:
     case SuggestStatus.STOCK_ISSUE_ORDERED:
     case SuggestStatus.EQUIPMENT_RECEIVED:
-      return { roles: [ExpenseRole.SALES], owner: true };
+      return { roles: [...EXPENSE_REQUESTER_ROLES], owner: true };
 
     // Giám đốc, Sales Admin lẫn Kế toán trưởng đều duyệt được bước này.
     case SuggestStatus.PENDING_APPROVAL:
