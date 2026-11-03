@@ -39,6 +39,7 @@ import {
   CreateTeachingSessionDto,
   DeclineTeachingSessionDto,
   QueryAttendanceSummaryDto,
+  QueryMyAttendanceSummaryDto,
   QueryTravelReviewDto,
   QueryTeachingSessionsDto,
   NotifyTeachingScheduleDto,
@@ -56,6 +57,7 @@ import {
   TeachingApplicationStatus,
 } from './teaching.enum';
 import {
+  addDays,
   amountOf,
   assertDateOrder,
   assertTimeOrder,
@@ -153,6 +155,9 @@ import {
 } from '../notifications/constants/teaching-lesson-report.constant';
 
 const MAX_LIMIT = 200;
+
+/** Giáo viên tự xem tổng hợp công tối đa ~một quý mỗi lần (dựng lộ trình từng ngày). */
+const MY_SUMMARY_MAX_DAYS = 93;
 
 /** Buổi của giáo viên công ty (tài khoản có role `giaovien_congty`), alias `ss`. */
 export const STAFF_TEACHER_SQL =
@@ -2452,6 +2457,84 @@ export class TeachingSessionService {
           0,
         ),
       },
+    };
+  }
+
+  /**
+   * Tổng hợp chấm công + quãng đường của chính giáo viên đang đăng nhập —
+   * cùng số liệu với tab Tổng hợp và Rà soát quãng đường của Nhân sự, chỉ
+   * của giáo viên này (teacherId lấy từ token). Có phụ cấp xăng nhưng không
+   * trả tiền tiết; bỏ toạ độ GPS và chẩn đoán nội bộ của từng lượt.
+   */
+  async myAttendanceSummary(
+    employeeId: number,
+    query: QueryMyAttendanceSummaryDto,
+  ) {
+    assertDateOrder(
+      query.fromDate,
+      query.toDate,
+      'fromDate phải nhỏ hơn hoặc bằng toDate',
+    );
+    if (addDays(query.fromDate, MY_SUMMARY_MAX_DAYS - 1) < query.toDate) {
+      throw new BadRequestException(
+        `Chỉ xem tối đa ${MY_SUMMARY_MAX_DAYS} ngày mỗi lần`,
+      );
+    }
+    const teacher = await this.getTeacherByEmployee(employeeId);
+    const range = {
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      teacherId: teacher.id,
+    };
+    const [summary, travel] = await Promise.all([
+      this.attendanceSummary(range),
+      this.travelReview(range),
+    ]);
+    const row = summary.data.find((item) => item.teacherId === teacher.id);
+    const route = travel.teachers.find((item) => item.teacherId === teacher.id);
+
+    return {
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      teacherName: teacher.name,
+      attendance: {
+        totalSessions: row?.totalSessions ?? 0,
+        present: row?.present ?? 0,
+        absent: row?.absent ?? 0,
+        excused: row?.excused ?? 0,
+        cancelled: row?.cancelled ?? 0,
+        unchecked: row?.unchecked ?? 0,
+        makeup: row?.makeup ?? 0,
+        totalPeriods: row?.totalPeriods ?? 0,
+        /** Tiết có dạy (đã chấm Có mặt). */
+        presentPeriods: row?.payablePeriods ?? 0,
+      },
+      /** Phần đã chấm công — khớp bảng công Nhân sự đang tính. */
+      totalDistanceKm: row?.totalDistanceKm ?? 0,
+      fuelAllowanceAmount: row?.fuelAllowanceAmount ?? 0,
+      /** Tiết đã tới ngày mà chưa chấm công — km/phụ cấp các lượt đó chưa vào bảng công. */
+      uncheckedSessions: route?.uncheckedSessions ?? 0,
+      days: (route?.days ?? []).map((day) => ({
+        date: day.date,
+        fromOffice: day.fromOffice,
+        totalDistanceKm: day.totalDistanceKm,
+        fuelAllowanceAmount: day.fuelAllowanceAmount,
+        stops: day.stops.map((stop) => ({
+          schoolName: stop.schoolName,
+          locationName: stop.locationName,
+          startTime: stop.startTime,
+          endTime: stop.endTime,
+          periods: stop.periods,
+          sessions: stop.sessions,
+          uncheckedSessions: stop.uncheckedSessions,
+          counted: stop.counted,
+          distanceKm: stop.counted ? stop.distanceKm : null,
+          gasAllowance: stop.counted ? stop.gasAllowance : null,
+          checkedIn: stop.checkin !== null,
+          flags: stop.flags,
+          missingReasons: stop.missingReasons,
+        })),
+      })),
     };
   }
 

@@ -1949,6 +1949,148 @@ describe('TeachingSessionService', () => {
     });
   });
 
+  describe('tổng hợp công của tôi', () => {
+    const stop = {
+      placeKey: 's:1',
+      schoolId: 1,
+      schoolName: 'Trường A',
+      schoolLocationId: null,
+      locationName: null,
+      coords: { lat: 10.1, lng: 106.1 },
+      startTime: '07:30:00',
+      endTime: '09:00:00',
+      periods: 2,
+      sessions: [{ id: 11, startTime: '07:30:00', endTime: '09:00:00', subjectName: 'STEM', className: '3A' }],
+      uncheckedSessions: 0,
+      counted: true,
+      gasAllowance: 30000,
+      missingReasons: null,
+      diagnosedDistanceKm: null,
+      distanceKm: 12.5,
+      distanceSource: 'ROUTE',
+      checkin: { at: new Date(), latitude: 10.1, longitude: 106.1, accuracy: 5, distanceM: 20 },
+      flags: [],
+    };
+
+    const setup = () => {
+      const ctx = makeSessionService();
+      ctx.teacher.repo.findOne = jest.fn().mockResolvedValue({ id: 5, name: 'Cô A' });
+      const summary = jest.spyOn(ctx.service, 'attendanceSummary').mockResolvedValue({
+        fromDate: '2026-10-01',
+        toDate: '2026-10-31',
+        data: [
+          {
+            teacherId: 5,
+            teacherName: 'Cô A',
+            totalSessions: 10,
+            present: 7,
+            absent: 1,
+            excused: 0,
+            cancelled: 1,
+            unchecked: 1,
+            makeup: 2,
+            totalPeriods: 14,
+            payablePeriods: 10,
+            payableAmount: 999,
+            otherCostsAmount: 0,
+            fuelAllowanceAmount: 60000,
+            totalDistanceKm: 25,
+            totalPayableAmount: 60999,
+            missingRateSessions: 0,
+          },
+        ],
+        grandTotal: {} as any,
+      });
+      const travel = jest.spyOn(ctx.service, 'travelReview').mockResolvedValue({
+        teachers: [
+          {
+            teacherId: 5,
+            teacherName: 'Cô A',
+            home: { lat: 10, lng: 106 },
+            uncheckedSessions: 1,
+            days: [
+              {
+                date: '2026-10-05',
+                home: { lat: 10, lng: 106 },
+                fromOffice: false,
+                totalDistanceKm: 12.5,
+                fuelAllowanceAmount: 30000,
+                stops: [
+                  stop,
+                  { ...stop, counted: false, gasAllowance: null, distanceKm: 3, checkin: null, missingReasons: ['NO_TEACHER_LOCATION'], flags: ['NOT_COUNTED', 'NO_CHECKIN'] },
+                ],
+              },
+            ],
+          },
+        ],
+      } as any);
+      return { ...ctx, summary, travel };
+    };
+
+    it('lấy giáo viên từ token; trả số buổi, tiết, km, phụ cấp — không tiền tiết, không toạ độ', async () => {
+      const { service, teacher, summary, travel } = setup();
+
+      const result = await service.myAttendanceSummary(30, {
+        fromDate: '2026-10-01',
+        toDate: '2026-10-31',
+      });
+
+      expect(teacher.repo.findOne).toHaveBeenCalledWith({ where: { employeeId: 30 } });
+      const range = { fromDate: '2026-10-01', toDate: '2026-10-31', teacherId: 5 };
+      expect(summary).toHaveBeenCalledWith(range);
+      expect(travel).toHaveBeenCalledWith(range);
+      expect(result).toMatchObject({
+        teacherName: 'Cô A',
+        attendance: { totalSessions: 10, present: 7, unchecked: 1, makeup: 2, totalPeriods: 14, presentPeriods: 10 },
+        totalDistanceKm: 25,
+        fuelAllowanceAmount: 60000,
+        uncheckedSessions: 1,
+      });
+      expect(JSON.stringify(result)).not.toMatch(/payableAmount|latitude|coords|"home"/);
+      const [counted, missing] = result.days[0].stops;
+      expect(counted).toMatchObject({ distanceKm: 12.5, gasAllowance: 30000, checkedIn: true });
+      expect(missing).toMatchObject({
+        counted: false,
+        distanceKm: null,
+        gasAllowance: null,
+        checkedIn: false,
+        missingReasons: ['NO_TEACHER_LOCATION'],
+      });
+    });
+
+    it('chưa có buổi nào → toàn số 0', async () => {
+      const { service, summary, travel } = setup();
+      summary.mockResolvedValueOnce({ fromDate: '', toDate: '', data: [], grandTotal: {} as any });
+      travel.mockResolvedValueOnce({ teachers: [] } as any);
+
+      const result = await service.myAttendanceSummary(30, { fromDate: '2026-10-01', toDate: '2026-10-31' });
+
+      expect(result).toMatchObject({
+        attendance: { totalSessions: 0, presentPeriods: 0 },
+        totalDistanceKm: 0,
+        fuelAllowanceAmount: 0,
+        days: [],
+      });
+    });
+
+    it('từ chối khoảng ngày ngược hoặc dài quá 93 ngày; 404 khi chưa gắn hồ sơ', async () => {
+      const { service, teacher } = setup();
+      await expect(
+        service.myAttendanceSummary(30, { fromDate: '2026-10-31', toDate: '2026-10-01' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.myAttendanceSummary(30, { fromDate: '2026-01-01', toDate: '2026-04-04' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.myAttendanceSummary(30, { fromDate: '2026-01-01', toDate: '2026-04-03' }),
+      ).resolves.toBeDefined();
+      teacher.repo.findOne = jest.fn().mockResolvedValue(null);
+      await expect(
+        service.myAttendanceSummary(30, { fromDate: '2026-10-01', toDate: '2026-10-31' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
   describe('lọc và phân trang', () => {
     it('lọc theo khoảng ngày', async () => {
       const { service, session } = makeSessionService();

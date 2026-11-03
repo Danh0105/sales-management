@@ -528,6 +528,15 @@ export class QueryTravelReviewDto {
   teacherId?: number;
 }
 
+/** Tổng hợp chấm công + quãng đường của chính giáo viên đang đăng nhập. */
+export class QueryMyAttendanceSummaryDto {
+  @IsCalendarDate()
+  fromDate!: string;
+
+  @IsCalendarDate()
+  toDate!: string;
+}
+
 export class QueryAttendanceSummaryDto {
   @IsCalendarDate()
   fromDate!: string;
