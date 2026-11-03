@@ -190,9 +190,27 @@ describe('Expense request school mapping', () => {
       expect(createdSuggest).not.toHaveProperty('schoolYear');
     });
 
-    it('giáo viên công ty tạo đề nghị nội bộ không cần trường hoặc xã/phường', async () => {
+    it('giáo viên công ty cũng phải chọn trường hoặc xã/phường như kinh doanh', async () => {
+      const service = makeService({});
+
+      await expect(
+        service.create(
+          {
+            content: 'Đề nghị hỗ trợ tài chính',
+            expectedPaymentDate: '2099-09-15',
+            type: SuggestType.EXPENSE_REQUEST,
+          },
+          undefined,
+          { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
+        ),
+      ).rejects.toThrow('Thiếu xã/phường');
+    });
+
+    it('giáo viên công ty tạo đề nghị theo xã/phường giống kinh doanh', async () => {
+      const ward = { id: 12, name: 'Phường Tân Lập' };
       let createdSuggest: any;
       const manager = {
+        findOne: jest.fn().mockResolvedValue(ward),
         create: jest.fn((_entity, data) => {
           createdSuggest = data;
           return data;
@@ -210,6 +228,7 @@ describe('Expense request school mapping', () => {
           {
             content: 'Đề nghị hỗ trợ tài chính',
             expectedPaymentDate: '2099-09-15',
+            wardId: 12,
             type: SuggestType.EXPENSE_REQUEST,
           },
           undefined,
@@ -218,27 +237,8 @@ describe('Expense request school mapping', () => {
       ).resolves.toEqual({ id: 125 });
 
       expect(createdSuggest).toEqual(
-        expect.objectContaining({ createdBy: 19 }),
+        expect.objectContaining({ createdBy: 19, wardId: 12, ward }),
       );
-      expect(createdSuggest).not.toHaveProperty('schoolId');
-      expect(createdSuggest).not.toHaveProperty('wardId');
-    });
-
-    it('giáo viên công ty không giả lập đề xuất theo địa bàn', async () => {
-      const service = makeService({});
-
-      await expect(
-        service.create(
-          {
-            content: 'Đề nghị sai phạm vi',
-            expectedPaymentDate: '2099-09-15',
-            wardId: 12,
-            type: SuggestType.EXPENSE_REQUEST,
-          },
-          undefined,
-          { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
-        ),
-      ).rejects.toThrow('chỉ tạo đề nghị tài chính nội bộ');
     });
 
     it('từ chối năm kết thúc không liền sau năm bắt đầu', async () => {

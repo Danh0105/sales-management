@@ -151,17 +151,6 @@ export class SuggestService {
         throw new BadRequestException('Thiếu ngày dự kiến chi');
       }
       const hasSchool = dto.schoolId !== undefined && dto.schoolId !== null;
-      const internalTeacher =
-        actor.roles?.includes(ExpenseRole.STAFF_TEACHER) &&
-        !actor.roles?.includes(ExpenseRole.SALES);
-      if (
-        internalTeacher &&
-        (hasSchool || dto.wardId !== undefined || dto.schoolYear !== undefined)
-      ) {
-        throw new BadRequestException(
-          'Giáo viên công ty chỉ tạo đề nghị tài chính nội bộ',
-        );
-      }
       // Năm học mặc định theo kỳ hiện tại để người tạo không cần tự chọn,
       // nhưng vẫn cho chọn năm khác — trường có thể chưa có môn học khai báo
       // cho năm hiện tại (chỉ có năm trước/sau), lúc đó phải tự đổi được.
@@ -172,7 +161,6 @@ export class SuggestService {
         throw new BadRequestException('Năm học không hợp lệ');
       }
       if (
-        !internalTeacher &&
         !hasSchool &&
         (dto.wardId === undefined || dto.wardId === null)
       ) {
@@ -207,7 +195,7 @@ export class SuggestService {
               'Trường không có môn học trong năm học đã chọn',
             );
           }
-        } else if (!internalTeacher) {
+        } else {
           ward = (await manager.findOne(Ward, {
             where: { id: dto.wardId },
           })) ?? undefined;
@@ -2128,10 +2116,6 @@ export class SuggestService {
     user: AuthUser,
   ) {
     const actor = this.ensureUser(user);
-    const internalTeacher =
-      actor.roles?.includes(ExpenseRole.STAFF_TEACHER) &&
-      !actor.roles?.includes(ExpenseRole.SALES);
-
     const saved = await this.dataSource.transaction(async (manager) => {
       const suggest = await manager.findOne(Suggest, { where: { id } });
 
@@ -2182,15 +2166,6 @@ export class SuggestService {
       let schoolYear = dto.schoolYear ?? suggest.schoolYear ?? null;
       let wardId = suggest.wardId ?? null;
 
-      if (
-        internalTeacher &&
-        (changesSchool || changesWard || dto.schoolYear !== undefined)
-      ) {
-        throw new BadRequestException(
-          'Giáo viên công ty chỉ sửa đề nghị tài chính nội bộ',
-        );
-      }
-
       if (changesSchool) {
         schoolId = dto.schoolId!;
         wardId = null;
@@ -2219,7 +2194,7 @@ export class SuggestService {
       } else if (wardId) {
         const ward = await manager.findOne(Ward, { where: { id: wardId } });
         if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
-      } else if (!internalTeacher) {
+      } else {
         throw new BadRequestException('Thiếu xã/phường');
       }
 
