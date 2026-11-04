@@ -1491,13 +1491,18 @@ export class PolicyService {
         });
     }
 
-    async getStats(employeeId: number, allStatuses?: boolean) {
+    async getStats(
+        employeeId?: number,
+        allStatuses?: boolean,
+        provinceId?: number,
+    ) {
         const qb = this.policyRepo
             .createQueryBuilder('p')
 
             // ===== JOIN =====
             .innerJoin('p.subject', 'sub')
             .innerJoin('sub.school', 's')
+            .leftJoin('s.employee', 'emp')
             .leftJoin('s.ward', 'w')
             .leftJoin('w.province', 'pr')
 
@@ -1540,15 +1545,23 @@ export class PolicyService {
                 's.class_count AS "classCount"',
                 's.ward_id AS "wardId"',
 
+                // EMPLOYEE
+                'emp.name AS "employeeName"',
+
                 // LOCATION
                 'w.id AS "wardId"',
                 'w.name AS "wardName"',
                 'pr.id AS "provinceId"',
                 'pr.name AS "provinceName"',
-            ])
+            ]);
 
-            // ===== WHERE =====
-            .andWhere('s.employee_id = :employeeId', { employeeId });
+        if (employeeId) {
+            qb.andWhere('s.employee_id = :employeeId', { employeeId });
+        }
+
+        if (provinceId) {
+            qb.andWhere('pr.id = :provinceId', { provinceId });
+        }
 
         if (!allStatuses) {
             qb.andWhere('p.status = :status', { status: 'DIRECTOR_APPROVED' });
