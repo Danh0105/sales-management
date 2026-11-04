@@ -34,9 +34,10 @@ const WRITE_ROLES = [
 ];
 
 /**
- * Sales admin chỉ được xem trang Quản lý thu chi và chỉnh sửa DUY NHẤT bảng
- * "Chi Ngoài" (qua `ManagementExpenseItemsController`) + xác nhận khoá bảng
- * đó — không có trong WRITE_ROLES nên không sửa được các bảng khác ở đây.
+ * Sales admin chỉ được xem trang Quản lý thu chi, tạo bảng chi phí rỗng khi
+ * trường chưa có bảng trong kỳ, và chỉnh sửa DUY NHẤT bảng "Chi Ngoài" (qua
+ * `ManagementExpenseItemsController`) + xác nhận khoá bảng đó — không có trong
+ * WRITE_ROLES nên không sửa được các bảng khác ở đây.
  */
 const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
 
@@ -57,8 +58,10 @@ export class RealExpensesController {
     );
   }
 
+  // `create` chỉ lấy schoolId + periodId, tổng tiền luôn 0 nên sales admin mở
+  // được bảng để nhập Chi Ngoài mà không ghi được số liệu nào khác.
   @Post()
-  @Roles(...WRITE_ROLES)
+  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
   create(@Body() body: any, @Req() req: RequestWithUser) {
     return this.realExpensesService.create(body, req.user);
   }
