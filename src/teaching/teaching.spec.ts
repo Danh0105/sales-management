@@ -321,7 +321,7 @@ describe('Phân quyền module giảng dạy', () => {
     ).not.toThrow();
   });
 
-  it.each([['director'], ['director_la'], ['troly_gd'], ['ketoan_truong']])(
+  it.each([['director'], ['troly_gd'], ['ketoan_truong']])(
     'role %s chỉ được xem',
     (role) => {
       expect(resolveTeachingScope({ id: 2, roles: [role] })).toEqual({
@@ -332,6 +332,12 @@ describe('Phân quyền module giảng dạy', () => {
       );
     },
   );
+
+  it('role director_la không được vào chức năng Nhân sự / Giảng dạy', () => {
+    expect(() =>
+      resolveTeachingScope({ id: 2, roles: ['director_la'] }),
+    ).toThrow(ForbiddenException);
+  });
 
   it('role giaovien chỉ xem dữ liệu của chính mình', () => {
     expect(

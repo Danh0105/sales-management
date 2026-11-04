@@ -101,7 +101,7 @@ export const RECORDABLE_STATUSES = [
 /** NV kinh doanh — chỉ thấy hợp đồng mình lập. */
 export const OTHER_CASHFLOW_CREATE_ROLES = ['sales', 'employee', 'employee_la'];
 
-export const OTHER_CASHFLOW_APPROVE_ROLES = ['director', 'director_la'];
+export const OTHER_CASHFLOW_APPROVE_ROLES = ['director'];
 
 /**
  * Kế toán trưởng có toàn quyền của kế toán công nợ và thủ quỹ — cùng quy ước

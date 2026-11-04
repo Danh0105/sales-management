@@ -334,7 +334,7 @@ export class PolicyService {
                     })
                     .getMany();
 
-            const userIds = employees
+            const candidateUserIds = employees
                 .map((e) => e.id)
                 .filter(
                     (
@@ -342,6 +342,11 @@ export class PolicyService {
                     ): id is number =>
                         id !== undefined,
                 );
+
+            const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                candidateUserIds,
+                dto.employeeInfo?.sub,
+            );
 
             const tokenEntities =
                 await this.employeeFcmTokenService
@@ -956,9 +961,14 @@ export class PolicyService {
                     })
                     .getMany();
 
-                const userIds = employees
+                const candidateUserIds = employees
                     .map(e => e.id)
                     .filter((id): id is number => id !== undefined);
+
+                const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                    candidateUserIds,
+                    dto.employeeInfo?.sub,
+                );
 
                 const tokenEntities = await this.employeeFcmTokenService.getTokens(userIds);
                 const tokens = tokenEntities.map((x) => x.token);

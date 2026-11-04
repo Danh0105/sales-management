@@ -8,7 +8,7 @@ import { CreateDepartmentDto } from './dto/create-department.dto';
 import { UpdateDepartmentDto } from './dto/update-department.dto';
 
 /** Thêm/sửa/xoá phòng ban — chỉ giám đốc. */
-export const DEPARTMENT_ADMIN_ROLES = ['director', 'director_la'];
+export const DEPARTMENT_ADMIN_ROLES = ['director'];
 
 /** Mọi API phòng ban cần đăng nhập; xem thì ai đăng nhập cũng được. */
 @Controller('departments')

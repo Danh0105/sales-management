@@ -49,7 +49,6 @@ export const TEACHER_ACCOUNT_APPROVE_ROLES = [HR_ROLE];
 /** Ban giám đốc xem được toàn bộ số liệu nhưng không sửa. */
 export const TEACHING_VIEW_ONLY_ROLES = [
   'director',
-  'director_la',
   'troly_gd',
   'ketoan_truong',
 ];

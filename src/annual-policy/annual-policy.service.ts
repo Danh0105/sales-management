@@ -63,9 +63,14 @@ export class AnnualPolicyService {
             })
             .getMany();
 
-        const directorIds = directors
+        const candidateDirectorIds = directors
             .map((d) => d.id)
             .filter((id): id is number => id !== undefined);
+
+        const directorIds = await this.notificationService.scopeBusinessReceiverIds(
+            candidateDirectorIds,
+            creator.id,
+        );
 
         const creatorName = fixVietnamese(creator.name || '');
         const message = `${creatorName} đã gửi yêu cầu duyệt chính sách năm cho trường ${school.name} năm học ${dto.schoolYear}`;

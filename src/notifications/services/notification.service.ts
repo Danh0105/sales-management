@@ -28,6 +28,11 @@ const TEACHING_ZALO_TYPES = new Set<NotificationType>([
   NotificationType.TEACHER_ACCOUNT_RESULT,
 ]);
 
+const LONG_AN_PROVINCE_ID = 7;
+const LONG_AN_DIRECTOR_ROLE = 'director_la';
+const FULL_DIRECTOR_ROLE = 'director';
+const SALES_ROLE = 'sales';
+
 /**
  * Đọc tại thời điểm gọi (không chốt hằng số) — ConfigModule nạp `.env` sau
  * khi module TS được import, chốt sớm có thể luôn đọc ra "tắt".
@@ -104,6 +109,96 @@ export class NotificationService {
     number,
     { items: ConfirmDigestItem[]; firstAt: number; timer?: NodeJS.Timeout }
   >();
+
+  /**
+   * `director_la` là vai trò giám đốc theo tỉnh, không phải một giám đốc toàn
+   * hệ thống. Tài khoản đồng thời có role `director` vẫn giữ quyền đầy đủ.
+   */
+  private async isRestrictedLongAnDirector(employeeId: number): Promise<boolean> {
+    const employee = await this.employeeRepo.findOne({
+      where: { id: employeeId },
+      select: ['id', 'roles'],
+    });
+    const roles = employee?.roles ?? [];
+    return roles.includes(LONG_AN_DIRECTOR_ROLE) && !roles.includes(FULL_DIRECTOR_ROLE);
+  }
+
+  private applyLongAnSalesSenderScope(
+    qb: SelectQueryBuilder<Notification>,
+    alias = 'n',
+  ): SelectQueryBuilder<Notification> {
+    return qb.andWhere(
+      `EXISTS (
+        SELECT 1
+        FROM employee long_an_notification_sender
+        INNER JOIN employee_region long_an_notification_sender_region
+          ON long_an_notification_sender_region.employee_id = long_an_notification_sender.id
+        WHERE long_an_notification_sender.id = ${alias}."senderId"
+          AND long_an_notification_sender."isActive" = true
+          AND :longAnSalesRole = ANY(long_an_notification_sender.roles)
+          AND long_an_notification_sender_region.province_id = :longAnProvinceId
+      )`,
+      {
+        longAnSalesRole: SALES_ROLE,
+        longAnProvinceId: LONG_AN_PROVINCE_ID,
+      },
+    );
+  }
+
+  private async applyReceiverNotificationScope(
+    qb: SelectQueryBuilder<Notification>,
+    receiverId: number,
+    alias = 'n',
+  ): Promise<SelectQueryBuilder<Notification>> {
+    if (await this.isRestrictedLongAnDirector(receiverId)) {
+      return this.applyLongAnSalesSenderScope(qb, alias);
+    }
+    return qb;
+  }
+
+  /**
+   * Lọc cả trước khi lấy FCM token. `createNotifications` cũng gọi lại hàm
+   * này để DB/socket/Zalo không thể lệch phạm vi với push notification.
+   */
+  async scopeBusinessReceiverIds(
+    receiverIds: number[],
+    senderId?: number,
+  ): Promise<number[]> {
+    const uniqueIds = [...new Set(receiverIds)].filter((id) => Number.isInteger(id));
+    if (!uniqueIds.length) return [];
+
+    const receivers = await this.employeeRepo.find({
+      where: { id: In(uniqueIds) },
+      select: ['id', 'roles'],
+    });
+    const restrictedIds = new Set(
+      receivers
+        .filter((receiver) => {
+          const roles = receiver.roles ?? [];
+          return roles.includes(LONG_AN_DIRECTOR_ROLE) && !roles.includes(FULL_DIRECTOR_ROLE);
+        })
+        .map((receiver) => Number(receiver.id)),
+    );
+    if (!restrictedIds.size) return uniqueIds;
+
+    let senderIsLongAnSales = false;
+    if (senderId) {
+      senderIsLongAnSales = await this.employeeRepo
+        .createQueryBuilder('sender')
+        .innerJoin('sender.employeeRegions', 'senderRegion')
+        .where('sender.id = :senderId', { senderId })
+        .andWhere('sender.isActive = true')
+        .andWhere(':salesRole = ANY(sender.roles)', { salesRole: SALES_ROLE })
+        .andWhere('senderRegion.province_id = :provinceId', {
+          provinceId: LONG_AN_PROVINCE_ID,
+        })
+        .getExists();
+    }
+
+    return uniqueIds.filter(
+      (receiverId) => !restrictedIds.has(receiverId) || senderIsLongAnSales,
+    );
+  }
 
   /**
    * Gửi kèm Zalo OA cho thông báo giảng dạy — kênh phụ, không bao giờ được
@@ -242,6 +337,14 @@ export class NotificationService {
   // ======================================================
 
   async create(data: Partial<Notification>) {
+    if (data.receiverId) {
+      const receiverIds = await this.scopeBusinessReceiverIds(
+        [data.receiverId],
+        data.senderId,
+      );
+      if (!receiverIds.length) return null;
+    }
+
     const notification = this.repo.create(data);
 
     const saved = await this.repo.save(notification);
@@ -265,12 +368,14 @@ export class NotificationService {
   // ======================================================
 
   async countUnread(receiverId: number) {
-    return this.repo.count({
-      where: {
-        receiverId,
-        isRead: false,
-      },
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.getCount();
   }
 
   // ======================================================
@@ -278,18 +383,14 @@ export class NotificationService {
   // ======================================================
 
   async getUnreadNotifications(receiverId: number) {
-    return this.repo.find({
-      where: {
-        receiverId,
-        isRead: false,
-      },
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      take: 20,
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.orderBy('n.createdAt', 'DESC').take(20).getMany();
   }
 
   // ======================================================
@@ -383,33 +484,22 @@ export class NotificationService {
 
     type?: NotificationType;
   }) {
-    const where: any = {
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId }),
       receiverId,
-    };
+    );
 
-    if (tab === 'unread') {
-      where.isRead = false;
-    }
+    if (tab === 'unread') qb.andWhere('n.isRead = false');
+    if (tab === 'read') qb.andWhere('n.isRead = true');
+    if (type) qb.andWhere('n.type = :type', { type });
 
-    if (tab === 'read') {
-      where.isRead = true;
-    }
-
-    if (type) {
-      where.type = type;
-    }
-
-    const [data, total] = await this.repo.findAndCount({
-      where,
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      skip: (page - 1) * limit,
-
-      take: limit,
-    });
+    const [data, total] = await qb
+      .orderBy('n.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
 
     return {
       data,
@@ -449,7 +539,12 @@ export class NotificationService {
     meta?: Record<string, any>;
   }) {
     // remove duplicate ids
-    const uniqueReceiverIds = [...new Set(receiverIds)];
+    const uniqueReceiverIds = await this.scopeBusinessReceiverIds(
+      receiverIds,
+      senderId,
+    );
+
+    if (!uniqueReceiverIds.length) return [];
 
     // create entities
     const notifications = uniqueReceiverIds.map((receiverId) =>
@@ -583,15 +678,15 @@ export class NotificationService {
     };
   }
   async countUnreadByType(receiverId: number, type: NotificationType) {
-    return this.repo.count({
-      where: {
-        receiverId,
-
-        type,
-
-        isRead: false,
-      },
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.type = :type', { type })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.getCount();
   }
   async findByType({
     receiverId,
@@ -610,31 +705,22 @@ export class NotificationService {
 
     tab?: 'unread' | 'read';
   }) {
-    const where: any = {
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.type = :type', { type }),
       receiverId,
+    );
 
-      type,
-    };
+    if (tab === 'unread') qb.andWhere('n.isRead = false');
+    if (tab === 'read') qb.andWhere('n.isRead = true');
 
-    if (tab === 'unread') {
-      where.isRead = false;
-    }
-
-    if (tab === 'read') {
-      where.isRead = true;
-    }
-
-    const [data, total] = await this.repo.findAndCount({
-      where,
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      skip: (page - 1) * limit,
-
-      take: limit,
-    });
+    const [data, total] = await qb
+      .orderBy('n.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
 
     return {
       data,
@@ -657,7 +743,7 @@ export class NotificationService {
     type: NotificationType;
     date: string;
   }) {
-    const rows = await this.repo.manager
+    const qb = this.repo.manager
       .createQueryBuilder()
       .select('e.id', 'senderId')
       .addSelect('e.name', 'senderName')
@@ -680,8 +766,22 @@ export class NotificationService {
       .addGroupBy('e.name')
       .orderBy(`"unreadCount"`, 'DESC')
       .addOrderBy(`"count"`, 'DESC')
-      .addOrderBy('e.name', 'ASC')
-      .getRawMany();
+      .addOrderBy('e.name', 'ASC');
+
+    if (await this.isRestrictedLongAnDirector(receiverId)) {
+      qb.andWhere(':longAnSalesRole = ANY(e.roles)', {
+        longAnSalesRole: SALES_ROLE,
+      }).andWhere(
+        `EXISTS (
+          SELECT 1 FROM employee_region long_an_sender_region
+          WHERE long_an_sender_region.employee_id = e.id
+            AND long_an_sender_region.province_id = :longAnProvinceId
+        )`,
+        { longAnProvinceId: LONG_AN_PROVINCE_ID },
+      );
+    }
+
+    const rows = await qb.getRawMany();
 
     return {
       date,
@@ -736,11 +836,13 @@ export class NotificationService {
     limit?: number;
     date: string;
   }) {
-    const qb = this.repo
+    let qb = this.repo
       .createQueryBuilder('n')
       .where('n.receiverId = :receiverId', { receiverId })
       .andWhere('n.senderId = :senderId', { senderId })
       .andWhere('DATE(n.createdAt) = :date', { date });
+
+    qb = await this.applyReceiverNotificationScope(qb, receiverId);
 
     if (type) {
       qb.andWhere('n.type = :type', { type });
@@ -862,12 +964,17 @@ export class NotificationService {
   }
 
   async getNotificationStats(receiverId: number) {
-    const rows = await this.repo
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
       .createQueryBuilder('n')
       .select('n.type', 'type')
       .addSelect('n.isRead', 'isRead')
       .addSelect('COUNT(*)', 'count')
-      .where('n.receiverId = :receiverId', { receiverId })
+      .where('n.receiverId = :receiverId', { receiverId }),
+      receiverId,
+    );
+
+    const rows = await qb
       .groupBy('n.type')
       .addGroupBy('n.isRead')
       .getRawMany();

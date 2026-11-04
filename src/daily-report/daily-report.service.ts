@@ -127,6 +127,11 @@ export class DailyReportService {
                                 !!id,
                         );
 
+                    receiverIds = await this.notificationService.scopeBusinessReceiverIds(
+                        receiverIds,
+                        dto.employeeId,
+                    );
+
                     // ============================================
                     // FCM TOKENS
                     // ============================================

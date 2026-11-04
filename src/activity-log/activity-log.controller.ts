@@ -22,7 +22,6 @@ import { QueryActivityLogDto } from './dto/query-activity-log.dto';
 export const ACTIVITY_LOG_VIEW_ROLES = [
   HR_ROLE,
   'director',
-  'director_la',
   'troly_gd',
 ];
 
