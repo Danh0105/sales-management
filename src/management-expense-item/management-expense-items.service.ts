@@ -15,10 +15,12 @@ import { Subject } from '../subject/subject.entity';
 import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
 import { SchoolExpenseHistory } from '../school-expenses/entities/school-expense-history.entity';
 import {
+  assertManagementPaidWithinOutside,
   assertNotFinalized,
   buildManagementExpenseItemData,
   computeOtherCostRows,
   normalizeSharedFields,
+  recomputeManagementOutside,
 } from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
 
@@ -39,6 +41,35 @@ export class ManagementExpenseItemsService {
 
     private readonly dataSource: DataSource,
   ) {}
+
+  /** Cùng quy tắc với lưu toàn bộ: tổng Đã chi của môn không vượt tổng Chi ngoài. */
+  private async assertPaidWithinOutside(
+    schoolExpenseId: number,
+    subjectId: number,
+    next: { paidAmount: number; totalOutside: number },
+    excludeId?: number,
+  ) {
+    const rows = await this.managementExpenseItemRepository.find({
+      where: {
+        schoolExpense: { id: schoolExpenseId },
+        subject: { id: subjectId },
+      },
+      relations: { otherCosts: true },
+    });
+
+    let oldPaid = 0;
+    let newPaid = next.paidAmount;
+    let totalOutside = next.totalOutside;
+    for (const row of rows) {
+      const paid = Number(row.paidAmount ?? 0);
+      oldPaid += paid;
+      if (row.id === excludeId) continue;
+      newPaid += paid;
+      totalOutside += recomputeManagementOutside(row);
+    }
+
+    assertManagementPaidWithinOutside({ oldPaid, newPaid, totalOutside });
+  }
 
   /**
    * Bảng "Chi Ngoài" bị khoá sau khi sales admin xác nhận
@@ -141,17 +172,21 @@ export class ManagementExpenseItemsService {
         shared,
       );
 
+    const data = buildManagementExpenseItemData(
+      body,
+      0,
+      body,
+      totalOtherCostAmount,
+      totalOtherTaxAmount,
+    );
+
+    await this.assertPaidWithinOutside(body.schoolExpenseId, body.subjectId, data);
+
     const savedId = await this.dataSource.transaction(async (manager) => {
       const entity = manager.create(ManagementExpenseItem, {
         schoolExpense,
         subject,
-        ...buildManagementExpenseItemData(
-          body,
-          0,
-          body,
-          totalOtherCostAmount,
-          totalOtherTaxAmount,
-        ),
+        ...data,
       });
 
       const saved = await manager.save(entity);
@@ -308,6 +343,13 @@ export class ManagementExpenseItemsService {
         totalOtherCostAmount,
         totalOtherTaxAmount,
       ),
+    );
+
+    await this.assertPaidWithinOutside(
+      data.schoolExpense.id,
+      data.subject.id,
+      { paidAmount: Number(data.paidAmount), totalOutside: Number(data.totalOutside) },
+      id,
     );
 
     const savedId = await this.dataSource.transaction(async (manager) => {

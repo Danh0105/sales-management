@@ -4,6 +4,7 @@ import { ManagementExpenseItem } from '../management-expense-item/management-exp
 import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
 import {
+  assertManagementPaidWithinOutside,
   buildManagementPaymentData,
   buildPaymentDateSourceData,
   canEditLockedDateSource,
@@ -26,6 +27,8 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
     ...row,
     ql1UnitPrice: '27000.00',
     ql1Tax: '2700.00',
+    studentCount: '871',
+    monthsCount: '1',
     paidAmount: '0.00',
     expenseDate: null,
     cashAccount: null,
@@ -137,7 +140,15 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
         9,
         {
           subjectId: 3,
-          revenueItems: [{ rowIndex: 0, content: 'đổi', unitPrice: 1 }],
+          revenueItems: [
+            {
+              rowIndex: 0,
+              content: 'đổi',
+              unitPrice: 1,
+              studentCount: 871,
+              monthsCount: 1,
+            },
+          ],
           schoolExpenseItems,
           managementExpenseItems,
         },
@@ -329,6 +340,239 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       });
 
       await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('thêm dòng, sửa Nội dung và giới hạn Đã chi', () => {
+    // Tổng Chi ngoài của 2 dòng cũ: (27000 - 2700) × 871 × 2 = 42.331.... tính từ đơn giá.
+    const totalOutside = (27000 - 2700) * 871 * 2;
+    const added = (extra: Record<string, unknown> = {}) => ({
+      rowIndex: 2,
+      addedWhileLocked: true,
+      content: ' Thanh toán đợt 1 ',
+      paidAmount: 500000,
+      expenseDate: '2026-11-05',
+      cashAccount: '1111',
+      payer: 'Thủ quỹ',
+      note: 'Ghi chú',
+      // Client cố gửi số tiền chính sách — phải bị bỏ qua.
+      ql1UnitPrice: 99999,
+      ql1Tax: 0,
+      totalPeriods: 100,
+      studentCount: 100,
+      monthsCount: 3,
+      otherCosts: [{ id: 1, name: 'X', unitPrice: 1000, tax: 0 }],
+      ...extra,
+    });
+    const saved = (manager: any) =>
+      manager.create.mock.calls
+        .filter(([entity]: any[]) => entity === ManagementExpenseItem)
+        .map(([, data]: any[]) => data);
+
+    it.each([['accountant'], ['ketoan_congno'], ['thuquy']])(
+      '%s thêm được dòng: chỉ có Nội dung + cột chi, Chi ngoài = 0',
+      async (role) => {
+        const { save, manager, calls } = setup([role], [added()]);
+
+        await save();
+
+        expect(calls(manager.delete)).toHaveLength(0);
+        const [row] = saved(manager);
+        expect(row).toMatchObject({
+          rowIndex: 2,
+          content: 'Thanh toán đợt 1',
+          paidAmount: 500000,
+          remaining: -500000,
+          totalOutside: 0,
+          ql1UnitPrice: 0,
+          ql1Amount: 0,
+          totalPeriods: 0,
+          studentCount: 0,
+          monthsCount: 0,
+          payer: 'Thủ quỹ',
+          note: 'Ghi chú',
+        });
+      },
+    );
+
+    it('dòng chưa lưu không đánh dấu (dòng mặc định) vẫn bị bỏ qua', async () => {
+      const { save, manager } = setup(['accountant'], [bodyRow(undefined, 0)]);
+      await save();
+      expect(saved(manager)).toHaveLength(0);
+    });
+
+    it('dòng trống không tạo bản ghi', async () => {
+      const { save, manager } = setup(
+        ['accountant'],
+        [added({ content: '   ', paidAmount: 0 })],
+      );
+      await save();
+      expect(saved(manager)).toHaveLength(0);
+    });
+
+    it.each([['troly_gd'], ['director']])(
+      '%s chỉ có Ngày chi + Nguồn chi nên không thêm được dòng',
+      async (role) => {
+        const { save, manager } = setup([role], [added()]);
+        await save();
+        expect(saved(manager)).toHaveLength(0);
+      },
+    );
+
+    it('kỳ đã kết thúc không thêm được dòng', async () => {
+      const { save, manager } = setup(['accountant'], [added()], {
+        finalized: true,
+      });
+      await save();
+      expect(saved(manager)).toHaveLength(0);
+    });
+
+    it('Đã chi của dòng mới bằng đúng tổng Còn chi thì lưu được', async () => {
+      const { save, manager } = setup(
+        ['accountant'],
+        [added({ paidAmount: totalOutside })],
+      );
+      await save();
+      expect(saved(manager)).toHaveLength(1);
+    });
+
+    it('Đã chi của dòng mới vượt tổng Còn chi → 400, không ghi gì', async () => {
+      const { save, manager } = setup(
+        ['accountant'],
+        [added({ paidAmount: totalOutside + 1 })],
+      );
+      await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+      expect(manager.create).not.toHaveBeenCalled();
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('sửa Đã chi dòng cũ làm tổng vượt → 400', async () => {
+      const { save } = setup(
+        ['accountant'],
+        [{ ...bodyRow(71, 0), paidAmount: totalOutside + 1 }],
+      );
+      await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('cộng cả dòng cũ và dòng mới khi kiểm giới hạn', async () => {
+      const { save } = setup(
+        ['accountant'],
+        [
+          { ...bodyRow(71, 0), paidAmount: totalOutside - 10 },
+          added({ paidAmount: 11 }),
+        ],
+      );
+      await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('kế toán trưởng cũng bị giới hạn, tính theo số vừa gửi lên', async () => {
+      const { save } = setup(
+        ['ketoan_truong'],
+        // bodyRow gửi đơn giá 99999 × 871 HS.
+        [{ ...bodyRow(71, 0), paidAmount: 99999 * 871 + 1 }],
+      );
+      await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('bảng chưa khoá cũng bị giới hạn theo số vừa gửi lên', async () => {
+      const { save } = setup(
+        ['accountant'],
+        [
+          {
+            ...bodyRow(undefined, 0),
+            ql1UnitPrice: 1000,
+            ql1Tax: 0,
+            paidAmount: 1000 * 871 + 1,
+          },
+        ],
+        { confirmed: false },
+      );
+      await expect(save()).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('bảng chưa khoá: tăng đơn giá và Đã chi cùng lúc trong hạn thì lưu được', async () => {
+      const { save } = setup(
+        ['accountant'],
+        [
+          {
+            ...bodyRow(undefined, 0),
+            ql1UnitPrice: 1000,
+            ql1Tax: 0,
+            paidAmount: 1000 * 871,
+          },
+        ],
+        { confirmed: false },
+      );
+      await expect(save()).resolves.toBeDefined();
+    });
+
+    it('sửa Nội dung dòng thêm riêng đã lưu: chỉ ghi Nội dung của dòng đó', async () => {
+      const { save, manager, calls } = setup(
+        ['accountant'],
+        [
+          { ...bodyRow(71, 0), content: 'không được đổi' },
+          { ...bodyRow(72, 1), content: ' Đã sửa ' },
+        ],
+      );
+      await save();
+      const [[, , row71], [, , row72]] = calls(manager.update);
+      expect(row71).not.toHaveProperty('content');
+      expect(row72).toMatchObject({ content: 'Đã sửa' });
+    });
+
+    it('client không gửi Nội dung thì giữ nguyên', async () => {
+      const { save, manager, calls } = setup(['accountant'], [bodyRow(72, 1)]);
+      await save();
+      expect(calls(manager.update)[0][2]).not.toHaveProperty('content');
+    });
+
+    it.each([['troly_gd'], ['director']])(
+      '%s không sửa được Nội dung dòng thêm riêng khi đã khoá',
+      async (role) => {
+        const { save, manager, calls } = setup(
+          [role],
+          [{ ...bodyRow(72, 1), content: 'không được đổi' }],
+        );
+        await save();
+        expect(calls(manager.update)[0][2]).not.toHaveProperty('content');
+      },
+    );
+
+    it('kỳ đã kết thúc không sửa được Nội dung', async () => {
+      const { save, manager } = setup(
+        ['accountant'],
+        [{ ...bodyRow(72, 1), content: 'không được đổi' }],
+        { finalized: true },
+      );
+      await save();
+      const updates = manager.update.mock.calls.filter(
+        ([entity]: any[]) => entity === ManagementExpenseItem,
+      );
+      expect(updates[0][2]).not.toHaveProperty('content');
+    });
+
+    it('giữ Nội dung dòng thêm riêng khi kế toán trưởng lưu toàn bộ', async () => {
+      const { save, manager } = setup(
+        ['ketoan_truong'],
+        [added({ paidAmount: 10 })],
+      );
+      await save();
+      expect(saved(manager)[0].content).toBe('Thanh toán đợt 1');
+    });
+  });
+
+  describe('assertManagementPaidWithinOutside', () => {
+    it('bảng cũ đã vượt: giữ nguyên hoặc giảm thì lưu được, tăng thì chặn', () => {
+      const totals = (newPaid: number) => ({
+        oldPaid: 1000,
+        newPaid,
+        totalOutside: 800,
+      });
+      expect(() => assertManagementPaidWithinOutside(totals(1000))).not.toThrow();
+      expect(() => assertManagementPaidWithinOutside(totals(900))).not.toThrow();
+      expect(() => assertManagementPaidWithinOutside(totals(1001))).toThrow(
+        BadRequestException,
+      );
     });
   });
 

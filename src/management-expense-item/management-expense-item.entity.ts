@@ -187,6 +187,13 @@ export class ManagementExpenseItem {
   })
   note!: string;
 
+  /** Nội dung riêng của dòng thêm cho Chi Ngoài; dòng đi kèm Doanh Thu dùng Nội dung của Doanh Thu. */
+  @Column({
+    type: 'text',
+    nullable: true,
+  })
+  content!: string | null;
+
   @OneToMany(
     () => ManagementExpenseOtherCost,
     (oc) => oc.managementExpenseItem,

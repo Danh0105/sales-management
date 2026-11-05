@@ -458,8 +458,98 @@ export function buildManagementExpenseItemData(
     collectedDate: item?.collectedDate || null,
     contractAmount: invoiceAmount,
     invoiceAmount,
+    content: normalizeManagementContent(item?.content),
     ...buildManagementPaymentData(item, totalOutside),
   };
+}
+
+function normalizeManagementContent(content: unknown): string | null {
+  if (typeof content !== 'string') return null;
+  return content.trim().slice(0, 500) || null;
+}
+
+/**
+ * Nội dung của dòng thêm riêng (sau dòng Doanh Thu cuối) khi bảng đã khoá. Dòng đi
+ * kèm Doanh Thu dùng Nội dung của Doanh Thu; client không gửi thì giữ nguyên.
+ */
+export function buildStandaloneContentData(
+  item: any,
+  rowIndex: number,
+  revenueCount: number,
+) {
+  if (rowIndex < revenueCount || item?.content === undefined) return {};
+  return { content: normalizeManagementContent(item.content) };
+}
+
+/**
+ * Tổng Chi ngoài của dòng đã lưu, tính lại từ đơn giá như màn hình: `totalOutside`
+ * đã lưu có thể theo công thức cũ. `sharedItem` là dòng Doanh Thu cùng vị trí nếu có.
+ */
+export function recomputeManagementOutside(row: any, sharedItem: any = row) {
+  const shared = normalizeSharedFields(sharedItem, row.rowIndex);
+  const { totalOtherCostAmount, totalOtherTaxAmount } = computeOtherCostRows(
+    (row.otherCosts ?? []).map((cost: any) => ({
+      policyOtherCostId: cost.policyOtherCostId,
+      name: cost.name,
+      unitPrice: cost.unitPrice,
+      tax: cost.tax,
+    })),
+    shared,
+  );
+  return buildManagementExpenseItemData(
+    { ...row, cashAccount: undefined, paidAmount: 0 },
+    row.rowIndex,
+    shared,
+    totalOtherCostAmount,
+    totalOtherTaxAmount,
+  ).totalOutside;
+}
+
+/**
+ * Dòng thêm khi bảng Chi Ngoài đã khoá BBCS: chỉ có Nội dung + cột chi. Bỏ qua mọi
+ * số lượng / đơn giá client gửi lên nên dòng này không làm đổi tổng Chi ngoài.
+ */
+export function buildLockedManagementRowData(item: any, rowIndex: number) {
+  return buildManagementExpenseItemData(
+    {
+      content: item?.content,
+      paidAmount: item?.paidAmount,
+      expenseDate: item?.expenseDate,
+      cashAccount: item?.cashAccount,
+      payer: item?.payer,
+      note: item?.note,
+    },
+    rowIndex,
+    { rowIndex, totalPeriods: 0, studentCount: 0, monthsCount: 0 },
+  );
+}
+
+/** Dòng client đánh dấu là thêm khi bảng đã khoá; bỏ dòng không có gì để lưu. */
+export function pickLockedManagementRows(items: unknown): any[] {
+  return (Array.isArray(items) ? items : []).filter(
+    (item: any) =>
+      item?.addedWhileLocked === true &&
+      !item?.id &&
+      (normalizeManagementContent(item?.content) || toNumber(item?.paidAmount, 0) > 0),
+  );
+}
+
+/**
+ * Tổng Đã chi không được vượt tổng Chi ngoài, tức tổng Còn chi không âm. Chỉ chặn
+ * khi Đã chi tăng, để bảng cũ đã vượt vẫn lưu được phần khác.
+ */
+export function assertManagementPaidWithinOutside(totals: {
+  oldPaid: number;
+  newPaid: number;
+  totalOutside: number;
+}) {
+  const { oldPaid, newPaid, totalOutside } = totals;
+  if (newPaid <= oldPaid + 0.01 || newPaid <= totalOutside + 0.01) return;
+
+  const format = (value: number) => Math.round(value).toLocaleString('vi-VN');
+  throw new BadRequestException(
+    `Đã chi vượt tổng Còn chi: tổng Chi ngoài ${format(totalOutside)}, tổng Đã chi ${format(newPaid)}`,
+  );
 }
 
 /**

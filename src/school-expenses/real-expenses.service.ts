@@ -28,7 +28,12 @@ import { Subject } from '../subject/subject.entity';
 import {
   assertNotFinalized,
   buildManagementExpenseItemData,
+  assertManagementPaidWithinOutside,
+  buildLockedManagementRowData,
   buildManagementPaymentData,
+  buildStandaloneContentData,
+  pickLockedManagementRows,
+  recomputeManagementOutside,
   buildPaymentDateSourceData,
   buildRevenueItemData,
   buildSchoolExpenseItemData,
@@ -473,6 +478,20 @@ export class RealExpensesService {
       );
     }
 
+    const lockedManagementRows = managementPaymentOnly
+      ? pickLockedManagementRows(body.managementExpenseItems)
+      : [];
+
+    if (managementPaymentOnly) {
+      assertManagementPaidWithinOutside(
+        this.lockedPaidTotals(oldManagement, body, lockedManagementRows),
+      );
+    } else if (!managementLocked) {
+      assertManagementPaidWithinOutside(
+        this.submittedPaidTotals(oldManagement, body, oldOtherCostsByRow),
+      );
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
 
     await queryRunner.connect();
@@ -625,13 +644,39 @@ export class RealExpensesService {
             body.managementExpenseItems,
             (item, old) =>
               managementPaymentOnly
-                ? buildManagementPaymentData(
-                    item,
-                    Number(old.totalOutside ?? 0),
-                  )
+                ? {
+                    ...buildManagementPaymentData(
+                      item,
+                      Number(old.totalOutside ?? 0),
+                    ),
+                    ...buildStandaloneContentData(
+                      item,
+                      old.rowIndex,
+                      revenueItems.length,
+                    ),
+                  }
                 : buildPaymentDateSourceData(item),
           )),
         );
+      }
+
+      // Dòng thêm khi bảng đã khoá nằm sau dòng Doanh Thu cuối, nên giữ Nội dung
+      // và số lượng riêng thay vì dùng chung với Doanh Thu.
+      let nextRowIndex = Math.max(
+        revenueItems.length,
+        ...oldManagement.map((row) => Number(row.rowIndex) + 1),
+      );
+      for (const item of lockedManagementRows) {
+        const data = buildLockedManagementRowData(item, nextRowIndex);
+        nextRowIndex += 1;
+        await queryRunner.manager.save(
+          queryRunner.manager.create(ManagementExpenseItem, {
+            schoolExpense,
+            subject,
+            ...data,
+          }),
+        );
+        newManagementSnapshot.push(data);
       }
 
       await queryRunner.manager.save(SchoolExpenseHistory, {
@@ -663,6 +708,84 @@ export class RealExpensesService {
     }
 
     return await this.getItems(schoolExpenseId, body.subjectId);
+  }
+
+  /**
+   * Bảng đã khoá: chính sách giữ nguyên nên tổng Chi ngoài tính từ dòng đã lưu, số
+   * lượng theo dòng Doanh Thu cùng vị trí như FE. Dòng thêm mới không có Chi ngoài.
+   */
+  private lockedPaidTotals(
+    oldManagement: ManagementExpenseItem[],
+    body: any,
+    addedRows: any[],
+  ) {
+    const items: any[] = Array.isArray(body.managementExpenseItems)
+      ? body.managementExpenseItems
+      : [];
+    const revenueItems: any[] = Array.isArray(body.revenueItems) ? body.revenueItems : [];
+    const paidById = new Map(
+      items.filter((item) => item?.id).map((item) => [Number(item.id), item.paidAmount]),
+    );
+
+    let oldPaid = 0;
+    let newPaid = addedRows.reduce((sum, item) => sum + Number(item.paidAmount || 0), 0);
+    let totalOutside = 0;
+    for (const old of oldManagement) {
+      const paid = Number(old.paidAmount ?? 0);
+      oldPaid += paid;
+      newPaid += Number(paidById.get(old.id) ?? paid);
+      totalOutside += recomputeManagementOutside(old, revenueItems[old.rowIndex] ?? old);
+    }
+
+    return { oldPaid, newPaid, totalOutside };
+  }
+
+  /** Bảng chưa khoá hoặc kế toán trưởng: lưu lại toàn bộ dòng, tính theo số vừa gửi lên. */
+  private submittedPaidTotals(
+    oldManagement: ManagementExpenseItem[],
+    body: any,
+    oldOtherCostsByRow: Map<number, any[]>,
+  ) {
+    const items: any[] = Array.isArray(body.managementExpenseItems)
+      ? body.managementExpenseItems
+      : [];
+    const revenueItems: any[] = Array.isArray(body.revenueItems) ? body.revenueItems : [];
+    const schoolItems: any[] = Array.isArray(body.schoolExpenseItems)
+      ? body.schoolExpenseItems
+      : [];
+
+    let newPaid = 0;
+    let totalOutside = 0;
+    items.forEach((item, index) => {
+      const sharedItem = {
+        ...item,
+        ...(schoolItems[index] || {}),
+        ...(revenueItems[index] || {}),
+        rowIndex: index,
+      };
+      const shared = normalizeSharedFields(sharedItem, index);
+      const { totalOtherCostAmount, totalOtherTaxAmount } = computeOtherCostRows(
+        Array.isArray(item?.otherCosts)
+          ? item.otherCosts
+          : oldOtherCostsByRow.get(shared.rowIndex) ?? [],
+        shared,
+      );
+      const data = buildManagementExpenseItemData(
+        item,
+        index,
+        sharedItem,
+        totalOtherCostAmount,
+        totalOtherTaxAmount,
+      );
+      newPaid += data.paidAmount;
+      totalOutside += data.totalOutside;
+    });
+
+    const oldPaid = oldManagement.reduce(
+      (sum, row) => sum + Number(row.paidAmount ?? 0),
+      0,
+    );
+    return { oldPaid, newPaid, totalOutside };
   }
 
   /**
