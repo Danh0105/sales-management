@@ -25,14 +25,10 @@ describe('PolicyContractAccessService', () => {
       { createQueryBuilder: () => qb } as any,
     );
 
-    await service.assertCanRead(
-      { id: 91, roles: ['director_la'] },
-      fileName,
-    );
-    expect(qb.andWhere).toHaveBeenCalledWith(
-      'ward.province_id = :provinceId',
-      { provinceId: 7 },
-    );
+    await service.assertCanRead({ id: 91, roles: ['director_la'] }, fileName);
+    expect(qb.andWhere).toHaveBeenCalledWith('ward.province_id = :provinceId', {
+      provinceId: 7,
+    });
   });
 
   it('nhân viên sales chỉ đọc hợp đồng của trường mình phụ trách', async () => {
@@ -64,4 +60,42 @@ describe('PolicyContractAccessService', () => {
       service.assertCanRead({ id: 18, roles: ['sales'] }, fileName),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
+
+  it('giữ quyền truy cập file legacy có tên an toàn', async () => {
+    const qb = queryBuilder();
+    const service = new PolicyContractAccessService(
+      {} as any,
+      {} as any,
+      {} as any,
+      { createQueryBuilder: () => qb } as any,
+    );
+
+    await service.assertCanRead(
+      { id: 91, roles: ['director_la'] },
+      'hop-dong-cu.pdf',
+    );
+
+    expect(qb.where).toHaveBeenCalledWith(
+      expect.stringContaining('contract_file_url'),
+      {
+        url: '/uploads/policy-contracts/hop-dong-cu.pdf',
+      },
+    );
+  });
+
+  it.each(['../secret.pdf', '..\\secret.pdf', 'payload.exe'])(
+    'từ chối tên file không an toàn: %s',
+    async (unsafeName) => {
+      const service = new PolicyContractAccessService(
+        {} as any,
+        {} as any,
+        {} as any,
+        { createQueryBuilder: jest.fn() } as any,
+      );
+
+      await expect(
+        service.assertCanRead({ id: 91, roles: ['director_la'] }, unsafeName),
+      ).rejects.toThrow('Không tìm thấy file');
+    },
+  );
 });

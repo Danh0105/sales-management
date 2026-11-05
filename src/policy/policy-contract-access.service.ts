@@ -12,10 +12,27 @@ import { Repository } from 'typeorm';
 import { Employee } from '../employee/employee.entity';
 import { AuthUser } from '../type/auth-user.type';
 import { Policy } from './entities/policy.entity';
-import { PolicyContractArchiveService } from './policy-contract-archive.service';
 import { resolvePolicyScope } from './policy-scope';
 
 const CONTRACT_PREFIX = '/uploads/policy-contracts/';
+const CONTRACT_EXTENSIONS = new Set(['.pdf', '.jpg', '.jpeg', '.png']);
+
+function isSafeContractName(name: string): boolean {
+  if (
+    !name ||
+    name.length > 255 ||
+    name === '.' ||
+    name === '..' ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name.includes('\0')
+  ) {
+    return false;
+  }
+
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && CONTRACT_EXTENSIONS.has(name.slice(dot).toLowerCase());
+}
 
 /** Quyền đọc file hợp đồng phải giống đúng phạm vi xem policy chứa file đó. */
 @Injectable()
@@ -66,7 +83,10 @@ export class PolicyContractAccessService {
   }
 
   async assertCanRead(user: AuthUser | undefined, name: string): Promise<void> {
-    if (!PolicyContractArchiveService.isValidName(name)) {
+    // File mới dùng UUID, nhưng dữ liệu cũ có thể dùng tên an toàn không phải
+    // UUID. Giữ tương thích cho file còn ở hot storage; archive vẫn áp dụng
+    // quy tắc UUID chặt hơn của PolicyContractArchiveService.
+    if (!isSafeContractName(name)) {
       throw new NotFoundException('Không tìm thấy file');
     }
 
