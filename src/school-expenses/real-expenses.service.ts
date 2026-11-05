@@ -39,9 +39,6 @@ import {
 } from './expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
 
-/** Giữ đồng bộ với `SALESADMIN_ROLES` trong real-expenses.controller.ts. */
-const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-
 /**
  * Ghi một nhóm cột lên các dòng cũ, khớp theo `id` client gửi kèm (không theo
  * vị trí) — xoá / thêm dòng ở client không làm ghi nhầm sang dòng khác; dòng
@@ -456,13 +453,6 @@ export class RealExpensesService {
       !managementPaymentOnly &&
       canEditLockedDateSource(user?.roles);
 
-    // Sales admin chỉ được sửa DUY NHẤT bảng "Chi Ngoài" — dùng chung endpoint
-    // save-all (đỡ phải tách API riêng) nhưng bỏ qua hoàn toàn phần doanh thu
-    // và chi trường của body, giữ nguyên dữ liệu cũ.
-    const isSalesAdmin = (user?.roles ?? []).some((r) =>
-      SALESADMIN_ROLES.includes(r),
-    );
-
     // Doanh thu đã "Xuất hóa đơn" → khóa: không được thêm dòng, không tự mở khóa.
     // Kế toán trưởng được bỏ qua (mở khóa / thêm dòng).
     const lockedRevenueRows = new Set(
@@ -470,8 +460,7 @@ export class RealExpensesService {
         .filter((item) => item.invoiceLocked)
         .map((item) => item.rowIndex),
     );
-    const revenueLocked =
-      !isSalesAdmin && !isChiefAccountant && lockedRevenueRows.size > 0;
+    const revenueLocked = !isChiefAccountant && lockedRevenueRows.size > 0;
 
     if (
       revenueLocked &&
@@ -490,25 +479,23 @@ export class RealExpensesService {
 
     try {
       // Delete old items for this subject
-      if (!isSalesAdmin) {
-        await queryRunner.manager.delete(RevenueItem, {
-          schoolExpense: {
-            id: schoolExpenseId,
-          },
-          subject: {
-            id: body.subjectId,
-          },
-        });
+      await queryRunner.manager.delete(RevenueItem, {
+        schoolExpense: {
+          id: schoolExpenseId,
+        },
+        subject: {
+          id: body.subjectId,
+        },
+      });
 
-        await queryRunner.manager.delete(SchoolExpenseItem, {
-          schoolExpense: {
-            id: schoolExpenseId,
-          },
-          subject: {
-            id: body.subjectId,
-          },
-        });
-      }
+      await queryRunner.manager.delete(SchoolExpenseItem, {
+        schoolExpense: {
+          id: schoolExpenseId,
+        },
+        subject: {
+          id: body.subjectId,
+        },
+      });
 
       if (!managementLocked) {
         await queryRunner.manager.delete(ManagementExpenseItem, {
@@ -521,16 +508,12 @@ export class RealExpensesService {
         });
       }
 
-      const revenueItems = isSalesAdmin
-        ? []
-        : Array.isArray(body.revenueItems)
-          ? body.revenueItems
-          : [];
-      const schoolExpenseItems = isSalesAdmin
-        ? []
-        : Array.isArray(body.schoolExpenseItems)
-          ? body.schoolExpenseItems
-          : [];
+      const revenueItems = Array.isArray(body.revenueItems)
+        ? body.revenueItems
+        : [];
+      const schoolExpenseItems = Array.isArray(body.schoolExpenseItems)
+        ? body.schoolExpenseItems
+        : [];
       const managementExpenseItems = managementLocked
         ? []
         : Array.isArray(body.managementExpenseItems)

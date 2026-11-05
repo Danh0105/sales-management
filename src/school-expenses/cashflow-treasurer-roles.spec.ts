@@ -89,13 +89,13 @@ describe('Quản lý thu chi — quyền của thủ quỹ', () => {
     expect(allows(RealExpensesController, 'saveAll', ['sales'])).toBe(false);
   });
 
-  it('sales admin vẫn sửa được Chi Ngoài, kế toán vẫn đọc được', () => {
-    for (const method of ['create', 'update', 'remove', 'findAll']) {
-      for (const role of ['saleadmin', 'accountant', 'director']) {
-        expect(allows(ManagementExpenseItemsController, method, [role])).toBe(
-          true,
-        );
+  it('sales admin chỉ đọc Chi Ngoài, kế toán vẫn sửa được', () => {
+    for (const method of ['create', 'update', 'remove']) {
+      expect(allows(ManagementExpenseItemsController, method, ['saleadmin'])).toBe(false);
+      for (const role of ['accountant', 'director']) {
+        expect(allows(ManagementExpenseItemsController, method, [role])).toBe(true);
       }
     }
+    expect(allows(ManagementExpenseItemsController, 'findAll', ['saleadmin'])).toBe(true);
   });
 });

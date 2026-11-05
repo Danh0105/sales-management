@@ -15,23 +15,16 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  CASHFLOW_READ_ROLES,
+  CASHFLOW_WRITE_ROLES,
+} from '../school-expenses/cashflow-roles';
 
 type RequestWithUser = Request & { user: AuthUser };
 
-/** Sales admin chỉnh sửa duy nhất bảng "Chi Ngoài" này (xem RealExpensesController). */
-const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-
 @Controller('management-expense-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-  'thuquy',
-  ...SALESADMIN_ROLES,
-)
+@Roles(...CASHFLOW_WRITE_ROLES)
 export class ManagementExpenseItemsController {
   constructor(
     private readonly managementExpenseItemsService: ManagementExpenseItemsService,
@@ -46,11 +39,13 @@ export class ManagementExpenseItemsController {
   }
 
   @Get()
+  @Roles(...CASHFLOW_READ_ROLES)
   findAll(@Query() query: any) {
     return this.managementExpenseItemsService.findAll(query);
   }
 
   @Get(':id')
+  @Roles(...CASHFLOW_READ_ROLES)
   findOne(@Param('id') id: string) {
     return this.managementExpenseItemsService.findOne(Number(id));
   }

@@ -1,9 +1,7 @@
-import { ExecutionContext } from '@nestjs/common';
+import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RolesGuard } from '../auth/role-guard';
-import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
-import { RevenueItem } from '../revenue-item/revenue-item.entity';
-import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
+import { ExpensePeriodsController } from '../expense-periods/expense-periods.controller';
 import { RealExpensesController } from './real-expenses.controller';
 import { RealExpensesService } from './real-expenses.service';
 
@@ -27,7 +25,7 @@ const repo = (value: any) => ({
 
 /**
  * Sales admin mở trường chưa có bảng chi phí trong kỳ: tạo được bảng rỗng để
- * nhập Chi Ngoài, ngoài ra không có thêm quyền ghi nào.
+ * xem, ngoài ra chỉ còn quyền xác nhận đúng BBCS.
  */
 describe('Quản lý thu chi — sales admin tạo bảng chi phí rỗng', () => {
   it.each(SALES_ADMINS)('%s gọi được POST /school-expenses', (role) => {
@@ -37,6 +35,7 @@ describe('Quản lý thu chi — sales admin tạo bảng chi phí rỗng', () =
   it.each(SALES_ADMINS)('%s vẫn không sửa / xoá được bảng', (role) => {
     expect(allows('update', [role])).toBe(false);
     expect(allows('remove', [role])).toBe(false);
+    expect(allows('saveAll', [role])).toBe(false);
   });
 
   it('role khác (sales) vẫn bị chặn', () => {
@@ -80,52 +79,32 @@ describe('Quản lý thu chi — sales admin tạo bảng chi phí rỗng', () =
     );
   });
 
-  it('lưu trên bảng mới chỉ chèn Chi Ngoài, không đụng doanh thu / chi trường', async () => {
-    const manager = {
-      delete: jest.fn().mockResolvedValue(undefined),
-      create: jest.fn((_entity: any, data: any) => data),
-      save: jest.fn(async (entity: any, data?: any) => data ?? entity),
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const queryRunner = {
-      manager,
-      connect: jest.fn(),
-      startTransaction: jest.fn(),
-      commitTransaction: jest.fn(),
-      rollbackTransaction: jest.fn(),
-      release: jest.fn(),
-    };
-    const service = new RealExpensesService(
-      repo({ id: 9, school: { id: 5 }, finalized: false }) as any,
-      repo(null) as any,
-      repo(null) as any,
-      repo([]) as any,
-      repo([]) as any,
-      repo([]) as any,
-      repo({ id: 3, schoolId: 5 }) as any,
-      repo(null) as any,
-      { createQueryRunner: () => queryRunner } as any,
-    );
-    jest.spyOn(service, 'getItems').mockResolvedValue({} as any);
+});
 
-    await service.saveAll(
-      9,
-      {
-        subjectId: 3,
-        revenueItems: [{ rowIndex: 0, unitPrice: 100 }],
-        schoolExpenseItems: [{ rowIndex: 0, paidAmount: 100 }],
-        managementExpenseItems: [{ rowIndex: 0, ql1UnitPrice: 50 }],
-      },
-      { id: 16, name: 'Sales admin', roles: ['saleadmin'] } as any,
-    );
+describe('Kỳ chi phí — sales admin tạo kỳ để mở bảng rỗng', () => {
+  const makeController = () => {
+    const service = { create: jest.fn().mockResolvedValue({ id: 77 }) };
+    return { controller: new ExpensePeriodsController(service as any), service };
+  };
+  const reqOf = (roles: string[]) => ({ user: { roles } });
 
-    const entitiesCreated = manager.create.mock.calls.map(([entity]) => entity);
-    expect(entitiesCreated).toContain(ManagementExpenseItem);
-    expect(entitiesCreated).not.toContain(RevenueItem);
-    expect(entitiesCreated).not.toContain(SchoolExpenseItem);
+  it('tạo được kỳ theo tháng thật', async () => {
+    const { controller, service } = makeController();
+    await controller.create({ month: 11, year: 2026, schoolId: 5 }, reqOf(['saleadmin']));
+    expect(service.create).toHaveBeenCalledTimes(1);
+  });
 
-    const entitiesDeleted = manager.delete.mock.calls.map(([entity]) => entity);
-    expect(entitiesDeleted).toEqual([ManagementExpenseItem]);
-    expect(queryRunner.commitTransaction).toHaveBeenCalled();
+  it.each([[undefined], [13], [0]])('không thêm được dòng tuỳ chỉnh (month=%s)', (month) => {
+    const { controller, service } = makeController();
+    expect(() =>
+      controller.create({ month, year: 2026, schoolId: 5 }, reqOf(['saleadmin'])),
+    ).toThrow(ForbiddenException);
+    expect(service.create).not.toHaveBeenCalled();
+  });
+
+  it('kế toán vẫn thêm được dòng tuỳ chỉnh', async () => {
+    const { controller, service } = makeController();
+    await controller.create({ year: 2026, schoolId: 5 }, reqOf(['accountant']));
+    expect(service.create).toHaveBeenCalledTimes(1);
   });
 });
