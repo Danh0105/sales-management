@@ -28,20 +28,25 @@ describe('DailyReportProvinceService', () => {
     ).resolves.toEqual({ provinceId: 7, schoolId: null });
   });
 
-  it('nhân viên đa tỉnh không có trường/GPS thì không tự gán Long An', async () => {
-    const dataSource = {
-      query: jest.fn().mockResolvedValue([
-        { province_id: 7 },
-        { province_id: 8 },
-      ]),
-    };
-    const service = new DailyReportProvinceService(dataSource as any);
+  it.each([18, 28, 126, 132])(
+    'nhân viên đa tỉnh #%s không có trường/GPS thì không tự gán Long An',
+    async (employeeId) => {
+      const dataSource = {
+        query: jest.fn().mockResolvedValue([
+          { province_id: 7 },
+          { province_id: 8 },
+        ]),
+      };
+      const service = new DailyReportProvinceService(dataSource as any);
 
-    await expect(service.resolve(126, { tasks: [] })).resolves.toEqual({
-      provinceId: null,
-      schoolId: null,
-    });
-  });
+      await expect(service.resolve(employeeId, { tasks: [] })).resolves.toEqual(
+        {
+          provinceId: null,
+          schoolId: null,
+        },
+      );
+    },
+  );
 
   it('nhân viên chỉ có Long An dùng tỉnh duy nhất làm fallback', async () => {
     const dataSource = {
