@@ -27,6 +27,7 @@ import { NotificationModule }
 import { FcmModule }
     from '../fcm/fcm.module';
 import { ReportMessage } from './entities/report-message.entity';
+import { DailyReportProvinceService } from './daily-report-province.service';
 
 @Module({
 
@@ -48,6 +49,7 @@ import { ReportMessage } from './entities/report-message.entity';
 
     providers: [
         DailyReportService,
+        DailyReportProvinceService,
         ReportGateway,
     ],
 

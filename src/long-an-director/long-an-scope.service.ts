@@ -113,7 +113,7 @@ export class LongAnScopeService {
   reportInScope(reportId: unknown) {
     return this.exists(
       `FROM daily_reports la_report
-       WHERE la_report.id = $1 AND ${longAnOnlyStaffSql('la_report."employeeId"')}`,
+       WHERE la_report.id = $1 AND la_report.province_id = ${LA_PROVINCE_ID}`,
       reportId,
     );
   }

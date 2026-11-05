@@ -117,6 +117,18 @@ describe('LongAnDirectorGuard', () => {
     );
   });
 
+  it('nhân viên kiêm tỉnh vẫn mở được danh sách báo cáo nhưng service phải lọc từng báo cáo', async () => {
+    const scopeService = scope(true);
+    const { run } = setup(['director_la'], scopeService);
+    await expect(
+      run('DailyReportController', 'findByEmployeeGroupByWeek', {
+        params: { employeeId: '18' },
+      }),
+    ).resolves.toBe(true);
+    expect(scopeService.employeeInScope).toHaveBeenCalledWith('18');
+    expect(scopeService.employeeIsLongAnOnly).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['PolicyController', 'findOne', { params: { id: '5' } }],
     ['PolicyController', 'directorUpdatePolicy', { params: { id: '5' } }],
