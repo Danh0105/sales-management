@@ -15,7 +15,8 @@ import { ManagementExpenseItem } from './management-expense-item.entity';
  * Chi tiết từng khoản "Chi khác" của một dòng chi ngoài
  * (management_expense_items) → 1 dòng có N khoản chi khác.
  *
- * amount = unitPrice * studentCount * monthsCount (BE tự tính, không tin FE).
+ * amount = unitPrice * (studentCount || totalPeriods) * monthsCount
+ * (BE tự tính, không tin FE; ưu tiên studentCount khi có cả hai).
  */
 @Entity('management_expense_other_costs')
 @Index(['managementExpenseItemId'])
@@ -53,7 +54,7 @@ export class ManagementExpenseOtherCost {
     @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
     amount!: number;
 
-    /** Đơn giá thuế (tuyệt đối). taxAmount = tax × studentCount × monthsCount. */
+    /** Đơn giá thuế (tuyệt đối). taxAmount = tax × billingQuantity. */
     @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
     tax!: number;
 

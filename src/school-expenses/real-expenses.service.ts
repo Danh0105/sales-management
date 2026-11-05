@@ -433,6 +433,7 @@ export class RealExpensesService {
           policyOtherCostId: oc.policyOtherCostId,
           name: oc.name,
           unitPrice: oc.unitPrice,
+          tax: oc.tax,
         })),
       );
     }

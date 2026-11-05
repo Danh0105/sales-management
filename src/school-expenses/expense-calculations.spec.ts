@@ -11,7 +11,7 @@ import {
 } from './expense-calculations';
 
 describe('computeOtherCostRows', () => {
-  const shared = { studentCount: 100, monthsCount: 3 };
+  const shared = { totalPeriods: 0, studentCount: 100, monthsCount: 3 };
 
   it('tính amount = unitPrice * studentCount * monthsCount', () => {
     const { rows, totalOtherCostAmount } = computeOtherCostRows(
@@ -82,6 +82,29 @@ describe('computeOtherCostRows', () => {
     expect(rows[1].taxAmount).toBe(70 * 100 * 3); // 21000
     expect(totalOtherCostAmount).toBe(360000);
     expect(totalOtherTaxAmount).toBe(15000 + 21000); // 36000
+  });
+
+  it('không có số học sinh: tính Chi khác theo số tiết × số tháng', () => {
+    const { rows, totalOtherCostAmount, totalOtherTaxAmount } =
+      computeOtherCostRows(
+        [{ id: 15, name: 'KT', unitPrice: 500, tax: 50 }],
+        { totalPeriods: 60, studentCount: 0, monthsCount: 2 },
+      );
+
+    expect(rows[0].amount).toBe(60 * 2 * 500);
+    expect(rows[0].taxAmount).toBe(60 * 2 * 50);
+    expect(totalOtherCostAmount).toBe(60 * 2 * 500);
+    expect(totalOtherTaxAmount).toBe(60 * 2 * 50);
+  });
+
+  it('có cả số học sinh và số tiết: Chi khác ưu tiên số học sinh', () => {
+    const { rows } = computeOtherCostRows(
+      [{ id: 15, name: 'KT', unitPrice: 500, tax: 50 }],
+      { totalPeriods: 60, studentCount: 30, monthsCount: 2 },
+    );
+
+    expect(rows[0].amount).toBe(30 * 2 * 500);
+    expect(rows[0].taxAmount).toBe(30 * 2 * 50);
   });
 
   it('tax mặc định 0 khi không gửi', () => {
@@ -256,6 +279,57 @@ describe('buildManagementExpenseItemData (fold Chi khác vào totalOutside/remai
     expect(() =>
       buildManagementExpenseItemData({ cashAccount: '111' }),
     ).toThrow(BadRequestException);
+  });
+
+  it('không có số học sinh: Chi QL tính theo số tiết × số tháng', () => {
+    const item = {
+      totalPeriods: 163,
+      studentCount: 0,
+      monthsCount: 1,
+      ql1UnitPrice: 54000,
+      ql2UnitPrice: 10000,
+      ql2Tax: 1000,
+    };
+    const data = buildManagementExpenseItemData(item);
+    expect(data.ql1Amount).toBe(54000 * 163); // 8802000
+    expect(data.ql2Amount).toBe(10000 * 163);
+    expect(data.ql2TaxAmount).toBe(1000 * 163);
+    expect(data.totalOutside).toBe(8802000 + 9000 * 163);
+  });
+
+  it('có cả số học sinh và số tiết: ưu tiên số học sinh', () => {
+    const item = {
+      totalPeriods: 163,
+      studentCount: 30,
+      monthsCount: 2,
+      ql1UnitPrice: 1000,
+    };
+    const data = buildManagementExpenseItemData(item);
+    expect(data.ql1Amount).toBe(1000 * 30 * 2);
+  });
+
+  it('Chi khác theo số tiết có tổng thực chi = số tiết × tháng × (đơn giá - thuế)', () => {
+    const item = {
+      totalPeriods: 60,
+      studentCount: 0,
+      monthsCount: 2,
+    };
+    const { totalOtherCostAmount, totalOtherTaxAmount } =
+      computeOtherCostRows(
+        [{ id: 15, name: 'KT', unitPrice: 500, tax: 50 }],
+        item,
+      );
+
+    const data = buildManagementExpenseItemData(
+      item,
+      0,
+      item,
+      totalOtherCostAmount,
+      totalOtherTaxAmount,
+    );
+
+    expect(data.totalOutside).toBe(60 * 2 * (500 - 50));
+    expect(data.remaining).toBe(60 * 2 * (500 - 50));
   });
 });
 

@@ -45,7 +45,8 @@ const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 /**
  * Chuẩn hóa + validate + tính amount cho mảng "Chi khác" của 1 dòng.
- * - amount = unitPrice * studentCount * monthsCount (BE tự tính).
+ * - amount = unitPrice * billingQuantity (BE tự tính).
+ * - billingQuantity = (studentCount > 0 ? studentCount : totalPeriods) * monthsCount.
  * - Chấp nhận alias `id` → policyOtherCostId với ID số nguyên hợp lệ.
  * - Bỏ qua `id` tạm dạng timestamp của FE (không phải ID chính sách).
  * - Cấm: unitPrice âm, amount âm, NaN/Infinity, tên trống khi không có policyOtherCostId,
@@ -53,7 +54,11 @@ const POSTGRES_INTEGER_MAX = 2_147_483_647;
  */
 export function computeOtherCostRows(
   rawList: any[],
-  shared: { studentCount: number; monthsCount: number },
+  shared: {
+    totalPeriods: number;
+    studentCount: number;
+    monthsCount: number;
+  },
 ): {
   rows: NormalizedOtherCost[];
   totalOtherCostAmount: number;
@@ -61,6 +66,7 @@ export function computeOtherCostRows(
 } {
   const rows: NormalizedOtherCost[] = [];
   const seenPolicyIds = new Set<number>();
+  const quantity = revenueBillingQuantity(shared);
 
   for (const raw of rawList ?? []) {
     const hasExplicitPolicyId =
@@ -130,8 +136,8 @@ export function computeOtherCostRows(
       throw new BadRequestException('otherCosts.tax không được âm');
     }
 
-    const amount = unitPrice * shared.studentCount * shared.monthsCount;
-    const taxAmount = tax * shared.studentCount * shared.monthsCount;
+    const amount = unitPrice * quantity;
+    const taxAmount = tax * quantity;
     if (!Number.isFinite(amount) || amount < 0) {
       throw new BadRequestException('otherCosts.amount không hợp lệ');
     }
@@ -420,10 +426,13 @@ export function buildManagementExpenseItemData(
     invoiceAmount,
   });
 
-  const ql1Amount = ql1UnitPrice * shared.studentCount * shared.monthsCount;
-  const ql2Amount = ql2UnitPrice * shared.studentCount * shared.monthsCount;
-  const ql1TaxAmount = ql1Tax * shared.studentCount * shared.monthsCount;
-  const ql2TaxAmount = ql2Tax * shared.studentCount * shared.monthsCount;
+  // Chi QL tính theo cùng số lượng với doanh thu: có HS thì theo HS,
+  // không thì theo số tiết (× số tháng).
+  const quantity = revenueBillingQuantity(shared);
+  const ql1Amount = ql1UnitPrice * quantity;
+  const ql2Amount = ql2UnitPrice * quantity;
+  const ql1TaxAmount = ql1Tax * quantity;
+  const ql2TaxAmount = ql2Tax * quantity;
 
   // totalTaxAmount = thuế QL1 + QL2 + toàn bộ thuế Chi khác.
   const totalTaxAmount = ql1TaxAmount + ql2TaxAmount + totalOtherTaxAmount;
