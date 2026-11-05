@@ -5,8 +5,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * hồ sơ nhân viên. Nullable có chủ ý: nhân viên đa tỉnh mà không xác định được
  * địa bàn thì giữ NULL và không lọt vào Long An.
  */
-export class AddDailyReportProvince1795400000000 implements MigrationInterface {
-  name = 'AddDailyReportProvince1795400000000';
+export class AddDailyReportProvince1795450000000 implements MigrationInterface {
+  name = 'AddDailyReportProvince1795450000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
