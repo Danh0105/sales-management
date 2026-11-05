@@ -43,6 +43,7 @@ import { TimetableImportModule } from './timetable-import/timetable-import.modul
 import { VirtualTryOnModule } from './virtual-tryon/virtual-tryon.module';
 import { SchoolLocationModule } from './school-location/school-location.module';
 import { ActivityLogModule } from './activity-log/activity-log.module';
+import { LongAnDirectorModule } from './long-an-director/long-an-director.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { RecruitmentModule } from './recruitment/recruitment.module';
@@ -67,6 +68,7 @@ import { resolveDatabaseOptions } from './database/database-options';
       envFilePath: '.env',
     }),
     ActivityLogModule,
+    LongAnDirectorModule,
     EmployeeModule,
     AuthModule,
     SchoolsModule,

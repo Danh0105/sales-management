@@ -95,6 +95,7 @@ export class WeeklyPlanService {
                 const userIds = await this.notificationService.scopeBusinessReceiverIds(
                     candidateUserIds,
                     dto.employeeId,
+                    { kind: 'report' },
                 );
 
                 const tokenEntities =
@@ -273,6 +274,7 @@ export class WeeklyPlanService {
                 const userIds = await this.notificationService.scopeBusinessReceiverIds(
                     candidateUserIds,
                     dto.employeeInfo?.sub,
+                    { kind: 'report' },
                 );
 
                 const tokenEntities =

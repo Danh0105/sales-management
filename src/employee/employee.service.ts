@@ -16,6 +16,11 @@ import { EmployeeFace } from './employee-face.entity';
 import { AvatarStorageService } from '../teaching/avatar-storage.service';
 import { assertNoTeacherRoleGrant, DEV_ROLE } from './employee-roles';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  isRestrictedLongAnDirector,
+  LONG_AN_STAFF_ROLES,
+  longAnOnlyStaffSql,
+} from '../long-an-director/long-an-scope.service';
 
 /**
  * Bỏ mật khẩu băm khỏi dữ liệu trả về. Các endpoint đọc ở đây trả nguyên
@@ -111,6 +116,8 @@ export class EmployeeService {
     }
   }
   findAll(user: AuthUser) {
+    if (isRestrictedLongAnDirector(user.roles)) return this.findLongAnStaff();
+
     const query = this.repo
       .createQueryBuilder('employee')
       .select([
@@ -138,7 +145,45 @@ export class EmployeeService {
     return query.getMany();
   }
 
+  /**
+   * Danh sách cho Giám đốc Long An: chỉ nhân viên khu vực, không kèm thông tin
+   * ngân hàng. `longAnOnly` = không kiêm tỉnh khác, mới được xem báo cáo.
+   */
+  private async findLongAnStaff() {
+    const staff = await this.repo
+      .createQueryBuilder('employee')
+      .select([
+        'employee.id',
+        'employee.name',
+        'employee.email',
+        'employee.phone',
+        'employee.roles',
+      ])
+      .innerJoin('employee.employeeRegions', 'employeeRegion')
+      .where('employeeRegion.province_id = :provinceId', { provinceId: 7 })
+      .andWhere('employee.isActive = :isActive', { isActive: true })
+      .andWhere('employee.roles && ARRAY[:...staffRoles]::text[]', {
+        staffRoles: LONG_AN_STAFF_ROLES,
+      })
+      .orderBy('employee.name', 'ASC')
+      .getMany();
+    if (!staff.length) return [];
+
+    const rows: { id: number }[] = await this.repo.query(
+      `SELECT la_self.id FROM employee la_self
+       WHERE la_self.id = ANY($1) AND ${longAnOnlyStaffSql('la_self.id')}`,
+      [staff.map((employee) => employee.id)],
+    );
+    const longAnOnly = new Set(rows.map((row) => Number(row.id)));
+    return staff.map((employee) => ({
+      ...employee,
+      longAnOnly: longAnOnly.has(Number(employee.id)),
+    }));
+  }
+
   findSalesEmployees(user: AuthUser) {
+    if (isRestrictedLongAnDirector(user.roles)) return this.findLongAnStaff();
+
     const query = this.repo
       .createQueryBuilder('employee')
       .select([

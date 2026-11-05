@@ -5,6 +5,7 @@ import { UpdateReportDto } from './dto/update-report.dto';
 import { CreateReportMessageDto } from './dto/create-report-message';
 import { Employee } from '../employee/employee.entity';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
 type RequestWithUser = Request & {
     user: Employee;
@@ -55,8 +56,10 @@ export class DailyReportController {
         return this.service.findByEmployeeGroupByWeek(employeeId);
     }
     @Get('today/employees')
-    async getEmployeesReportedToday() {
-        return this.service.findEmployeesReportedToday();
+    async getEmployeesReportedToday(@Req() req: RequestWithUser) {
+        return this.service.findEmployeesReportedToday(
+            isRestrictedLongAnDirector(req.user?.roles),
+        );
     }
     @Delete('task/:id')
     removeTask(@Param('id') id: number) {

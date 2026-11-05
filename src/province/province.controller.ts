@@ -16,6 +16,8 @@ import { EmployeeRegionService } from 'src/employee-region-school/employee-regio
 import { RegionService } from 'src/region/region.service';
 import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
 import { HandoverRegionDto } from 'src/employee-region-school/dto/handover-region.dto';
+import { LA_PROVINCE_ID } from '../policy/policy-scope';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
 @UseGuards(JwtAuthGuard)
 @Controller('provinces')
@@ -54,8 +56,14 @@ export class ProvinceController {
     }
 
     @Get('provinces-by-employee/:employeeId')
-    getByEmployee(@Param('employeeId') employeeId: number) {
-        return this.employeeRegionService.getProvincesByEmployee(Number(employeeId));
+    async getByEmployee(@Param('employeeId') employeeId: number, @Req() req) {
+        const provinces = await this.employeeRegionService.getProvincesByEmployee(
+            Number(employeeId),
+        );
+        // Nhân viên kiêm nhiều tỉnh: Giám đốc Long An chỉ thấy tỉnh của mình.
+        return isRestrictedLongAnDirector(req.user?.roles)
+            ? provinces.filter((province: any) => Number(province.id) === LA_PROVINCE_ID)
+            : provinces;
     }
 
     @Get('available-provinces/:employeeId')

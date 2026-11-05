@@ -8,12 +8,15 @@ import {
     Delete,
     Query,
     UseGuards,
+    Req,
 } from '@nestjs/common';
 import { WardService } from './ward.service';
 import { CreateWardDto } from './dto/create-ward.dto';
 import { UpdateWardDto } from './dto/update-ward.dto';
 import { EmployeeRegionService } from 'src/employee-region-school/employee-region.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { LA_PROVINCE_ID } from '../policy/policy-scope';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
 @UseGuards(JwtAuthGuard)
 @Controller('wards')
@@ -54,7 +57,11 @@ export class WardController {
     getWardsByEmployee(
         @Param('employeeId') employeeId: number,
         @Query('provinceId') provinceId?: number,
+        @Req() req?: any,
     ) {
+        if (isRestrictedLongAnDirector(req?.user?.roles)) {
+            return this.service.getWardsByEmployee(Number(employeeId), LA_PROVINCE_ID);
+        }
         return this.service.getWardsByEmployee(
             Number(employeeId),
             provinceId ? Number(provinceId) : undefined,

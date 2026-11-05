@@ -19,7 +19,6 @@ export type ExpenseNotiScope = 'general' | 'overdue' | 'all';
 
 const EXPENSE_SUGGEST_TYPE = 'EXPENSE_REQUEST';
 const OVERDUE_KIND = 'overdue';
-const LONG_AN_PROVINCE_ID = 7;
 
 @Injectable()
 export class ExpenseNotificationService {
@@ -40,7 +39,7 @@ export class ExpenseNotificationService {
             scope: ExpenseNotiScope;
             tab?: 'unread' | 'read';
             employeeId?: number;
-            longAnSalesOnly?: boolean;
+            restrictedLongAnDirector?: boolean;
         },
     ) {
         qb.where('n."receiverId" = :receiverId', { receiverId: opts.receiverId })
@@ -62,27 +61,14 @@ export class ExpenseNotificationService {
             });
         }
 
-        if (opts.longAnSalesOnly) {
-            qb.andWhere(
-                `EXISTS (
-                    SELECT 1
-                    FROM employee long_an_sales
-                    INNER JOIN employee_region long_an_region
-                        ON long_an_region.employee_id = long_an_sales.id
-                    WHERE long_an_sales.id = (n.meta->>'employeeId')::int
-                        AND long_an_sales."isActive" = true
-                        AND :salesRole = ANY(long_an_sales.roles)
-                        AND long_an_region.province_id = :longAnProvinceId
-                )`,
-                { salesRole: 'sales', longAnProvinceId: LONG_AN_PROVINCE_ID },
-            );
-        }
+        // Giám đốc Long An không có chức năng Đề xuất chi.
+        if (opts.restrictedLongAnDirector) qb.andWhere('1 = 0');
 
         return qb;
     }
 
     /** Đếm cho badge tab: tổng & chưa đọc theo từng scope. */
-    async summary(receiverId: number, longAnSalesOnly = false) {
+    async summary(receiverId: number, restrictedLongAnDirector = false) {
         const qb = this.repo
             .createQueryBuilder('n')
             .select(
@@ -96,21 +82,7 @@ export class ExpenseNotificationService {
             .andWhere(`n.meta->>'suggestType' = :st`, { st: EXPENSE_SUGGEST_TYPE })
             .setParameter('ovk', OVERDUE_KIND);
 
-        if (longAnSalesOnly) {
-            qb.andWhere(
-                `EXISTS (
-                    SELECT 1
-                    FROM employee long_an_sales
-                    INNER JOIN employee_region long_an_region
-                        ON long_an_region.employee_id = long_an_sales.id
-                    WHERE long_an_sales.id = (n.meta->>'employeeId')::int
-                        AND long_an_sales."isActive" = true
-                        AND :salesRole = ANY(long_an_sales.roles)
-                        AND long_an_region.province_id = :longAnProvinceId
-                )`,
-                { salesRole: 'sales', longAnProvinceId: LONG_AN_PROVINCE_ID },
-            );
-        }
+        if (restrictedLongAnDirector) qb.andWhere('1 = 0');
 
         const rows = await qb
             .groupBy('scope')
@@ -134,7 +106,7 @@ export class ExpenseNotificationService {
         tab?: 'unread' | 'read';
         page?: number;
         limit?: number;
-        longAnSalesOnly?: boolean;
+        restrictedLongAnDirector?: boolean;
     }) {
         const scope = this.normalizeScope(opts.scope);
         const page = opts.page && opts.page > 0 ? opts.page : 1;
@@ -144,7 +116,7 @@ export class ExpenseNotificationService {
             receiverId: opts.receiverId,
             scope,
             tab: opts.tab,
-            longAnSalesOnly: opts.longAnSalesOnly,
+            restrictedLongAnDirector: opts.restrictedLongAnDirector,
         })
             .andWhere(`n.meta->>'employeeId' IS NOT NULL`)
             .leftJoin('employee', 'e', `e.id = (n.meta->>'employeeId')::int`)
@@ -176,7 +148,7 @@ export class ExpenseNotificationService {
             receiverId: opts.receiverId,
             scope,
             tab: opts.tab,
-            longAnSalesOnly: opts.longAnSalesOnly,
+            restrictedLongAnDirector: opts.restrictedLongAnDirector,
         })
             .andWhere(`n.meta->>'employeeId' IS NOT NULL`)
             .select(`COUNT(DISTINCT (n.meta->>'employeeId'))`, 'cnt')
@@ -209,7 +181,7 @@ export class ExpenseNotificationService {
         employeeId?: number;
         page?: number;
         limit?: number;
-        longAnSalesOnly?: boolean;
+        restrictedLongAnDirector?: boolean;
     }) {
         const scope = this.normalizeScope(opts.scope);
         const page = opts.page && opts.page > 0 ? opts.page : 1;
@@ -222,7 +194,7 @@ export class ExpenseNotificationService {
                 scope,
                 tab: opts.tab,
                 employeeId: opts.employeeId,
-                longAnSalesOnly: opts.longAnSalesOnly,
+                restrictedLongAnDirector: opts.restrictedLongAnDirector,
             },
         )
             .orderBy('n."createdAt"', 'DESC')

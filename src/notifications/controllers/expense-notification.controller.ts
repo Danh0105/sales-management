@@ -59,7 +59,7 @@ export class ExpenseNotificationController {
             tab,
             page,
             limit,
-            longAnSalesOnly: this.isLongAnDirector(req),
+            restrictedLongAnDirector: this.isLongAnDirector(req),
         });
     }
 
@@ -80,7 +80,7 @@ export class ExpenseNotificationController {
             employeeId: employeeId ? Number(employeeId) : undefined,
             page,
             limit,
-            longAnSalesOnly: this.isLongAnDirector(req),
+            restrictedLongAnDirector: this.isLongAnDirector(req),
         });
     }
 

@@ -180,10 +180,11 @@ export class SchoolsService {
             },
         };
     }
-    async findByEmployee(employeeId: number) {
+    async findByEmployee(employeeId: number, provinceId?: number) {
         return this.schoolRepo.find({
             where: {
                 employee: { id: employeeId },
+                ...(provinceId ? { ward: { province: { id: provinceId } } } : {}),
             },
             // Kèm phường/xã + khu vực để FE hiển thị đủ thông tin trường và
             // chọn sẵn địa bàn khi sửa (danh sách này không có nơi nào khác lấy được).

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Province } from './province.entity';
 import { CreateProvinceDto } from './dto/create-province.dto';
 import { UpdateProvinceDto } from './dto/update-province.dto';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
 @Injectable()
 export class ProvinceService {
@@ -39,8 +40,11 @@ export class ProvinceService {
     }
 
     async findAll(user: any) {
-        // salesadmin_la chỉ thấy tỉnh 7
-        if (user.roles?.includes('salesadmin_la')) {
+        // salesadmin_la và Giám đốc Long An chỉ thấy tỉnh 7
+        if (
+            user.roles?.includes('salesadmin_la') ||
+            isRestrictedLongAnDirector(user.roles)
+        ) {
             return this.repo.find({
                 where: {
                     id: 7,

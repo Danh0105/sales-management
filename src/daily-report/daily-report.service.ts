@@ -14,6 +14,7 @@ import { ReportGateway } from './report.gateway';
 import { NotificationType } from '../notifications/enums/notification-type.enum';
 import { ReportMessage, ReportMessageSenderRole } from './entities/report-message.entity';
 import { CreateReportMessageDto } from './dto/create-report-message';
+import { longAnOnlyStaffSql } from '../long-an-director/long-an-scope.service';
 
 @Injectable()
 export class DailyReportService {
@@ -130,6 +131,7 @@ export class DailyReportService {
                     receiverIds = await this.notificationService.scopeBusinessReceiverIds(
                         receiverIds,
                         dto.employeeId,
+                        { kind: 'report' },
                     );
 
                     // ============================================
@@ -373,16 +375,19 @@ export class DailyReportService {
 
         return Object.values(grouped);
     }
-    async findEmployeesReportedToday() {
+    async findEmployeesReportedToday(longAnOnly = false) {
         const today = new Date().toISOString().split('T')[0];
 
-        return this.reportRepo
+        const query = this.reportRepo
             .createQueryBuilder('report')
             .leftJoin('report.employee', 'employee')
             .select(['employee.id', 'employee.name'])
             .distinct(true)
-            .where('report.date = :today', { today })
-            .getRawMany();
+            .where('report.date = :today', { today });
+
+        if (longAnOnly) query.andWhere(longAnOnlyStaffSql('employee.id'));
+
+        return query.getRawMany();
     }
     async removeTask(taskId: number) {
         const task = await this.taskRepo.findOne({
@@ -480,15 +485,19 @@ export class DailyReportService {
                                 })
                                 .getMany();
 
-                        receiverIds = managers
-                            .map((e) => e.id)
-                            .filter(
-                                (
-                                    id,
-                                ): id is number =>
-                                    !!id &&
-                                    id !== sender.id,
-                            );
+                        receiverIds = await this.notificationService.scopeBusinessReceiverIds(
+                            managers
+                                .map((e) => e.id)
+                                .filter(
+                                    (
+                                        id,
+                                    ): id is number =>
+                                        !!id &&
+                                        id !== sender.id,
+                                ),
+                            sender.id,
+                            { kind: 'report' },
+                        );
 
                         notificationMessage =
                             `${sender.name} đã nhắn tin trong báo cáo công việc`;

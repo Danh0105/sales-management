@@ -346,6 +346,7 @@ export class PolicyService {
             const userIds = await this.notificationService.scopeBusinessReceiverIds(
                 candidateUserIds,
                 dto.employeeInfo?.sub,
+                { kind: 'policy', subjectId: dto.subjectId },
             );
 
             const tokenEntities =
@@ -968,6 +969,7 @@ export class PolicyService {
                 const userIds = await this.notificationService.scopeBusinessReceiverIds(
                     candidateUserIds,
                     dto.employeeInfo?.sub,
+                    { kind: 'policy', subjectId: dto.subjectId },
                 );
 
                 const tokenEntities = await this.employeeFcmTokenService.getTokens(userIds);

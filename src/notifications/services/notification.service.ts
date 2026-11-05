@@ -8,6 +8,7 @@ import { NotifyService } from '../../notify-zalo/notify.service';
 import { NotificationType } from '../enums/notification-type.enum';
 import { TEACHING_SCHEDULE_ROUTE } from '../constants/teaching-schedule.constant';
 import { NotificationGateway } from '../gateways/notification.geteway';
+import { LongAnScopeService, longAnOnlyStaffSql } from '../../long-an-director/long-an-scope.service';
 
 /**
  * Nhóm type giảng dạy gửi kèm Zalo OA — KHÔNG gồm TEACHING_CHECKIN_ALERT vì
@@ -30,8 +31,16 @@ const TEACHING_ZALO_TYPES = new Set<NotificationType>([
 
 const LONG_AN_PROVINCE_ID = 7;
 const LONG_AN_DIRECTOR_ROLE = 'director_la';
+
+/**
+ * Giám đốc Long An chỉ nhận thông báo khi biết chắc nguồn thuộc Long An:
+ * chính sách theo tỉnh của trường, báo cáo / kế hoạch theo người gửi thuần Long
+ * An. Không khai báo nguồn thì không nhận, nên loại thông báo mới mặc định an toàn.
+ */
+export type LongAnNotificationSource =
+  | { kind: 'policy'; policyId?: number; subjectId?: number }
+  | { kind: 'report' };
 const FULL_DIRECTOR_ROLE = 'director';
-const SALES_ROLE = 'sales';
 
 /**
  * Đọc tại thời điểm gọi (không chốt hằng số) — ConfigModule nạp `.env` sau
@@ -102,6 +111,8 @@ export class NotificationService {
     private readonly employeeRepo: Repository<Employee>,
 
     private readonly notifyService: NotifyService,
+
+    private readonly longAnScope: LongAnScopeService,
   ) {}
 
   /** Yêu cầu xác nhận lịch dạy đang gom theo người nhận, chờ gửi Zalo một lần. */
@@ -123,25 +134,26 @@ export class NotificationService {
     return roles.includes(LONG_AN_DIRECTOR_ROLE) && !roles.includes(FULL_DIRECTOR_ROLE);
   }
 
-  private applyLongAnSalesSenderScope(
+  private applyLongAnDirectorScope(
     qb: SelectQueryBuilder<Notification>,
     alias = 'n',
   ): SelectQueryBuilder<Notification> {
     return qb.andWhere(
-      `EXISTS (
-        SELECT 1
-        FROM employee long_an_notification_sender
-        INNER JOIN employee_region long_an_notification_sender_region
-          ON long_an_notification_sender_region.employee_id = long_an_notification_sender.id
-        WHERE long_an_notification_sender.id = ${alias}."senderId"
-          AND long_an_notification_sender."isActive" = true
-          AND :longAnSalesRole = ANY(long_an_notification_sender.roles)
-          AND long_an_notification_sender_region.province_id = :longAnProvinceId
+      `(
+        (${alias}.type = 'POLICY' AND EXISTS (
+          SELECT 1 FROM policy la_policy
+          JOIN subjects la_subject ON la_subject.id = la_policy."subjectId"
+          JOIN schools la_school ON la_school.id = la_subject.school_id
+          JOIN wards la_ward ON la_ward.id = la_school.ward_id
+          WHERE la_policy.id = ${alias}."entityId"
+            AND la_ward.province_id = :longAnProvinceId
+        ))
+        OR (
+          ${alias}.type IN ('REPORT', 'WEEKLY_PLAN')
+          AND ${longAnOnlyStaffSql(`${alias}."senderId"`)}
+        )
       )`,
-      {
-        longAnSalesRole: SALES_ROLE,
-        longAnProvinceId: LONG_AN_PROVINCE_ID,
-      },
+      { longAnProvinceId: LONG_AN_PROVINCE_ID },
     );
   }
 
@@ -151,7 +163,7 @@ export class NotificationService {
     alias = 'n',
   ): Promise<SelectQueryBuilder<Notification>> {
     if (await this.isRestrictedLongAnDirector(receiverId)) {
-      return this.applyLongAnSalesSenderScope(qb, alias);
+      return this.applyLongAnDirectorScope(qb, alias);
     }
     return qb;
   }
@@ -163,6 +175,7 @@ export class NotificationService {
   async scopeBusinessReceiverIds(
     receiverIds: number[],
     senderId?: number,
+    source?: LongAnNotificationSource,
   ): Promise<number[]> {
     const uniqueIds = [...new Set(receiverIds)].filter((id) => Number.isInteger(id));
     if (!uniqueIds.length) return [];
@@ -181,23 +194,37 @@ export class NotificationService {
     );
     if (!restrictedIds.size) return uniqueIds;
 
-    let senderIsLongAnSales = false;
-    if (senderId) {
-      senderIsLongAnSales = await this.employeeRepo
-        .createQueryBuilder('sender')
-        .innerJoin('sender.employeeRegions', 'senderRegion')
-        .where('sender.id = :senderId', { senderId })
-        .andWhere('sender.isActive = true')
-        .andWhere(':salesRole = ANY(sender.roles)', { salesRole: SALES_ROLE })
-        .andWhere('senderRegion.province_id = :provinceId', {
-          provinceId: LONG_AN_PROVINCE_ID,
-        })
-        .getExists();
-    }
-
+    const allowed = await this.isLongAnSource(senderId, source);
     return uniqueIds.filter(
-      (receiverId) => !restrictedIds.has(receiverId) || senderIsLongAnSales,
+      (receiverId) => !restrictedIds.has(receiverId) || allowed,
     );
+  }
+
+  private async isLongAnSource(
+    senderId?: number,
+    source?: LongAnNotificationSource,
+  ): Promise<boolean> {
+    if (source?.kind === 'policy') {
+      if (source.policyId) return this.longAnScope.policyInScope(source.policyId);
+      if (source.subjectId) return this.longAnScope.subjectInScope(source.subjectId);
+      return false;
+    }
+    if (source?.kind === 'report') {
+      return senderId ? this.longAnScope.employeeIsLongAnOnly(senderId) : false;
+    }
+    return false;
+  }
+
+  /** Nguồn của thông báo suy ra từ loại + entity, dùng khi lưu vào DB. */
+  private longAnSourceOf(
+    type?: NotificationType,
+    entityId?: number,
+  ): LongAnNotificationSource | undefined {
+    if (type === NotificationType.POLICY) return { kind: 'policy', policyId: entityId };
+    if (type === NotificationType.REPORT || type === NotificationType.WEEKLY_PLAN) {
+      return { kind: 'report' };
+    }
+    return undefined;
   }
 
   /**
@@ -341,6 +368,7 @@ export class NotificationService {
       const receiverIds = await this.scopeBusinessReceiverIds(
         [data.receiverId],
         data.senderId,
+        this.longAnSourceOf(data.type, data.entityId),
       );
       if (!receiverIds.length) return null;
     }
@@ -542,6 +570,7 @@ export class NotificationService {
     const uniqueReceiverIds = await this.scopeBusinessReceiverIds(
       receiverIds,
       senderId,
+      this.longAnSourceOf(type, entityId),
     );
 
     if (!uniqueReceiverIds.length) return [];
@@ -769,16 +798,7 @@ export class NotificationService {
       .addOrderBy('e.name', 'ASC');
 
     if (await this.isRestrictedLongAnDirector(receiverId)) {
-      qb.andWhere(':longAnSalesRole = ANY(e.roles)', {
-        longAnSalesRole: SALES_ROLE,
-      }).andWhere(
-        `EXISTS (
-          SELECT 1 FROM employee_region long_an_sender_region
-          WHERE long_an_sender_region.employee_id = e.id
-            AND long_an_sender_region.province_id = :longAnProvinceId
-        )`,
-        { longAnProvinceId: LONG_AN_PROVINCE_ID },
-      );
+      qb.andWhere(longAnOnlyStaffSql('e.id'));
     }
 
     const rows = await qb.getRawMany();
