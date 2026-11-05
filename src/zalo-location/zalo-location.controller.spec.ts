@@ -9,10 +9,13 @@ import { ZaloLocationController } from './zalo-location.controller';
 import { ZaloLocationRateLimitGuard } from './zalo-location-rate-limit.guard';
 import { ZaloLocationService } from './zalo-location.service';
 import { TEACHER_STAFF_ROLE } from '../teaching/teaching-roles';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Employee } from '../employee/employee.entity';
 
 describe('ZaloLocationController integration', () => {
   let app: INestApplication;
   let jwt: JwtService;
+  let persistedRoles: string[] = [];
   const service = {
     resolve: jest
       .fn()
@@ -42,6 +45,17 @@ describe('ZaloLocationController integration', () => {
               key === 'JWT_SECRET' ? 'test-jwt-secret' : 'test',
           },
         },
+        {
+          provide: getRepositoryToken(Employee),
+          useValue: {
+            findOne: jest.fn(async () => ({
+              id: 123,
+              name: 'Test',
+              roles: persistedRoles,
+              isActive: true,
+            })),
+          },
+        },
       ],
     }).compile();
     app = module.createNestApplication();
@@ -51,8 +65,10 @@ describe('ZaloLocationController integration', () => {
 
   afterAll(() => app.close());
 
-  const token = (roles: string[], expiresIn: number | string = 60) =>
-    jwt.sign({ sub: 123, roles }, { expiresIn: expiresIn as never });
+  const token = (roles: string[], expiresIn: number | string = 60) => {
+    persistedRoles = roles;
+    return jwt.sign({ sub: 123, roles }, { expiresIn: expiresIn as never });
+  };
 
   it.each([
     [{ zaloAccessToken: 'access' }],
