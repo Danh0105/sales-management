@@ -23,6 +23,7 @@ import { extname } from 'path';
 
 import { SuggestStatus } from './SuggestStatus.enum';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+@UseGuards(JwtAuthGuard)
 @Controller('suggest')
 export class SuggestController {
     constructor(

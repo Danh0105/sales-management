@@ -17,6 +17,7 @@ import { RegionService } from 'src/region/region.service';
 import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
 import { HandoverRegionDto } from 'src/employee-region-school/dto/handover-region.dto';
 
+@UseGuards(JwtAuthGuard)
 @Controller('provinces')
 export class ProvinceController {
     constructor(

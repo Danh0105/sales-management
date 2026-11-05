@@ -23,6 +23,7 @@ import { UpdateSchoolDto } from './dto/update-school.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ResolveGoogleMapsDto } from './dto/resolve-google-maps.dto';
 
+@UseGuards(JwtAuthGuard)
 @Controller('schools')
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class SchoolsController {

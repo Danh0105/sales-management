@@ -10,6 +10,7 @@ type RequestWithUser = Request & {
     user: Employee;
 };
 
+@UseGuards(JwtAuthGuard)
 @Controller('daily-reports')
 export class DailyReportController {
     constructor(private readonly service: DailyReportService) { }

@@ -7,12 +7,15 @@ import {
     Param,
     Patch,
     Delete,
+    UseGuards,
 } from '@nestjs/common';
 import { RegionService } from './region.service';
 import { CreateRegionDto } from './dto/create-region.dto';
 import { UpdateRegionDto } from './dto/update-region.dto';
 import { EmployeeRegionService } from '../employee-region-school/employee-region.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
+@UseGuards(JwtAuthGuard)
 @Controller('regions')
 export class RegionController {
     constructor(

@@ -7,12 +7,15 @@ import {
     Patch,
     Delete,
     Query,
+    UseGuards,
 } from '@nestjs/common';
 import { WardService } from './ward.service';
 import { CreateWardDto } from './dto/create-ward.dto';
 import { UpdateWardDto } from './dto/update-ward.dto';
 import { EmployeeRegionService } from 'src/employee-region-school/employee-region.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
+@UseGuards(JwtAuthGuard)
 @Controller('wards')
 export class WardController {
     constructor(

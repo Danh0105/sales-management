@@ -6,11 +6,14 @@ import {
     Param,
     Get,
     Delete,
+    UseGuards,
 } from '@nestjs/common';
 
 import { WeeklyPlanService } from './weekly-plan.service';
 import { CreateWeeklyPlanDto } from './dto/create-weekly-plan.dto';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
+@UseGuards(JwtAuthGuard)
 @Controller('weekly-plans')
 export class WeeklyPlanController {
     constructor(private readonly service: WeeklyPlanService) { }

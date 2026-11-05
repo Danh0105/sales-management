@@ -38,6 +38,7 @@ import {
 } from './policy-scope';
 import { PolicyStatus } from './policy.enum';
 
+@UseGuards(JwtAuthGuard)
 @Controller('policies')
 export class PolicyController {
     constructor(private readonly service: PolicyService) { }
