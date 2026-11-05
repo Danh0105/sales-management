@@ -5,6 +5,9 @@ import * as express from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import type { NextFunction, Request, Response } from 'express';
+import { HttpException } from '@nestjs/common';
+import { PolicyContractAccessService } from './policy/policy-contract-access.service';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -35,6 +38,34 @@ async function bootstrap() {
     'api',
     app,
     SwaggerModule.createDocument(app, swaggerConfig),
+  );
+
+  // `express.static` chạy trước controller và trước JwtAuthGuard. Vì vậy file
+  // policy-contract còn ở ổ nóng phải được kiểm quyền ngay tại middleware;
+  // nếu không, controller bảo vệ file trên NAS nhưng file cùng tên trên VPS
+  // vẫn bị tải công khai.
+  const contractAccess = app.get(PolicyContractAccessService);
+  app.use(
+    '/uploads/policy-contracts/:name',
+    (req: Request, res: Response, next: NextFunction) => {
+      void contractAccess
+        .authenticateAndAssert(
+          req,
+          Array.isArray(req.params.name) ? req.params.name[0] : req.params.name,
+        )
+        .then((user) => {
+          req.user = user;
+          res.setHeader('Cache-Control', 'private, no-store');
+          next();
+        })
+        .catch((error: unknown) => {
+          const status = error instanceof HttpException ? error.getStatus() : 500;
+          const body = error instanceof HttpException
+            ? error.getResponse()
+            : { statusCode: 500, message: 'Không thể kiểm tra quyền tài liệu' };
+          res.status(status).json(body);
+        });
+    },
   );
 
   app.useStaticAssets(join(__dirname, '..', 'uploads'), {

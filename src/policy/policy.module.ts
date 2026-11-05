@@ -18,18 +18,28 @@ import { FcmModule } from '../fcm/fcm.module';
 import { NotificationModule } from '../notifications/notification.module';
 import { EmployeeFcmTokenModule } from '../employee-fcm-token/employee-fcm-token.module';
 import { PolicyContractStorageService } from './policy-contract-storage.service';
+import { JwtModule } from '@nestjs/jwt';
+import { PolicyContractAccessService } from './policy-contract-access.service';
 
 @Module({
     imports: [
         TypeOrmModule.forFeature([Policy, Subject, PolicyHistory, Employee, EmployeeFcmToken]),
+        JwtModule.register({}),
         NotifyModule,
         FcmModule,
         NotificationModule,
         EmployeeFcmTokenModule
     ],
     controllers: [PolicyController, PolicyContractMediaController],
-    providers: [PolicyService, PolicyGateway, PolicyContractStorageService, PolicyContractArchiveService],
+    providers: [
+        PolicyService,
+        PolicyGateway,
+        PolicyContractStorageService,
+        PolicyContractArchiveService,
+        PolicyContractAccessService,
+    ],
     exports: [PolicyService,
-        PolicyGateway,],
+        PolicyGateway,
+        PolicyContractAccessService,],
 })
 export class PolicyModule { }

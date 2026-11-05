@@ -52,6 +52,7 @@ import { FinancialRequestModule } from './financial-request/financial-request.mo
 import { OtherCashflowModule } from './other-cashflow/other-cashflow.module';
 import { AccountingSummaryModule } from './accounting-summary/accounting-summary.module';
 import { resolveDatabaseOptions } from './database/database-options';
+import { RealtimeAuthModule } from './realtime/realtime-auth.module';
 
 @Module({
   imports: [
@@ -69,6 +70,7 @@ import { resolveDatabaseOptions } from './database/database-options';
     }),
     ActivityLogModule,
     LongAnDirectorModule,
+    RealtimeAuthModule,
     EmployeeModule,
     AuthModule,
     SchoolsModule,

@@ -13,6 +13,7 @@ function makeService(inScope: Partial<Record<'policy' | 'subject' | 'sender', bo
     policyInScope: jest.fn().mockResolvedValue(!!inScope.policy),
     subjectInScope: jest.fn().mockResolvedValue(!!inScope.subject),
     employeeIsLongAnOnly: jest.fn().mockResolvedValue(!!inScope.sender),
+    reportInScope: jest.fn().mockResolvedValue(!!inScope.sender),
   };
   const service = new NotificationService(
     {} as any,
@@ -48,17 +49,17 @@ describe('NotificationService — phạm vi Giám đốc Long An', () => {
     expect(longAnScope.subjectInScope).toHaveBeenCalledWith(5);
   });
 
-  it('nhận báo cáo của nhân viên thuần Long An', async () => {
+  it('nhận báo cáo thuộc Long An dù nhân viên kiêm tỉnh', async () => {
     const { service } = makeService({ sender: true });
     await expect(
-      service.scopeBusinessReceiverIds([1, 3], 99, { kind: 'report' }),
+      service.scopeBusinessReceiverIds([1, 3], 99, { kind: 'report', reportId: 77 }),
     ).resolves.toEqual([1, 3]);
   });
 
-  it('không nhận báo cáo của nhân viên kiêm tỉnh khác', async () => {
+  it('không nhận báo cáo tỉnh khác của cùng nhân viên kiêm tỉnh', async () => {
     const { service } = makeService({ sender: false });
     await expect(
-      service.scopeBusinessReceiverIds([1, 3], 99, { kind: 'report' }),
+      service.scopeBusinessReceiverIds([1, 3], 99, { kind: 'report', reportId: 78 }),
     ).resolves.toEqual([3]);
   });
 

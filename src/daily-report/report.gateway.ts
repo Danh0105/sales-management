@@ -6,10 +6,12 @@ import {
     SubscribeMessage,
     WebSocketGateway,
     WebSocketServer,
+    OnGatewayInit,
 } from '@nestjs/websockets';
 
 import { Server, Socket }
     from 'socket.io';
+import { RealtimeAuthService } from '../realtime/realtime-auth.service';
 
 @WebSocketGateway({
     namespace: 'report',
@@ -19,43 +21,25 @@ import { Server, Socket }
 })
 export class ReportGateway
     implements
+    OnGatewayInit,
     OnGatewayConnection,
     OnGatewayDisconnect {
 
+    constructor(private readonly auth: RealtimeAuthService) {}
+
     @WebSocketServer()
     server!: Server;
+
+    afterInit(server: Server) {
+        this.auth.protect(server);
+    }
 
     // ============================================
     // CONNECT
     // ============================================
 
     handleConnection(client: Socket) {
-        const rawUserId =
-            client.handshake.auth?.userId ||
-            client.handshake.query?.userId;
-
-        const userId = Number(rawUserId);
-
-        if (!rawUserId || Number.isNaN(userId)) {
-            console.log(
-                `❌ Socket rejected: ${client.id}, userId invalid:`,
-                rawUserId,
-            );
-
-            console.log("SOCKET MISSING USER ID", {
-                socketId: client.id,
-                query: client.handshake.query,
-                auth: client.handshake.auth,
-            });
-
-            return;
-        }
-
-        client.join(`user_${userId}`);
-
-        console.log(
-            `✅ Client connected: ${client.id} -> user_${userId}`,
-        );
+        this.auth.joinOwnRoom(client);
     }
 
     // ============================================
@@ -66,9 +50,7 @@ export class ReportGateway
         client: Socket,
     ) {
 
-        console.log(
-            `❌ Client disconnected: ${client.id}`,
-        );
+        // Lifecycle timers được RealtimeAuthService dọn ở sự kiện disconnect.
     }
 
     // ============================================

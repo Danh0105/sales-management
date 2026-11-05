@@ -6,9 +6,11 @@ import {
     MessageBody,
     OnGatewayConnection,
     OnGatewayDisconnect,
+    OnGatewayInit,
 } from '@nestjs/websockets';
 
 import { Server, Socket } from 'socket.io';
+import { RealtimeAuthService } from '../../realtime/realtime-auth.service';
 
 @WebSocketGateway({
     cors: {
@@ -16,30 +18,22 @@ import { Server, Socket } from 'socket.io';
     },
 })
 export class NotificationGateway
-    implements OnGatewayConnection, OnGatewayDisconnect {
+    implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+    constructor(private readonly auth: RealtimeAuthService) {}
+
     @WebSocketServer()
     server!: Server;
 
+    afterInit(server: Server) {
+        this.auth.protect(server);
+    }
+
     handleConnection(client: Socket) {
-        const employeeId =
-            client.handshake.query.employeeId ||
-            client.handshake.query.userId ||
-            client.handshake.auth?.employeeId ||
-            client.handshake.auth?.userId;
-
-        if (employeeId) {
-            client.join(`user_${employeeId}`);
-        }
-
-        console.log('Notification connected:', {
-            socketId: client.id,
-            employeeId,
-            rooms: Array.from(client.rooms),
-        });
+        this.auth.joinOwnRoom(client);
     }
 
     handleDisconnect(client: Socket) {
-        console.log('Notification disconnected:', client.id);
+        // Không log handshake/token hoặc dữ liệu người dùng.
     }
 
     emitToUser(userId: number, event: string, data: any) {

@@ -34,12 +34,12 @@ const LONG_AN_DIRECTOR_ROLE = 'director_la';
 
 /**
  * Giám đốc Long An chỉ nhận thông báo khi biết chắc nguồn thuộc Long An:
- * chính sách theo tỉnh của trường, báo cáo / kế hoạch theo người gửi thuần Long
- * An. Không khai báo nguồn thì không nhận, nên loại thông báo mới mặc định an toàn.
+ * chính sách theo tỉnh của trường, báo cáo theo `daily_reports.province_id`,
+ * kế hoạch cũ theo người gửi thuần Long An. Không khai báo nguồn thì không nhận.
  */
 export type LongAnNotificationSource =
   | { kind: 'policy'; policyId?: number; subjectId?: number }
-  | { kind: 'report' };
+  | { kind: 'report'; reportId?: number; provinceId?: number };
 const FULL_DIRECTOR_ROLE = 'director';
 
 /**
@@ -148,10 +148,13 @@ export class NotificationService {
           WHERE la_policy.id = ${alias}."entityId"
             AND la_ward.province_id = :longAnProvinceId
         ))
-        OR (
-          ${alias}.type IN ('REPORT', 'WEEKLY_PLAN')
-          AND ${longAnOnlyStaffSql(`${alias}."senderId"`)}
-        )
+        OR (${alias}.type = 'REPORT' AND EXISTS (
+          SELECT 1 FROM daily_reports la_report
+          WHERE la_report.id = ${alias}."entityId"
+            AND la_report.province_id = :longAnProvinceId
+        ))
+        OR (${alias}.type = 'WEEKLY_PLAN'
+          AND ${longAnOnlyStaffSql(`${alias}."senderId"`)})
       )`,
       { longAnProvinceId: LONG_AN_PROVINCE_ID },
     );
@@ -210,6 +213,10 @@ export class NotificationService {
       return false;
     }
     if (source?.kind === 'report') {
+      if (source.provinceId != null) {
+        return Number(source.provinceId) === LONG_AN_PROVINCE_ID;
+      }
+      if (source.reportId) return this.longAnScope.reportInScope(source.reportId);
       return senderId ? this.longAnScope.employeeIsLongAnOnly(senderId) : false;
     }
     return false;
@@ -221,9 +228,8 @@ export class NotificationService {
     entityId?: number,
   ): LongAnNotificationSource | undefined {
     if (type === NotificationType.POLICY) return { kind: 'policy', policyId: entityId };
-    if (type === NotificationType.REPORT || type === NotificationType.WEEKLY_PLAN) {
-      return { kind: 'report' };
-    }
+    if (type === NotificationType.REPORT) return { kind: 'report', reportId: entityId };
+    if (type === NotificationType.WEEKLY_PLAN) return { kind: 'report' };
     return undefined;
   }
 

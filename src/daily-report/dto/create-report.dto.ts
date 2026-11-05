@@ -1,4 +1,4 @@
-import { IsArray, IsDateString, IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsDateString, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 class TaskDto {
     @IsString()
@@ -10,6 +10,11 @@ class TaskDto {
     @IsOptional()
     @IsString()
     location?: string;
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    schoolId?: number | null;
 }
 
 export class CreateReportDto {
@@ -22,4 +27,14 @@ export class CreateReportDto {
 
     @IsNumber()
     employeeId!: number;
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    schoolId?: number;
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    provinceId?: number | null;
 }

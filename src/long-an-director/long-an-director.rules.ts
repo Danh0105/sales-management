@@ -92,10 +92,11 @@ export const LONG_AN_DIRECTOR_RULES: Record<string, LongAnRule> = {
   'PolicyController.directorUpdatePolicy': policyParam,
   'PolicyContractMediaController.media': allow,
 
-  // Báo cáo: chỉ nhân viên thuần Long An
+  // Báo cáo: tỉnh nằm trên chính báo cáo; nhân viên kiêm tỉnh vẫn hợp lệ.
+  'DailyReportController.findAll': allow,
   'DailyReportController.getEmployeesReportedToday': allow,
-  'DailyReportController.findByEmployee': longAnOnlyStaffParam,
-  'DailyReportController.findByEmployeeGroupByWeek': longAnOnlyStaffParam,
+  'DailyReportController.findByEmployee': staffParam,
+  'DailyReportController.findByEmployeeGroupByWeek': staffParam,
   'DailyReportController.findOne': reportParam,
   'DailyReportController.findMessagesByReport': reportParam,
   'DailyReportController.createMessage': ({ body }, scope) =>

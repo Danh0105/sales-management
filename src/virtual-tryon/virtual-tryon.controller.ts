@@ -128,12 +128,15 @@ export class VirtualTryOnController {
   }
 
   @Delete(':id')
+  @UseGuards(JwtAuthGuard)
   remove(
     @Param('id', ParseIntPipe) id: number,
-    @Query('token') token: string | undefined,
     @Req() req: Request,
   ) {
-    return this.service.remove(id, this.accessOf(req, token));
+    // Xoá là thao tác phá huỷ: publicToken chỉ còn dùng để xem/poll job ẩn
+    // danh, không được dùng như quyền xoá. Chỉ chính chủ đăng nhập hoặc quản
+    // trị viên hợp lệ mới đi tới service.
+    return this.service.remove(id, this.accessOf(req));
   }
 
   private accessOf(req: Request, token?: string): TryOnAccess {

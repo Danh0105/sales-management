@@ -5,6 +5,7 @@ import { AuthUser } from '../type/auth-user.type';
 export const POLICY_VIEW_ALL_ROLES = [
     'director',
     'saleadmin',
+    'salesadmin',
     'troly_gd',
     'ketoan_truong',
 ];
