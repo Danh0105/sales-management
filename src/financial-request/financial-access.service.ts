@@ -13,6 +13,7 @@ import {
   ApprovalStatus,
   ApproverType,
   DIRECT_MANAGER_SYSTEM_ROLES,
+  FINANCE_CONFIG_SYSTEM_ROLES,
   FinanceRole,
   FinancialRequestType,
   IMPLICIT_FINANCE_ROLES,
@@ -157,6 +158,24 @@ export class FinancialAccessService {
     if (!ctx.isAdmin) {
       throw new ForbiddenException(
         'Chỉ quản trị phân hệ tài chính được thực hiện thao tác này',
+      );
+    }
+  }
+
+  /** Được dùng màn Cấu hình quy trình: quản trị phân hệ hoặc Nhân sự. */
+  canConfigure(ctx: FinanceContext): boolean {
+    return (
+      ctx.isAdmin ||
+      ctx.systemRoles.some((role) =>
+        FINANCE_CONFIG_SYSTEM_ROLES.includes(role),
+      )
+    );
+  }
+
+  assertCanConfigure(ctx: FinanceContext) {
+    if (!this.canConfigure(ctx)) {
+      throw new ForbiddenException(
+        'Chỉ quản trị phân hệ tài chính hoặc nhân sự được thực hiện thao tác này',
       );
     }
   }

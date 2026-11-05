@@ -167,6 +167,12 @@ export const DIRECT_MANAGER_SYSTEM_ROLES = [
 /** Người lập phiếu lương — được ghi nhận khấu trừ tạm ứng lương. */
 export const PAYROLL_DEDUCTION_SYSTEM_ROLES = ['nhansu', 'ketoan_truong'];
 
+/**
+ * Role hệ thống được vào màn Cấu hình quy trình mà KHÔNG trở thành quản trị
+ * phân hệ: không tự thấy mọi phiếu, tài khoản ngân hàng hay quyền chi tiền.
+ */
+export const FINANCE_CONFIG_SYSTEM_ROLES = ['nhansu'];
+
 /** Vị trí ký trên mẫu giấy (5 ô). Ô đầu luôn là người đề nghị. */
 export enum SignatureSlot {
   MANAGER = 'MANAGER',

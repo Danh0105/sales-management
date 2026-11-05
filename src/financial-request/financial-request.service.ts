@@ -11,6 +11,7 @@ import { Brackets, DataSource, EntityManager, In, Repository } from 'typeorm';
 import { CashAccount } from '../cashflow-report/cash-account.entity';
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
+import { isEmployeeAdmin } from '../employee/employee-roles';
 import {
   EMPLOYEE_POSITIONS,
   employeePosition,
@@ -227,6 +228,8 @@ export class FinancialRequestService {
       },
       capabilities: {
         isAdmin: ctx.isAdmin,
+        canConfigure: this.access.canConfigure(ctx),
+        canManageEmployees: isEmployeeAdmin(user),
         canViewAll:
           ctx.isAdmin ||
           this.access.hasAnyRole(ctx, [

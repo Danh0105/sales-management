@@ -44,6 +44,7 @@ import { writeAudit } from './financial-notify.service';
 import {
   ApprovalStatus,
   ApproverType,
+  FinanceRole,
   IMPLICIT_FINANCE_ROLES,
   REQUEST_TYPE_VALUES,
   SelfApprovalMode,
@@ -72,10 +73,32 @@ export class FinancialConfigService {
     private readonly employeeRepo: Repository<Employee>,
   ) {}
 
-  private async admin(user: AuthUser) {
+  private async configurator(user: AuthUser) {
     const ctx = await this.access.context(user);
-    this.access.assertAdmin(ctx);
+    this.access.assertCanConfigure(ctx);
     return ctx;
+  }
+
+  /**
+   * Nhân sự cấu hình được phân quyền nhưng không được dùng chính màn này để tự
+   * nâng quyền: vai trò quản trị phân hệ và vai trò của chính mình phải do quản
+   * trị thao tác.
+   */
+  private assertAssignmentAllowed(
+    ctx: { userId: number; isAdmin: boolean },
+    target: { employeeId: number; role: FinanceRole },
+  ) {
+    if (ctx.isAdmin) return;
+    if (target.role === FinanceRole.ADMIN) {
+      throw new ForbiddenException(
+        'Chỉ quản trị phân hệ được gán hoặc thu hồi vai trò quản trị',
+      );
+    }
+    if (target.employeeId === ctx.userId) {
+      throw new ForbiddenException(
+        'Không được tự gán hoặc thu hồi vai trò tài chính của chính mình',
+      );
+    }
   }
 
   private audit(
@@ -101,7 +124,7 @@ export class FinancialConfigService {
   // ---------------------------------------------------------------------------
 
   async overview(user: AuthUser) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     const [
       companies,
       categories,
@@ -206,7 +229,7 @@ export class FinancialConfigService {
   // ---------------------------------------------------------------------------
 
   async createCompany(user: AuthUser, dto: CompanyDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialCompany);
       if (await repo.findOne({ where: { code: dto.code } })) {
@@ -228,7 +251,7 @@ export class FinancialConfigService {
   }
 
   async updateCompany(user: AuthUser, id: number, dto: UpdateCompanyDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialCompany);
       const company = await repo.findOne({ where: { id } });
@@ -258,7 +281,7 @@ export class FinancialConfigService {
   }
 
   async uploadLogo(user: AuthUser, id: number, file: Express.Multer.File) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     if (!file) throw new BadRequestException('Chưa chọn tệp logo');
     if (!/\.(png|jpe?g)$/i.test(file.originalname)) {
       throw new BadRequestException('Logo chỉ nhận PNG hoặc JPG');
@@ -291,7 +314,7 @@ export class FinancialConfigService {
   // ---------------------------------------------------------------------------
 
   async createCategory(user: AuthUser, dto: CategoryDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialExpenseCategory);
       if (await repo.findOne({ where: { code: dto.code } })) {
@@ -322,7 +345,7 @@ export class FinancialConfigService {
   }
 
   async updateCategory(user: AuthUser, id: number, dto: UpdateCategoryDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialExpenseCategory);
       const category = await repo.findOne({ where: { id } });
@@ -424,7 +447,7 @@ export class FinancialConfigService {
   }
 
   async createWorkflow(user: AuthUser, dto: WorkflowDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     this.validateSteps(dto);
     return this.dataSource.transaction(async (manager) => {
       await this.assertScopeFree(manager, dto);
@@ -464,7 +487,7 @@ export class FinancialConfigService {
    * bước của riêng nó lúc gửi.
    */
   async updateWorkflow(user: AuthUser, id: number, dto: WorkflowDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     this.validateSteps(dto);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialApprovalWorkflow);
@@ -498,7 +521,8 @@ export class FinancialConfigService {
   // ---------------------------------------------------------------------------
 
   async createAssignment(user: AuthUser, dto: AssignmentDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
+    this.assertAssignmentAllowed(ctx, dto);
     const saved = await this.dataSource.transaction(async (manager) => {
       const employee = await manager
         .getRepository(Employee)
@@ -564,11 +588,12 @@ export class FinancialConfigService {
   }
 
   async removeAssignment(user: AuthUser, id: number) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     await this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialRoleAssignment);
       const assignment = await repo.findOne({ where: { id } });
       if (!assignment) throw new NotFoundException('Không tìm thấy phân quyền');
+      this.assertAssignmentAllowed(ctx, assignment);
       assignment.isActive = false;
       await repo.save(assignment);
       await this.audit(manager, ctx, 'ASSIGNMENT', id, 'ASSIGNMENT_REVOKED', {
@@ -590,7 +615,7 @@ export class FinancialConfigService {
     employeeId: number,
     dto: EmployeeDepartmentDto,
   ) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const employee = await manager.getRepository(Employee).findOne({
         where: { id: employeeId },
@@ -635,7 +660,7 @@ export class FinancialConfigService {
    * phân hệ còn phải là người quản trị nhân sự — giống `POST /employees`.
    */
   async createAccount(user: AuthUser, dto: CreateAccountDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     if (!isEmployeeAdmin(user)) {
       throw new ForbiddenException(
         'Chỉ giám đốc hoặc nhân sự được tạo tài khoản đăng nhập',
@@ -757,7 +782,7 @@ export class FinancialConfigService {
   // ---------------------------------------------------------------------------
 
   async savePolicy(user: AuthUser, dto: PolicyDto) {
-    const ctx = await this.admin(user);
+    const ctx = await this.configurator(user);
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(FinancialPolicy);
       const scopeKey = dto.companyId ? `COMPANY:${dto.companyId}` : 'GLOBAL';
@@ -824,7 +849,8 @@ export class FinancialConfigService {
         reason: d.reason,
         revokedAt: d.revokedAt,
         canRevoke:
-          !d.revokedAt && (d.delegatorId === ctx.userId || ctx.isAdmin),
+          !d.revokedAt &&
+          (d.delegatorId === ctx.userId || this.access.canConfigure(ctx)),
       })),
       employees: employees.map((e) => ({ id: e.id, name: e.name })),
     };
@@ -833,10 +859,17 @@ export class FinancialConfigService {
   async createDelegation(user: AuthUser, dto: DelegationDto) {
     const ctx = await this.access.context(user);
     const delegatorId = dto.delegatorId ?? ctx.userId;
-    if (delegatorId !== ctx.userId && !ctx.isAdmin) {
-      throw new ForbiddenException(
-        'Chỉ quản trị được uỷ quyền thay người khác',
-      );
+    if (delegatorId !== ctx.userId) {
+      if (!this.access.canConfigure(ctx)) {
+        throw new ForbiddenException(
+          'Chỉ quản trị hoặc nhân sự được uỷ quyền thay người khác',
+        );
+      }
+      if (!ctx.isAdmin && dto.delegateId === ctx.userId) {
+        throw new ForbiddenException(
+          'Không được tự nhận uỷ quyền duyệt thay người khác',
+        );
+      }
     }
     if (delegatorId === dto.delegateId) {
       throw new BadRequestException('Không uỷ quyền cho chính mình');
@@ -893,7 +926,10 @@ export class FinancialConfigService {
       const repo = manager.getRepository(FinancialApprovalDelegation);
       const delegation = await repo.findOne({ where: { id } });
       if (!delegation) throw new NotFoundException('Không tìm thấy uỷ quyền');
-      if (delegation.delegatorId !== ctx.userId && !ctx.isAdmin) {
+      if (
+        delegation.delegatorId !== ctx.userId &&
+        !this.access.canConfigure(ctx)
+      ) {
         throw new ForbiddenException('Bạn không được thu hồi uỷ quyền này');
       }
       if (delegation.revokedAt) return delegation;

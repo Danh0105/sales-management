@@ -45,7 +45,7 @@ Quyền theo thao tác:
 | Ghi nhận khấu trừ lương | Kế toán, `nhansu`, `ketoan_truong` |
 | Huỷ phiếu đã duyệt (chưa phát sinh tiền) | Kế toán hoặc quản trị (bắt buộc lý do) |
 | Bỏ qua cấp duyệt được phép bỏ qua | Quản trị (bắt buộc lý do) |
-| Cấu hình | Quản trị toàn phân hệ |
+| Cấu hình | Quản trị toàn phân hệ, `nhansu` (không được gán/thu hồi vai trò Quản trị hay vai trò của chính mình, không tự nhận uỷ quyền thay người khác; không kèm quyền xem mọi phiếu/chi tiền) |
 
 Che dữ liệu nhạy cảm:
 
