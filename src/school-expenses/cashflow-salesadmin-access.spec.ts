@@ -115,6 +115,12 @@ describe('Quản lý thu chi — quyền Sales Admin', () => {
       true,
     );
     expect(
+      canAccess(ManagementExpenseItemsController, 'create', ['accountant']),
+    ).toBe(true);
+    expect(
+      canAccess(ManagementExpenseItemsController, 'create', ['ketoan_congno']),
+    ).toBe(true);
+    expect(
       canAccess(ManagementExpenseItemsController, 'update', ['ketoan_congno']),
     ).toBe(true);
     expect(
