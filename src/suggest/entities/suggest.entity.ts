@@ -7,6 +7,8 @@ import { EquipmentSource } from '../enums/equipment-source.enum';
 import { Policy } from '../../policy/entities/policy.entity';
 import { Employee } from '../../employee/employee.entity';
 import { School } from '../../school/schools.entity';
+import { Subject } from '../../subject/subject.entity';
+import { ExpensePeriod } from '../../expense-periods/expense-period.entity';
 import { Ward } from '../../ward/ward.entity';
 import { SuggestPaymentOrder } from './suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
@@ -28,6 +30,7 @@ export interface RequestedEquipmentItem {
 @Index(['type', 'expectedPaymentDate'])
 @Index('idx_suggest_expense_school_year_status', ['type', 'schoolId', 'schoolYear', 'status'])
 @Index(['type', 'requestKind', 'status'])
+@Index('idx_suggest_monthly_expense_period', ['type', 'isMonthlyExpense', 'expensePeriodId'])
 export class Suggest {
     @PrimaryGeneratedColumn()
     id?: number;
@@ -171,6 +174,26 @@ export class Suggest {
     @ManyToOne(() => School, { nullable: true, onDelete: 'SET NULL' })
     @JoinColumn({ name: 'school_id' })
     school?: School | null;
+
+    /** Phân biệt đề xuất chi tháng với đề xuất chi phát sinh thông thường. */
+    @Column({ name: 'is_monthly_expense', type: 'boolean', default: false })
+    isMonthlyExpense?: boolean;
+
+    /** Môn học áp dụng cho đề xuất chi tháng. */
+    @Column({ type: 'int', name: 'subject_id', nullable: true })
+    subjectId?: number | null;
+
+    @ManyToOne(() => Subject, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'subject_id' })
+    subject?: Subject | null;
+
+    /** Kỳ kế toán áp dụng cho đề xuất chi tháng. */
+    @Column({ type: 'int', name: 'expense_period_id', nullable: true })
+    expensePeriodId?: number | null;
+
+    @ManyToOne(() => ExpensePeriod, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'expense_period_id' })
+    expensePeriod?: ExpensePeriod | null;
 
     /** Năm học được chọn chính thức cho đề xuất chi (VD: 2026-2027) */
     @Column({ type: 'varchar', name: 'school_year', length: 20, nullable: true })

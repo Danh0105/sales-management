@@ -191,6 +191,46 @@ const event = (
 };
 
 describe('mapSuggestEvents', () => {
+  it('chi tháng: chi lại sau hoàn quỹ giữ đúng số tiền từng vòng', () => {
+    const { lines, issues } = mapSuggestEvents([
+      event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-11', {
+        data: { paymentOrder: { code: 'LC-1', amount: 1000000 } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-08-13', {
+        data: { cashAccount: '1112' },
+      }),
+      event('CONFIRM_FUND_RETURNED', '2026-08-14'),
+      event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-15', {
+        data: { paymentOrder: { code: 'LC-2', amount: 3000000 } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-08-16', {
+        data: { cashAccount: '1112' },
+      }),
+    ]);
+    expect(issues).toEqual([]);
+    const payments = lines
+      .filter((line) => line.payment > 0)
+      .map((line) => line.payment);
+    expect(payments).toEqual([toCents('1000000'), toCents('3000000')]);
+    expect(lines.filter((line) => line.receipt > 0).map((l) => l.receipt)).toEqual([
+      toCents('1000000'),
+    ]);
+  });
+
+  it('chi tháng: kế toán sửa số tiền rồi xuất lại thì lấy số tiền mới', () => {
+    const { lines } = mapSuggestEvents([
+      event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-11', {
+        data: { paymentOrder: { code: 'LC-1', amount: 1000000 } },
+      }),
+      event('EDIT_MONTHLY_PAYMENT_ORDER', '2026-08-12'),
+      event('CONFIRM_CASH_RELEASED', '2026-08-13', {
+        data: { cashAccount: '1112' },
+      }),
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].payment).toBe(toCents('3000000'));
+  });
+
   it('xuất tiền có tài khoản → bút toán chi, đối tượng là người đề xuất', () => {
     const { lines, issues } = mapSuggestEvents([
       event('CREATE_PAYMENT_ORDER', '2026-08-11', {

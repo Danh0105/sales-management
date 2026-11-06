@@ -7,6 +7,8 @@ export enum SuggestStatus {
   REJECTED = 'REJECTED',
 
   // ===== luồng đề xuất chi (EXPENSE_REQUEST) =====
+  /** Đề xuất chi tháng mới gửi, chờ Kế toán công nợ nhập số tiền. */
+  PENDING_ACCOUNTING = 'PENDING_ACCOUNTING',
   PENDING_APPROVAL = 'PENDING_APPROVAL',
   PAYMENT_ORDERED = 'PAYMENT_ORDERED',
   CASH_RELEASED = 'CASH_RELEASED',

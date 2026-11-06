@@ -73,6 +73,28 @@ export class CreateExpenseRequestDto {
   @IsInt()
   schoolId?: number;
 
+  /**
+   * Đề xuất chi tháng gắn với một môn và một kỳ kế toán cụ thể.
+   * Nếu FE gửi subjectId/expensePeriodId thì server cũng tự nhận diện đây là
+   * đề xuất chi tháng để tương thích với client chưa gửi cờ này.
+   */
+  @IsOptional()
+  @Transform(parseBoolean)
+  @IsBoolean()
+  isMonthlyExpense?: boolean;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  subjectId?: number;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  expensePeriodId?: number;
+
   /** Không bắt buộc — bỏ trống thì server tự điền năm học hiện tại. */
   @IsOptional()
   @IsString()

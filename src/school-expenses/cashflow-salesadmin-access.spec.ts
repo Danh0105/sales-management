@@ -110,6 +110,18 @@ describe('Quản lý thu chi — quyền Sales Admin', () => {
     },
   );
 
+  it('người lập đề xuất chỉ đọc được danh sách kỳ kế toán', () => {
+    for (const role of ['sales', 'giaovien_congty']) {
+      expect(canAccess(ExpensePeriodsController, 'findAll', [role])).toBe(true);
+      for (const method of ['findOne', 'create', 'update', 'remove', 'lock']) {
+        expect(canAccess(ExpensePeriodsController, method, [role])).toBe(false);
+      }
+    }
+    expect(canAccess(ExpensePeriodsController, 'findAll', ['employee'])).toBe(
+      false,
+    );
+  });
+
   it('giữ nguyên quyền ghi của kế toán và quyền xác nhận của kế toán trưởng', () => {
     expect(canAccess(RealExpensesController, 'saveAll', ['accountant'])).toBe(
       true,

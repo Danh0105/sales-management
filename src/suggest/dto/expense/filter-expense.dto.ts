@@ -33,6 +33,21 @@ export class FilterExpenseDto {
     schoolId?: number;
 
     @IsOptional()
+    @Transform(({ value }) => value === 'true' || value === true)
+    @IsBoolean()
+    isMonthlyExpense?: boolean;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    subjectId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    expensePeriodId?: number;
+
+    @IsOptional()
     @IsString()
     @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
     schoolYear?: string;

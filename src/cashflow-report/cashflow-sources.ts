@@ -168,6 +168,7 @@ LEFT JOIN employee e ON e.id = s."createdBy"
 LEFT JOIN suggest_payment_order po ON po."suggestId" = s.id
 WHERE h.action IN (
   'CREATE_PAYMENT_ORDER', 'EDIT_PAYMENT_ORDER',
+  'CREATE_MONTHLY_PAYMENT_ORDER', 'EDIT_MONTHLY_PAYMENT_ORDER',
   'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
@@ -466,14 +467,20 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
       .find((event) => event.action === 'CONFIRM_CASH_RELEASED')?.history_id;
 
     for (const event of list) {
-      if (event.action === 'CREATE_PAYMENT_ORDER') {
+      if (
+        event.action === 'CREATE_PAYMENT_ORDER' ||
+        event.action === 'CREATE_MONTHLY_PAYMENT_ORDER'
+      ) {
         const snapshot = event.data?.paymentOrder;
         orderAmount =
           snapshot?.amount !== undefined && snapshot?.amount !== null
             ? toCents(snapshot.amount)
             : null;
         orderCode = snapshot?.code ?? orderCode;
-      } else if (event.action === 'EDIT_PAYMENT_ORDER') {
+      } else if (
+        event.action === 'EDIT_PAYMENT_ORDER' ||
+        event.action === 'EDIT_MONTHLY_PAYMENT_ORDER'
+      ) {
         // Không có snapshot số tiền sau khi sửa → dùng lệnh chi hiện tại.
         orderAmount = null;
       } else if (event.action === 'CONFIRM_CASH_RELEASED') {

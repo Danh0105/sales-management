@@ -81,8 +81,11 @@ export class SubjectsController {
     }
 
     @Get()
-    findAll(@Query('schoolId') schoolId?: string) {
-        if (schoolId) return this.service.findBySchool(+schoolId);
+    findAll(
+        @Query('schoolId') schoolId?: string,
+        @Query('schoolYear') schoolYear?: string,
+    ) {
+        if (schoolId) return this.service.findBySchool(+schoolId, schoolYear);
         return this.service.findAll();
     }
 

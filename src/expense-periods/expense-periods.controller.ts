@@ -16,6 +16,7 @@ import { ExpensePeriodsService } from './expense-periods.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
+import { EXPENSE_REQUESTER_ROLES } from '../suggest/constants/expense-roles';
 import {
     CASHFLOW_CREATE_ROLES,
     CASHFLOW_READ_ROLES,
@@ -61,8 +62,9 @@ export class ExpensePeriodsController {
         );
     }
 
+    // Người lập đề xuất chi tháng phải chọn được kỳ kế toán của trường.
     @Get()
-    @Roles(...CASHFLOW_READ_ROLES)
+    @Roles(...CASHFLOW_READ_ROLES, ...EXPENSE_REQUESTER_ROLES)
     findAll(@Query() query: any) {
         return this.expensePeriodsService.findAll(
             query,

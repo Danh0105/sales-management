@@ -62,12 +62,15 @@ export type ExpenseAssignee = 'stockInHandler' | 'acceptor';
 /**
  * State machine cho luồng ĐỀ XUẤT CHI:
  *
- * DRAFT → PENDING_APPROVAL → APPROVED → PAYMENT_ORDERED → CASH_RELEASED
+ * Chi Năm: DRAFT → PENDING_APPROVAL → APPROVED → PAYMENT_ORDERED → CASH_RELEASED
  *       → CASH_RECEIVED → SPENT (kết thúc - đã chi)
  *                        ↘ NOT_SPENT → FUND_RETURNED ─┐
  *                                      ↑             │
  *                                      └─ PAYMENT_ORDERED (lập lại lệnh chi)
  * PENDING_APPROVAL → REJECTED (kết thúc - bị từ chối)
+ *
+ * Chi tháng: PENDING_ACCOUNTING → PENDING_APPROVAL → PAYMENT_ORDERED
+ *             (Kế toán nhập tiền)   (Giám đốc duyệt)   → CASH_RELEASED
  *
  * Với ĐỀ XUẤT THIẾT BỊ (kind = EQUIPMENT), nhánh sau APPROVED đổi sang phòng
  * kỹ thuật:
@@ -98,6 +101,13 @@ export const EXPENSE_TRANSITIONS: Partial<
     ],
   },
 
+  [ExpenseAction.APPROVE_MONTHLY]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.PAYMENT_ORDERED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
   [ExpenseAction.REJECT]: {
     from: [SuggestStatus.PENDING_APPROVAL],
     to: SuggestStatus.REJECTED,
@@ -106,6 +116,13 @@ export const EXPENSE_TRANSITIONS: Partial<
       ExpenseRole.SALES_ADMIN,
       ExpenseRole.CHIEF_ACCOUNTANT,
     ],
+  },
+
+  [ExpenseAction.REJECT_MONTHLY]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.REJECTED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   /**
@@ -119,7 +136,11 @@ export const EXPENSE_TRANSITIONS: Partial<
    * lại thì mọi thống kê tỉ lệ duyệt đều sai.
    */
   [ExpenseAction.WITHDRAW]: {
-    from: [SuggestStatus.DRAFT, SuggestStatus.PENDING_APPROVAL],
+    from: [
+      SuggestStatus.DRAFT,
+      SuggestStatus.PENDING_ACCOUNTING,
+      SuggestStatus.PENDING_APPROVAL,
+    ],
     to: SuggestStatus.WITHDRAWN,
     roles: [...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR],
     ownerOnly: true,
@@ -129,6 +150,13 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CREATE_PAYMENT_ORDER]: {
     from: [SuggestStatus.APPROVED, SuggestStatus.FUND_RETURNED],
     to: SuggestStatus.PAYMENT_ORDERED,
+    roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CREATE_MONTHLY_PAYMENT_ORDER]: {
+    from: [SuggestStatus.PENDING_ACCOUNTING, SuggestStatus.FUND_RETURNED],
+    to: SuggestStatus.PENDING_APPROVAL,
     roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
     kinds: [ExpenseRequestKind.CASH],
   },
@@ -150,6 +178,21 @@ export const EXPENSE_TRANSITIONS: Partial<
       SuggestStatus.FUND_RETURNED,
     ],
     to: SuggestStatus.PAYMENT_ORDERED,
+    roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.EDIT_MONTHLY_PAYMENT_ORDER]: {
+    from: [
+      SuggestStatus.PENDING_APPROVAL,
+      SuggestStatus.PAYMENT_ORDERED,
+      SuggestStatus.CASH_RELEASED,
+      SuggestStatus.CASH_RECEIVED,
+      SuggestStatus.SPENT,
+      SuggestStatus.NOT_SPENT,
+      SuggestStatus.FUND_RETURNED,
+    ],
+    to: SuggestStatus.PENDING_APPROVAL,
     roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
     kinds: [ExpenseRequestKind.CASH],
   },
@@ -408,6 +451,7 @@ export function expenseActorForStatus(
   status: SuggestStatus,
   kind: ExpenseRequestKind = ExpenseRequestKind.CASH,
   equipmentSource?: EquipmentSource | null,
+  isMonthlyExpense = false,
 ): { roles: string[]; owner: boolean; assignee?: ExpenseAssignee } | null {
   // Thiết bị từ nhà cung cấp: hai bước sau duyệt thuộc về người được chỉ
   // định, không thuộc role nào — nơi gọi tự tra id người được chỉ định.
@@ -429,6 +473,12 @@ export function expenseActorForStatus(
     kind === ExpenseRequestKind.REPAIR;
 
   switch (status) {
+    case SuggestStatus.PENDING_ACCOUNTING:
+      return {
+        roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        owner: false,
+      };
+
     case SuggestStatus.CASH_RELEASED:
     case SuggestStatus.CASH_RECEIVED:
     case SuggestStatus.STOCK_ISSUE_ORDERED:
@@ -438,11 +488,13 @@ export function expenseActorForStatus(
     // Giám đốc, Sales Admin lẫn Kế toán trưởng đều duyệt được bước này.
     case SuggestStatus.PENDING_APPROVAL:
       return {
-        roles: [
-          ExpenseRole.DIRECTOR,
-          ExpenseRole.SALES_ADMIN,
-          ExpenseRole.CHIEF_ACCOUNTANT,
-        ],
+        roles: isMonthlyExpense
+          ? [ExpenseRole.DIRECTOR]
+          : [
+              ExpenseRole.DIRECTOR,
+              ExpenseRole.SALES_ADMIN,
+              ExpenseRole.CHIEF_ACCOUNTANT,
+            ],
         owner: false,
       };
 

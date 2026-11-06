@@ -87,6 +87,22 @@ export class CreateSuggestDto {
     @IsInt()
     schoolId?: number;
 
+    /** Đề xuất chi tháng; chỉ dùng khi type = EXPENSE_REQUEST. */
+    @IsOptional()
+    @Transform(parseBoolean)
+    @IsBoolean()
+    isMonthlyExpense?: boolean;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    subjectId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    expensePeriodId?: number;
+
     /** Năm học liên quan; bắt buộc ở endpoint expense-requests */
     @IsOptional()
     @IsString()
