@@ -113,7 +113,7 @@ export class Suggest {
     @Column({ nullable: true })
     reviewedBy?: number;
 
-    @Column({ nullable: true })
+    @Column({ type: 'int', nullable: true })
     approvedBy?: number | null;
 
     @Column({ type: 'text', nullable: true })
