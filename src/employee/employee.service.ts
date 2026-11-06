@@ -216,10 +216,17 @@ export class EmployeeService {
     return query.orderBy('employee.name', 'ASC').getMany();
   }
 
+  private queryWithPassword() {
+    return this.repo
+      .createQueryBuilder('employee')
+      .addSelect('employee.password');
+  }
+
+  /** Dùng để đăng nhập nên có kèm hash mật khẩu — không trả thẳng ra response. */
   async findByPhone(phone: string) {
-    return this.repo.findOne({
-      where: { phone },
-    });
+    return this.queryWithPassword()
+      .where('employee.phone = :phone', { phone })
+      .getOne();
   }
 
   async saveTeacherZaloIdentifiers(
@@ -375,9 +382,9 @@ export class EmployeeService {
   }
 
   async changePassword(employeeId: number, dto: ChangePasswordDto) {
-    const user = await this.repo.findOne({
-      where: { id: employeeId },
-    });
+    const user = await this.queryWithPassword()
+      .where('employee.id = :employeeId', { employeeId })
+      .getOne();
 
     if (!user) {
       throw new NotFoundException('User not found');
