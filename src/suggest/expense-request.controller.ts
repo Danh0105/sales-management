@@ -37,6 +37,7 @@ import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
 import { WithdrawExpenseDto } from './dto/expense/withdraw-expense.dto';
 import { SaleAdminReviewExpenseDto } from './dto/expense/sale-admin-review-expense.dto';
 import { ConfirmNoteDto } from './dto/expense/confirm-note.dto';
+import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
 import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto';
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
@@ -490,6 +491,13 @@ export class ExpenseRequestController {
         @Req() req: any,
     ) {
         return this.service.findAllExpenseGroupedByEmployee(filter, req.user);
+    }
+
+    /** Bảng Chi Ngoài chỉ đọc cho màn duyệt — cùng quyền đọc với Quản lý thu chi. */
+    @Get(':id/management-expense')
+    @Roles(...CASHFLOW_READ_ROLES)
+    managementExpense(@Param('id', ParseIntPipe) id: number) {
+        return this.service.getExpenseManagementView(id);
     }
 
     @Get(':id')

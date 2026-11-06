@@ -33,6 +33,9 @@ import { Ward } from '../ward/ward.entity';
 import { EmployeeRegion } from '../employee-region-school/entities/employee-region.entity';
 import { Subject } from '../subject/subject.entity';
 import { ExpensePeriod } from '../expense-periods/expense-period.entity';
+import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
+import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
+import { buildManagementViewSections } from './expense-management-view';
 import fixVietnamese from '../utils/fixVietnamese';
 import { NotificationService } from '../notifications/services/notification.service';
 import { SuggestGateway } from './suggest.gateway';
@@ -1915,6 +1918,7 @@ export class SuggestService {
 
     let stockInCode: string | null = null;
 
+    const managementSnapshot = await this.managementExpenseSnapshot(existing);
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.APPROVE,
@@ -1947,6 +1951,7 @@ export class SuggestService {
                 acceptor: people.get(purchase.acceptor.id!) ?? null,
               }
             : null,
+          ...managementSnapshot,
         };
       },
       mutate: (s) => {
@@ -2132,6 +2137,10 @@ export class SuggestService {
       );
     }
 
+    const existing = await this.repo.findOne({ where: { id } });
+    const managementSnapshot = existing
+      ? await this.managementExpenseSnapshot(existing)
+      : {};
     let paymentOrder: SuggestPaymentOrder | null = null;
     const saved = await this.expenseTransition({
       id,
@@ -2165,6 +2174,7 @@ export class SuggestService {
               paymentMethod: paymentOrder.paymentMethod,
             }
           : null,
+        ...managementSnapshot,
       }),
     });
 
@@ -2193,6 +2203,7 @@ export class SuggestService {
     if (!existing) {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
+    const managementSnapshot = await this.managementExpenseSnapshot(existing);
     const saved = await this.expenseTransition({
       id,
       action: existing.isMonthlyExpense
@@ -2200,6 +2211,7 @@ export class SuggestService {
         : ExpenseAction.REJECT,
       user,
       note: reason,
+      logData: () => managementSnapshot,
       mutate: (s) => {
         s.approvedBy = user.id;
         s.approvedAt = new Date();
@@ -4031,6 +4043,62 @@ export class SuggestService {
   }
 
   /** Chi tiết đề xuất chi + logs + payment order + attachments */
+  /** Bảng Chi Ngoài của đề xuất: đề xuất tháng đúng kỳ + môn, đề xuất năm mọi kỳ của năm học. */
+  private async loadManagementExpenseSections(s: Suggest) {
+    if (!s.schoolId) return [];
+    const monthlyPeriod = s.isMonthlyExpense ? s.expensePeriodId : null;
+    const sheets = await this.dataSource.getRepository(SchoolExpense).find({
+      where: {
+        school: { id: s.schoolId },
+        ...(monthlyPeriod ? { period: { id: monthlyPeriod } } : {}),
+      },
+      relations: {
+        period: true,
+        managementExpenseItems: {
+          subject: { catalog: true },
+          otherCosts: true,
+        },
+        revenueItems: { subject: true },
+      },
+    });
+    return buildManagementViewSections(sheets, {
+      schoolYear: s.schoolYear,
+      subjectId: s.isMonthlyExpense ? s.subjectId : null,
+    });
+  }
+
+  /**
+   * Ảnh chụp bảng Chi Ngoài lúc Giám đốc quyết định, lưu vào lịch sử vì bảng
+   * còn đổi hằng tháng. Không chụp được thì vẫn cho duyệt: thiếu ảnh chụp không
+   * nên chặn việc chi tiền.
+   */
+  private async managementExpenseSnapshot(
+    s: Suggest,
+  ): Promise<Record<string, unknown>> {
+    try {
+      return {
+        managementExpense: {
+          capturedAt: new Date().toISOString(),
+          sections: await this.loadManagementExpenseSections(s),
+        },
+      };
+    } catch (error) {
+      this.logger.error(
+        `Không chụp được bảng Chi Ngoài của đề xuất ${s.id}`,
+        error as Error,
+      );
+      return {};
+    }
+  }
+
+  async getExpenseManagementView(id: number) {
+    const s = await this.repo.findOne({
+      where: { id, type: SuggestType.EXPENSE_REQUEST },
+    });
+    if (!s) throw new NotFoundException('Đề xuất chi không tồn tại');
+    return { sections: await this.loadManagementExpenseSections(s) };
+  }
+
   async findOneExpense(id: number, actor?: AuthUser) {
     const s = await this.repo.findOne({
       where: { id, type: SuggestType.EXPENSE_REQUEST },
@@ -4091,10 +4159,20 @@ export class SuggestService {
       ? await this.employeeRepo.findBy({ id: In(actorIds) })
       : [];
     const actorNameById = new Map(actors.map((a) => [a.id, a.name]));
-    const enrichedLogs = logs.map((l) => ({
-      ...l,
-      actorName: l.userId ? actorNameById.get(l.userId) : undefined,
-    }));
+    // Bảng Chi Ngoài theo đúng quyền đọc của Quản lý thu chi: người lập đề xuất
+    // vẫn xem được lịch sử nhưng không thấy ảnh chụp số liệu này.
+    const canReadCashflow = actor?.roles?.some((role) =>
+      (CASHFLOW_READ_ROLES as readonly string[]).includes(role),
+    );
+    const enrichedLogs = logs.map((l) => {
+      const { managementExpense: _hidden, ...publicData } = (l.data ??
+        {}) as Record<string, unknown>;
+      return {
+        ...l,
+        data: canReadCashflow ? l.data : publicData,
+        actorName: l.userId ? actorNameById.get(l.userId) : undefined,
+      };
+    });
 
     return { ...s, logs: enrichedLogs };
   }
