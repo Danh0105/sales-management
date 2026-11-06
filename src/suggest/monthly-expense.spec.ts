@@ -332,6 +332,39 @@ describe('Chủ đơn sửa đề xuất chi tháng', () => {
   });
 });
 
+describe('Kế toán sửa số tiền chi tháng', () => {
+  it('xoá người duyệt cũ để Giám đốc phải duyệt lại', async () => {
+    const service = Object.create(SuggestService.prototype) as SuggestService;
+    let mutate: ((s: Record<string, unknown>) => void) | undefined;
+    Object.assign(service as object, {
+      repo: {
+        findOne: jest.fn().mockResolvedValue({ id: 5, isMonthlyExpense: true }),
+      },
+      expenseTransition: jest.fn(async (opts) => {
+        mutate = opts.mutate;
+        return { id: 5, code: 'DX-1', isMonthlyExpense: true };
+      }),
+      notifyExpense: jest.fn(),
+    });
+    await service.editExpensePaymentOrder(
+      5,
+      { amount: 2000, paymentMethod: 'CASH' } as never,
+      { id: 9, roles: [ExpenseRole.DEBT_ACCOUNTANT] } as never,
+    );
+    const row: Record<string, unknown> = {
+      isMonthlyExpense: true,
+      approvedBy: 8,
+      approvedAt: new Date(),
+    };
+    mutate?.(row);
+    expect(row).toMatchObject({
+      approvedBy: null,
+      approvedAt: null,
+      amount: 2000,
+    });
+  });
+});
+
 describe('GET /subjects', () => {
   it('truyền năm học xuống để không hiện môn của năm khác', () => {
     const service = {

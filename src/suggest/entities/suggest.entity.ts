@@ -114,7 +114,7 @@ export class Suggest {
     reviewedBy?: number;
 
     @Column({ nullable: true })
-    approvedBy?: number;
+    approvedBy?: number | null;
 
     @Column({ type: 'text', nullable: true })
     rejectReason?: string | null;

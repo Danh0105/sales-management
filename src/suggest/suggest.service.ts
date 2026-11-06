@@ -2473,7 +2473,9 @@ export class SuggestService {
 
       if (needsReapproval) {
         suggest.status = targetStatus;
-        suggest.approvedBy = undefined;
+        // TypeORM bỏ qua undefined: chi tháng phải gán null mới xoá được người
+        // duyệt của vòng trước.
+        suggest.approvedBy = isMonthlyExpense ? null : undefined;
         suggest.approvedAt = null;
         suggest.rejectReason = null;
         suggest.saleadminReviewStatus = null;
@@ -2730,7 +2732,7 @@ export class SuggestService {
       mutate: (s) => {
         if (s.isMonthlyExpense) {
           s.amount = dto.amount;
-          s.approvedBy = undefined;
+          s.approvedBy = null;
           s.approvedAt = null;
         }
         s.cashReleasedBy = null;
