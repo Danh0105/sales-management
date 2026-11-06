@@ -4055,7 +4055,7 @@ export class SuggestService {
       relations: {
         period: true,
         managementExpenseItems: {
-          subject: { catalog: true },
+          subject: { catalog: true, policies: true },
           otherCosts: true,
         },
         revenueItems: { subject: true },

@@ -1,9 +1,15 @@
+import { PolicyStatus } from '../policy/policy.enum';
 import { toNumber } from '../school-expenses/expense-calculations';
 
 /**
  * Bảng Chi Ngoài dạng chỉ đọc cho màn duyệt đề xuất chi và cây lịch sử.
- * Công thức giữ đúng như màn Quản lý thu chi (ManagementExpenseRow): tính lại từ
- * đơn giá, không dùng `totalOutside` đã lưu vì dòng cũ có thể theo công thức cũ.
+ * Giữ đúng cách hiển thị của màn Quản lý thu chi (RealExpenseDetail +
+ * ManagementExpenseRow) để hai nơi không lệch số:
+ * - tính lại từ đơn giá, không dùng `totalOutside` đã lưu vì dòng cũ có thể theo
+ *   công thức cũ;
+ * - cột Chi khác đi theo chính sách đã duyệt hiện tại: khoản đã lưu mà chính sách
+ *   không còn thì không hiện, không cộng; khoản chính sách có mà dòng chưa lưu thì
+ *   lấy đơn giá của chính sách.
  */
 export interface ManagementViewOtherCost {
   key: string;
@@ -59,10 +65,62 @@ export interface ManagementViewSection {
 
 const STANDALONE_CONTENT = 'Chi ngoài bổ sung';
 
+const normalizedName = (value: unknown) =>
+  String(value ?? '')
+    .trim()
+    .toLocaleLowerCase('vi-VN');
+
+const asList = (value: unknown): any[] => (Array.isArray(value) ? value : []);
+
+/** Giống `getPolicyOtherCosts` ở frontend, chỉ tính chính sách đã được Giám đốc duyệt. */
+function policyOtherCosts(subject: any): any[] {
+  const policies = asList(subject?.policies).filter(
+    (policy) => policy?.status === PolicyStatus.DIRECTOR_APPROVED,
+  );
+  const costs = [
+    ...policies
+      .flatMap((policy) => asList(policy?.data?.ttcs))
+      .flatMap((row) => asList(row?.otherCosts)),
+    ...policies.flatMap((policy) =>
+      asList(policy?.data?.otherCosts || policy?.otherCosts),
+    ),
+  ];
+  const unique = new Map<string, any>();
+  costs.forEach((cost, index) => {
+    const key = String(
+      cost?.id ?? (cost?.name ? normalizedName(cost.name) : index),
+    );
+    // Ưu tiên bản ghi có thuế, như màn Quản lý thu chi.
+    if (!unique.has(key) || toNumber(cost?.tax) !== 0) unique.set(key, cost);
+  });
+  return [...unique.values()];
+}
+
 const otherCostKey = (cost: any, index: number) =>
-  cost?.policyOtherCostId != null
-    ? `policy:${cost.policyOtherCostId}`
-    : `name:${(cost?.name ?? '').trim() || index}`;
+  String(cost?.id ?? `${cost?.name || 'other-cost'}-${index}`);
+
+const grossPrice = (cost: any) =>
+  cost?.unitPrice !== undefined && cost?.unitPrice !== null
+    ? toNumber(cost.unitPrice)
+    : toNumber(cost?.percent ?? cost?.value);
+
+/** Khoản đã lưu ứng với khoản của chính sách: theo id, theo tên, cuối cùng theo vị trí. */
+function savedCostFor(saved: any[], policyCost: any, index: number) {
+  const policyId = Number(policyCost?.id);
+  const policyName = normalizedName(policyCost?.name);
+  return (
+    saved.find(
+      (item) =>
+        Number.isInteger(policyId) &&
+        policyId > 0 &&
+        Number(item?.policyOtherCostId) === policyId,
+    ) ??
+    saved.find(
+      (item) => policyName && normalizedName(item?.name) === policyName,
+    ) ??
+    saved[index]
+  );
+}
 
 const periodLabel = (period: any) =>
   period?.name ||
@@ -76,7 +134,11 @@ const dateOnly = (value: unknown): string | null => {
   return String(value).slice(0, 10);
 };
 
-function buildRow(item: any, revenue: any): ManagementViewRow {
+function buildRow(
+  item: any,
+  revenue: any,
+  columns: any[],
+): ManagementViewRow {
   // Dòng đi kèm Doanh Thu dùng chung Nội dung và số lượng của Doanh Thu; dòng
   // thêm riêng tự giữ các trường này.
   const shared = revenue ?? item;
@@ -92,13 +154,15 @@ function buildRow(item: any, revenue: any): ManagementViewRow {
   const ql1Expense = Math.max(0, ql1UnitPrice - ql1Tax) * quantity;
   const ql2Expense = Math.max(0, ql2UnitPrice - ql2Tax) * quantity;
 
-  const otherCosts = (item?.otherCosts ?? []).map(
-    (cost: any, index: number): ManagementViewOtherCost => {
-      const unitPrice = toNumber(cost?.unitPrice, 0);
-      const tax = toNumber(cost?.tax, 0);
+  const savedCosts = asList(item?.otherCosts);
+  const otherCosts = columns.map(
+    (policyCost, index): ManagementViewOtherCost => {
+      const saved = savedCostFor(savedCosts, policyCost, index);
+      const unitPrice = grossPrice(saved ?? policyCost);
+      const tax = toNumber(saved?.tax ?? policyCost?.tax);
       return {
-        key: otherCostKey(cost, index),
-        name: cost?.name?.trim() || `Chi khác ${index + 1}`,
+        key: otherCostKey(policyCost, index),
+        name: policyCost?.name?.trim() || `Chi khác ${index + 1}`,
         unitPrice,
         tax,
         expense: Math.max(0, unitPrice - tax) * quantity,
@@ -174,19 +238,20 @@ export function buildManagementViewSections(
           revenueByRow.set(toNumber(revenue.rowIndex, 0), revenue);
         }
       }
+      const columns = policyOtherCosts(subject);
       const rows = items
         .map((item) =>
-          buildRow(item, revenueByRow.get(toNumber(item?.rowIndex, 0))),
+          buildRow(
+            item,
+            revenueByRow.get(toNumber(item?.rowIndex, 0)),
+            columns,
+          ),
         )
         .sort((a, b) => a.rowIndex - b.rowIndex);
 
-      const otherCostColumns = new Map<string, string>();
       const otherCostExpenses: Record<string, number> = {};
       for (const row of rows) {
         for (const cost of row.otherCosts) {
-          if (!otherCostColumns.has(cost.key)) {
-            otherCostColumns.set(cost.key, cost.name);
-          }
           otherCostExpenses[cost.key] =
             (otherCostExpenses[cost.key] ?? 0) + cost.expense;
         }
@@ -203,9 +268,9 @@ export function buildManagementViewSections(
         schoolYear: subject.schoolYear ?? null,
         confirmed: !!sheet?.managementExpenseConfirmed,
         finalized: !!sheet?.finalized,
-        otherCostColumns: [...otherCostColumns].map(([key, name]) => ({
-          key,
-          name,
+        otherCostColumns: columns.map((cost, index) => ({
+          key: otherCostKey(cost, index),
+          name: cost?.name?.trim() || `Chi khác ${index + 1}`,
         })),
         rows,
         totals: {

@@ -102,35 +102,112 @@ describe('buildManagementViewSections', () => {
     expect(section.rows[1].content).toBe('Chi ngoài bổ sung');
   });
 
-  it('chi khác trừ thuế, không âm, cộng vào Chi ngoài và tạo cột riêng', () => {
-    const [section] = buildManagementViewSections(
-      [
+  describe('Chi khác đi theo chính sách đã duyệt như màn Quản lý thu chi', () => {
+    const withPolicy = (otherCosts: unknown[], status = 'DIRECTOR_APPROVED') => ({
+      ...s1,
+      policies: [{ status, data: { ttcs: [{ otherCosts }] } }],
+    });
+    const build = (subjectRef: unknown, saved: unknown[]) =>
+      buildManagementViewSections(
+        [
+          {
+            id: 9,
+            period: { id: 3 },
+            managementExpenseItems: [
+              item(0, subjectRef, {
+                ql1UnitPrice: '0',
+                ql1Tax: '0',
+                ql2UnitPrice: '0',
+                otherCosts: saved,
+              }),
+            ],
+            revenueItems: [revenue(0, subjectRef, { monthsCount: '1' })],
+          },
+        ],
+        {},
+      )[0];
+
+    it('tính theo số đã lưu, trừ thuế, không âm, tạo cột riêng', () => {
+      const section = build(
+        withPolicy([
+          { id: 7, name: 'Bảo vệ', unitPrice: 1, tax: 1 },
+          { id: 8, name: 'Thuế cao', unitPrice: 1, tax: 1 },
+        ]),
+        [
+          { policyOtherCostId: 7, name: 'Bảo vệ', unitPrice: '3000', tax: '500' },
+          { policyOtherCostId: 8, name: 'Thuế cao', unitPrice: '100', tax: '900' },
+        ],
+      );
+      expect(section.rows[0].otherCosts.map((c) => c.expense)).toEqual([250000, 0]);
+      expect(section.rows[0].totalOutside).toBe(250000);
+      expect(section.otherCostColumns).toEqual([
+        { key: '7', name: 'Bảo vệ' },
+        { key: '8', name: 'Thuế cao' },
+      ]);
+      expect(section.totals.otherCostExpenses['7']).toBe(250000);
+    });
+
+    it('khoản đã lưu mà chính sách không còn thì không hiện, không cộng', () => {
+      const section = build(withPolicy([]), [
+        { policyOtherCostId: null, name: 'KT', unitPrice: '1000', tax: '200' },
+      ]);
+      expect(section.otherCostColumns).toEqual([]);
+      expect(section.rows[0].totalOutside).toBe(0);
+    });
+
+    it('chính sách chưa được duyệt thì không tính', () => {
+      const section = build(
+        withPolicy([{ id: 7, name: 'A', unitPrice: 1000, tax: 0 }], 'PENDING'),
+        [],
+      );
+      expect(section.otherCostColumns).toEqual([]);
+      expect(section.rows[0].totalOutside).toBe(0);
+    });
+
+    it('dòng chưa lưu khoản của chính sách thì lấy đơn giá chính sách', () => {
+      const section = build(
+        withPolicy([{ id: 7, name: 'A', unitPrice: 1000, tax: 100 }]),
+        [],
+      );
+      expect(section.rows[0].otherCosts[0]).toMatchObject({
+        unitPrice: 1000,
+        tax: 100,
+        expense: 90000,
+      });
+    });
+
+    it('khớp theo tên khi không có id, rồi theo vị trí', () => {
+      const byName = build(
+        withPolicy([{ name: 'Quản lý', unitPrice: 1, tax: 0 }]),
+        [{ name: ' quản LÝ ', unitPrice: '2000', tax: '0' }],
+      );
+      expect(byName.rows[0].otherCosts[0].unitPrice).toBe(2000);
+      const byIndex = build(
+        withPolicy([{ id: 7, name: 'Khác tên', unitPrice: 1, tax: 0 }]),
+        [{ name: 'Tên cũ', unitPrice: '3000', tax: '0' }],
+      );
+      expect(byIndex.rows[0].otherCosts[0].unitPrice).toBe(3000);
+    });
+
+    it('chính sách trùng khoản thì ưu tiên bản có thuế', () => {
+      const section = build(
         {
-          id: 9,
-          period: { id: 3 },
-          managementExpenseItems: [
-            item(0, s1, {
-              ql1UnitPrice: '0',
-              ql1Tax: '0',
-              ql2UnitPrice: '0',
-              otherCosts: [
-                { policyOtherCostId: 7, name: 'Bảo vệ', unitPrice: '3000', tax: '500' },
-                { policyOtherCostId: 8, name: 'Thuế cao', unitPrice: '100', tax: '900' },
-              ],
-            }),
+          ...s1,
+          policies: [
+            {
+              status: 'DIRECTOR_APPROVED',
+              data: {
+                ttcs: [{ otherCosts: [{ id: 7, name: 'A', unitPrice: 1000, tax: 0 }] }],
+                otherCosts: [{ id: 7, name: 'A', unitPrice: 1000, tax: 100 }],
+              },
+            },
           ],
-          revenueItems: [revenue(0, s1, { monthsCount: '1' })],
         },
-      ],
-      {},
-    );
-    expect(section.rows[0].otherCosts.map((c) => c.expense)).toEqual([250000, 0]);
-    expect(section.rows[0].totalOutside).toBe(250000);
-    expect(section.otherCostColumns).toEqual([
-      { key: 'policy:7', name: 'Bảo vệ' },
-      { key: 'policy:8', name: 'Thuế cao' },
-    ]);
-    expect(section.totals.otherCostExpenses['policy:7']).toBe(250000);
+        [],
+      );
+      expect(section.otherCostColumns).toHaveLength(1);
+      expect(section.rows[0].otherCosts[0].tax).toBe(100);
+    });
   });
 
   it('lọc theo năm học và môn, kỳ mới nhất đứng trước', () => {
