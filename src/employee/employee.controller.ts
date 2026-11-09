@@ -92,7 +92,7 @@ export class EmployeeController {
   }
 
   @Get('positions')
-  @Roles(...EMPLOYEE_ADMIN_ROLES)
+  @Roles(...EMPLOYEE_ADMIN_ROLES, 'troly_gd')
   positions() {
     return EMPLOYEE_POSITIONS;
   }

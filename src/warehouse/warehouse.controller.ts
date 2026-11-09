@@ -23,11 +23,14 @@ import { CreateWarehouseItemDto } from './dto/create-warehouse-item.dto';
 import { UpdateWarehouseItemDto } from './dto/update-warehouse-item.dto';
 import { CreateWarehouseReceiptDto } from './dto/create-warehouse-receipt.dto';
 
+/** Trợ lý giám đốc: chỉ xem tồn kho + phiếu nhập/xuất như Giám đốc. */
+const ASSISTANT_VIEW_ROLE = 'troly_gd';
+
 /**
  * Quản lý kho thiết bị (1 kho duy nhất). Phòng kỹ thuật (`ky_thuat`) quản lý
  * tồn kho + phiếu nhập/xuất; kinh doanh (`sales`) chỉ được xem danh sách tồn
- * để chọn thiết bị có sẵn khi tạo đề xuất thiết bị. Giám đốc được xem tồn kho
- * và phiếu nhập/xuất (không tạo/sửa) để theo dõi.
+ * để chọn thiết bị có sẵn khi tạo đề xuất thiết bị. Giám đốc, trợ lý GĐ được
+ * xem tồn kho và phiếu nhập/xuất (không tạo/sửa) để theo dõi.
  */
 @Controller('warehouse')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -36,13 +39,13 @@ export class WarehouseController {
     constructor(private readonly service: WarehouseService) {}
 
     @Get('items')
-    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.SALES, ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.SALES, ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ASSISTANT_VIEW_ROLE)
     listItems() {
         return this.service.listItems();
     }
 
     @Get('items/:id')
-    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.SALES, ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.SALES, ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ASSISTANT_VIEW_ROLE)
     getItem(@Param('id', ParseIntPipe) id: number) {
         return this.service.getItem(id);
     }
@@ -64,7 +67,7 @@ export class WarehouseController {
     }
 
     @Get('receipts')
-    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.DIRECTOR)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.DIRECTOR, ASSISTANT_VIEW_ROLE)
     listReceipts() {
         return this.service.listReceipts();
     }

@@ -151,6 +151,9 @@ export const IMPLICIT_FINANCE_ROLES: Record<string, FinanceRole[]> = {
   director: [FinanceRole.ADMIN, FinanceRole.DIRECTOR],
   ketoan_truong: [FinanceRole.ACCOUNTANT],
   thuquy: [FinanceRole.CASHIER],
+  // Trợ lý GĐ xem mọi phiếu + báo cáo; VIEWER không duyệt/chi và không được
+  // chọn làm người duyệt ở màn Cấu hình quy trình.
+  troly_gd: [FinanceRole.VIEWER],
 };
 
 /**
