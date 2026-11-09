@@ -59,6 +59,8 @@ export interface SuggestEventData {
   paymentOrder?: { code?: string; amount?: number | string | null };
   cashAccount?: string | null;
   fundSource?: string | null;
+  /** CONFIRM_REMAINDER_RETURNED: phần dư Thủ quỹ nhận lại sau khi chi một phần. */
+  returnAmount?: number | string | null;
 }
 
 export interface SuggestEventRow {
@@ -171,7 +173,7 @@ WHERE h.action IN (
   'CREATE_PAYMENT_ORDER', 'EDIT_PAYMENT_ORDER',
   'CREATE_MONTHLY_PAYMENT_ORDER', 'EDIT_MONTHLY_PAYMENT_ORDER',
   'APPROVE_MONTHLY',
-  'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED'
+  'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED', 'CONFIRM_REMAINDER_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
 
@@ -430,6 +432,8 @@ interface ReleaseState {
   /** Đã bị một lần xác nhận xuất tiền sau thay thế. */
   superseded: boolean;
   returned: SuggestEventRow | null;
+  /** Chi tháng chi một phần: các lần Thủ quỹ nhận lại phần dư của lần xuất này. */
+  remainders: { event: SuggestEventRow; amount: Cents }[];
 }
 
 const FUND_SOURCE_LABEL: Record<string, string> = {
@@ -446,7 +450,9 @@ const FUND_SOURCE_LABEL: Record<string, string> = {
  *   → GROUP_ONLY;
  * - xuất tiền lần nữa khi chưa nhận lại quỹ (sau khi sửa lệnh chi) là đính
  *   chính: chỉ tính lần cuối, lần trước thành cảnh báo SUPERSEDED_RELEASE;
- * - nhận lại quỹ = bút toán thu, cùng số tiền và tài khoản với lần xuất đang mở.
+ * - nhận lại quỹ = bút toán thu, cùng số tiền và tài khoản với lần xuất đang mở;
+ * - chi tháng chi một phần: Thủ quỹ nhận lại phần dư (data.returnAmount) = bút
+ *   toán thu đúng số đó, cùng tài khoản với lần xuất.
  */
 export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
   const lines: LedgerLine[] = [];
@@ -502,11 +508,21 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
           fundSource: event.data?.fundSource ?? null,
           superseded: false,
           returned: null,
+          remainders: [],
         };
         releases.push(open);
       } else if (event.action === 'CONFIRM_FUND_RETURNED' && open) {
         open.returned = event;
         open = null;
+      } else if (event.action === 'CONFIRM_REMAINDER_RETURNED' && open) {
+        // Thu phần dư về đúng tài khoản đã xuất; phần đã chi vẫn là chi.
+        const amount =
+          event.data?.returnAmount !== undefined && event.data?.returnAmount !== null
+            ? toCents(event.data.returnAmount)
+            : null;
+        if (amount !== null && amount > 0n) {
+          open.remainders.push({ event, amount });
+        }
       }
     }
 
@@ -575,6 +591,23 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
         isInternalTransfer: false,
         source,
       });
+
+      for (const remainder of release.remainders) {
+        lines.push({
+          key: `EXPENSE_REQUEST:${suggestId}:remainder:${remainder.event.history_id}`,
+          postingDate: remainder.event.event_date,
+          documentDate: remainder.event.event_date,
+          documentNo,
+          invoiceNo: null,
+          description: clean(`Hoàn phần dư đề xuất ${suggestLabel}${subject}`),
+          accountCode: release.accountCode,
+          receipt: remainder.amount,
+          payment: 0n,
+          ...partner,
+          isInternalTransfer: false,
+          source,
+        });
+      }
 
       if (release.returned) {
         lines.push({

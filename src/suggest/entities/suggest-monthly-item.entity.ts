@@ -8,6 +8,7 @@ import {
 } from 'typeorm';
 
 import { ExpensePeriod } from '../../expense-periods/expense-period.entity';
+import { numericTransformer } from '../../utils/numeric-transformer';
 import { School } from '../../school/schools.entity';
 import { Subject } from '../../subject/subject.entity';
 import { Suggest } from './suggest.entity';
@@ -59,4 +60,27 @@ export class SuggestMonthlyItem {
     /** Thứ tự người tạo đã chọn. */
     @Column({ type: 'int', default: 0 })
     position!: number;
+
+    /**
+     * Còn chi của dòng này lúc Giám đốc duyệt (phần của nó trong lệnh chi).
+     * Chỉ có khi lệnh chi do hệ thống lập từ bảng Chi Ngoài; Kế toán lập/sửa
+     * lệnh chi thì xoá về null — khi đó không chi một phần theo trường được.
+     */
+    @Column({
+        type: 'numeric',
+        name: 'approved_amount',
+        precision: 18,
+        scale: 2,
+        nullable: true,
+        transformer: numericTransformer,
+    })
+    approvedAmount!: number | null;
+
+    /** Kinh doanh xác nhận chi một phần: true đã chi, false không chi; null chưa xác nhận. */
+    @Column({ type: 'boolean', nullable: true })
+    spent!: boolean | null;
+
+    /** Giám đốc không duyệt dòng này: không tính vào lệnh chi, không chi. */
+    @Column({ type: 'boolean', default: false })
+    excluded!: boolean;
 }

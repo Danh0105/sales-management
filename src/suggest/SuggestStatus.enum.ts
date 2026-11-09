@@ -18,6 +18,11 @@ export enum SuggestStatus {
   CASH_RECEIVED = 'CASH_RECEIVED',
   SPENT = 'SPENT',
   NOT_SPENT = 'NOT_SPENT',
+  /**
+   * Chi tháng nhiều trường: kinh doanh chỉ chi một số trường, chờ Thủ quỹ nhận
+   * lại phần dư. Nhận xong thì thành SPENT.
+   */
+  PARTIALLY_SPENT = 'PARTIALLY_SPENT',
   FUND_RETURNED = 'FUND_RETURNED',
   /** Người tạo tự rút đơn — tách khỏi REJECTED để không lẫn với việc bị giám đốc từ chối. */
   WITHDRAWN = 'WITHDRAWN',

@@ -37,7 +37,12 @@ const itemB = {
 };
 
 const section = (schoolId: number, remaining: number) =>
-  ({ schoolId, totals: { remaining } }) as never;
+  ({
+    schoolId,
+    subjectId: schoolId === 446 ? 902 : 901,
+    periodId: schoolId === 446 ? 78 : 77,
+    totals: { remaining },
+  }) as never;
 
 describe('DTO nhiều trường', () => {
   const pipe = new ValidationPipe({ whitelist: true, transform: true });
@@ -295,6 +300,10 @@ describe('Giám đốc duyệt chi tháng không nhập số tiền', () => {
   }) => {
     const manager = {
       findOne: jest.fn().mockResolvedValue(opts.existingOrder ?? null),
+      find: jest.fn().mockResolvedValue([
+        { id: 11, ...itemA },
+        { id: 12, ...itemB },
+      ]),
       save: jest.fn(async (_entity, data) => ({ id: 31, ...data })),
       update: jest.fn(),
     };
@@ -351,6 +360,17 @@ describe('Giám đốc duyệt chi tháng không nhập số tiền', () => {
       { id: 5 },
       { amount: 2_000_000.5 },
     );
+    // Lưu phần của từng trường để chi một phần không phải nhập số.
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestMonthlyItem,
+      { id: 11 },
+      { approvedAmount: 1_200_000, spent: null, excluded: false },
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestMonthlyItem,
+      { id: 12 },
+      { approvedAmount: 800_000.5, spent: null, excluded: false },
+    );
     expect(saved.amount).toBe(2_000_000.5);
     expect(saved.data).toMatchObject({
       amount: 2_000_000.5,
@@ -388,6 +408,64 @@ describe('Giám đốc duyệt chi tháng không nhập số tiền', () => {
     await expect(
       service.approveExpense(5, director, {} as never),
     ).rejects.toThrow('Không đọc được bảng Chi Ngoài');
+  });
+
+  it('Giám đốc bỏ một trường: lệnh chi chỉ tính trường được duyệt', async () => {
+    const { service, manager } = make({
+      sections: [section(445, 1_200_000), section(446, 800_000)],
+    });
+    const saved: any = await service.approveExpense(5, director, {
+      approvedItemIds: [11],
+      note: 'TH B chưa xác nhận lớp',
+    } as never);
+    expect(manager.save).toHaveBeenCalledWith(
+      SuggestPaymentOrder,
+      expect.objectContaining({ amount: 1_200_000 }),
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestMonthlyItem,
+      { id: 12 },
+      { approvedAmount: null, spent: null, excluded: true },
+    );
+    expect(saved.data.items).toEqual([
+      expect.objectContaining({ id: 11, amount: 1_200_000, approved: true }),
+      expect.objectContaining({ id: 12, amount: 800_000, approved: false }),
+    ]);
+    const notify = (service as never as { notifyExpense: jest.Mock }).notifyExpense;
+    expect(notify.mock.calls[0][0].message).toContain('Không duyệt:');
+  });
+
+  it.each([
+    ['bỏ trường mà không ghi lý do', { approvedItemIds: [11] }, 'Phải ghi lý do'],
+    ['chọn trường của đề xuất khác', { approvedItemIds: [99], note: 'x' }, 'không thuộc đề xuất'],
+    ['chọn trùng', { approvedItemIds: [11, 11], note: 'x' }, 'Chọn trùng'],
+  ])('từ chối khi %s', async (_name, dto, message) => {
+    const { service, manager } = make({
+      sections: [section(445, 1_200_000), section(446, 800_000)],
+    });
+    await expect(
+      service.approveExpense(5, director, dto as never),
+    ).rejects.toThrow(message);
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('trường được chọn hết tiền thì không duyệt được', async () => {
+    const { service } = make({
+      sections: [section(445, 0), section(446, 800_000)],
+    });
+    await expect(
+      service.approveExpense(5, director, { approvedItemIds: [11], note: 'x' } as never),
+    ).rejects.toThrow('Các trường được chọn không còn khoản nào cần chi');
+  });
+
+  it('lệnh chi do Kế toán lập thì không bỏ bớt trường được', async () => {
+    const { service } = make({
+      sections: [section(445, 1)],
+      existingOrder: { id: 9, code: 'LC-0', amount: 500_000 },
+    });
+    await expect(
+      service.approveExpense(5, director, { approvedItemIds: [11], note: 'x' } as never),
+    ).rejects.toThrow('không bỏ bớt trường');
   });
 
   it('không đọc được bảng nhưng đã có lệnh chi thì vẫn duyệt', async () => {

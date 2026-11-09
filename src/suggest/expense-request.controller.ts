@@ -40,6 +40,7 @@ import { ConfirmNoteDto } from './dto/expense/confirm-note.dto';
 import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
 import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto';
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
+import { ConfirmPartiallySpentDto } from './dto/expense/confirm-partially-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
@@ -153,6 +154,25 @@ export class ExpenseRequestController {
             id,
             req.user,
             dto.note,
+            toAttachments(files),
+        );
+    }
+
+    /** Chi tháng nhiều trường: chọn trường đã chi, phần dư hoàn quỹ. */
+    @Post(':id/confirm-partially-spent')
+    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @UseInterceptors(multiUpload)
+    confirmPartiallySpent(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmPartiallySpentDto,
+        @UploadedFiles() files: Express.Multer.File[],
+        @Req() req: any,
+    ) {
+        return this.service.confirmPartiallySpent(
+            id,
+            req.user,
+            dto.spentItemIds,
+            dto.reason,
             toAttachments(files),
         );
     }
@@ -431,6 +451,16 @@ export class ExpenseRequestController {
             dto.fundSource,
             dto.cashAccount,
         );
+    }
+
+    @Post(':id/remainder-returned')
+    @Roles(ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT)
+    remainderReturned(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.confirmRemainderReturned(id, req.user, dto.note);
     }
 
     @Post(':id/fund-returned')

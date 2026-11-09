@@ -74,6 +74,8 @@ export type ExpenseAssignee = 'stockInHandler' | 'acceptor';
  *   Sau hoàn quỹ / khi sửa số tiền: Kế toán công nợ lập/sửa lệnh chi →
  *   PENDING_APPROVAL → Giám đốc duyệt lại. PENDING_ACCOUNTING chỉ còn cho đề
  *   xuất tạo trước khi bỏ bước Kế toán nhập tiền.
+ *   Chi một phần: CASH_RECEIVED → PARTIALLY_SPENT (kinh doanh chọn trường đã
+ *   chi) → SPENT (Thủ quỹ nhận lại phần dư).
  *
  * Với ĐỀ XUẤT THIẾT BỊ (kind = EQUIPMENT), nhánh sau APPROVED đổi sang phòng
  * kỹ thuật:
@@ -227,6 +229,25 @@ export const EXPENSE_TRANSITIONS: Partial<
     to: SuggestStatus.NOT_SPENT,
     roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
+  },
+
+  /**
+   * Chi tháng nhiều trường mà chỉ chi một số trường. Số tiền từng trường lấy
+   * theo Còn chi lúc Giám đốc duyệt (service kiểm), kinh doanh không nhập số.
+   */
+  [ExpenseAction.CONFIRM_PARTIALLY_SPENT]: {
+    from: [SuggestStatus.CASH_RECEIVED],
+    to: SuggestStatus.PARTIALLY_SPENT,
+    roles: [...EXPENSE_REQUESTER_ROLES],
+    ownerOnly: true,
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CONFIRM_REMAINDER_RETURNED]: {
+    from: [SuggestStatus.PARTIALLY_SPENT],
+    to: SuggestStatus.SPENT,
+    roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   [ExpenseAction.CONFIRM_FUND_RETURNED]: {
@@ -532,6 +553,7 @@ export function expenseActorForStatus(
       };
 
     case SuggestStatus.PAYMENT_ORDERED:
+    case SuggestStatus.PARTIALLY_SPENT:
       return {
         roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
         owner: false,

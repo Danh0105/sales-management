@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
   IsArray,
   IsEnum,
   IsInt,
@@ -53,6 +54,19 @@ export class ApproveExpenseDto {
   @IsOptional()
   @IsString()
   note?: string;
+
+  /**
+   * Chi tháng nhiều trường: các dòng (trường · môn · kỳ) Giám đốc duyệt. Bỏ
+   * trống = duyệt tất cả. Dòng bỏ ra không tính vào lệnh chi; khi bỏ dòng phải
+   * có ghi chú lý do.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Phải duyệt ít nhất một trường' })
+  @Type(() => Number)
+  @IsInt({ each: true })
+  @IsPositive({ each: true })
+  approvedItemIds?: number[];
 
   /**
    * Nguồn thiết bị khi requestKind = EQUIPMENT: có sẵn trong kho (mặc định)

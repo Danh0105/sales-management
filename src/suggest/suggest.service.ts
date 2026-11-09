@@ -40,10 +40,15 @@ import {
   ManagementViewSection,
 } from './expense-management-view';
 import {
+  formatMoneyVnd,
+  monthlyItemAmounts,
+  monthlyItemLabel,
   monthlyItemsFromColumns,
   MonthlyItemInput,
   monthlyRemainingTotal,
+  partialSpendSummary,
   ResolvedMonthlyItem,
+  selectApprovedItems,
 } from './monthly-expense-items';
 import { MAX_MONTHLY_EXPENSE_ITEMS } from './dto/expense/create-expense-request.dto';
 import fixVietnamese from '../utils/fixVietnamese';
@@ -2151,6 +2156,7 @@ export class SuggestService {
       : {};
     let paymentOrder: SuggestPaymentOrder | null = null;
     let autoAmount = false;
+    let decided: { id: number; label: string; amount: number; approved: boolean }[] = [];
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.APPROVE_MONTHLY,
@@ -2167,15 +2173,45 @@ export class SuggestService {
         paymentOrder = await manager.findOne(SuggestPaymentOrder, {
           where: { suggestId: s.id! },
         });
-        if (paymentOrder) return;
+        const rows = await manager.find(SuggestMonthlyItem, {
+          where: { suggestId: s.id! },
+          relations: { school: true, subject: { catalog: true }, expensePeriod: true },
+          order: { position: 'ASC', id: 'ASC' },
+        });
+        if (paymentOrder) {
+          // Số tiền do Kế toán lập cho cả đề xuất: không bỏ bớt trường được.
+          if (dto.approvedItemIds && dto.approvedItemIds.length < rows.length) {
+            throw new BadRequestException(
+              'Lệnh chi do Kế toán lập cho cả đề xuất nên không bỏ bớt trường khi duyệt được — từ chối để nhân viên sửa',
+            );
+          }
+          return;
+        }
         if (!sections) {
           throw new BadRequestException(
             'Không đọc được bảng Chi Ngoài để lập lệnh chi, vui lòng thử lại',
           );
         }
-        if (!(remainingTotal > 0)) {
+        // Đề xuất cũ chưa có dòng trường: một trường, lấy cả bảng.
+        if (rows.length === 0 && dto.approvedItemIds) {
+          throw new BadRequestException('Đề xuất chỉ có một trường');
+        }
+        const amounts = monthlyItemAmounts(rows, sections);
+        const { approvedIds, total } =
+          rows.length > 0
+            ? selectApprovedItems(rows, amounts, dto.approvedItemIds)
+            : { approvedIds: new Set<number>(), total: remainingTotal };
+        const excludedCount = rows.filter((row) => !approvedIds.has(row.id)).length;
+        if (excludedCount > 0 && !dto.note?.trim()) {
           throw new BadRequestException(
-            'Bảng Chi Ngoài của các trường trong đề xuất không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được',
+            'Phải ghi lý do không duyệt các trường bỏ chọn',
+          );
+        }
+        if (!(total > 0)) {
+          throw new BadRequestException(
+            excludedCount > 0
+              ? 'Các trường được chọn không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được'
+              : 'Bảng Chi Ngoài của các trường trong đề xuất không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được',
           );
         }
         autoAmount = true;
@@ -2188,20 +2224,42 @@ export class SuggestService {
         paymentOrder = await manager.save(SuggestPaymentOrder, {
           code,
           suggestId: s.id!,
-          amount: remainingTotal,
+          amount: total,
           // Ghi tạm Tiền mặt; Thủ quỹ chọn tài khoản xuất thì đổi theo.
           paymentMethod: PaymentMethod.CASH,
           note: null,
           createdBy: user.id,
         });
-        s.amount = remainingTotal;
-        await manager.update(Suggest, { id: s.id! }, { amount: remainingTotal });
+        s.amount = total;
+        await manager.update(Suggest, { id: s.id! }, { amount: total });
+        // Phần của từng trường trong lệnh chi — để sau này chi một phần chỉ
+        // cần chọn trường, không phải nhập số. Trường không duyệt không có phần.
+        for (const [index, row] of rows.entries()) {
+          const approved = approvedIds.has(row.id);
+          await manager.update(
+            SuggestMonthlyItem,
+            { id: row.id },
+            {
+              approvedAmount: approved ? amounts[index] : null,
+              spent: null,
+              excluded: !approved,
+            },
+          );
+        }
+        decided = rows.map((row, index) => ({
+          id: row.id,
+          label: monthlyItemLabel(row),
+          amount: amounts[index],
+          approved: approvedIds.has(row.id),
+        }));
       },
       logData: () => ({
         requestKind: ExpenseRequestKind.CASH,
         amount: paymentOrder ? Number(paymentOrder.amount) : null,
         // true = số tiền lấy từ tổng Còn chi của bảng Chi Ngoài lúc duyệt.
         amountFromManagementExpense: autoAmount,
+        // Trường nào được duyệt / không duyệt (chỉ khi hệ thống lập lệnh chi).
+        ...(decided.length > 0 ? { items: decided } : {}),
         paymentOrder: paymentOrder
           ? {
               code: paymentOrder.code,
@@ -2217,7 +2275,14 @@ export class SuggestService {
       {
         suggestId: saved.id!,
         title: '✅ Đề xuất chi tháng đã duyệt',
-        message: `Đề xuất ${saved.code} đã được Giám đốc duyệt, vui lòng xuất tiền`,
+        message:
+          `Đề xuất ${saved.code} đã được Giám đốc duyệt, vui lòng xuất tiền` +
+          (decided.some((item) => !item.approved)
+            ? `. Không duyệt: ${decided
+                .filter((item) => !item.approved)
+                .map((item) => item.label)
+                .join('; ')}`
+            : ''),
         senderId: user.id,
         meta: {
           status: saved.status,
@@ -2366,6 +2431,7 @@ export class SuggestService {
           SuggestStatus.CASH_RECEIVED,
           SuggestStatus.SPENT,
           SuggestStatus.NOT_SPENT,
+          SuggestStatus.PARTIALLY_SPENT,
         ].includes(suggest.status as SuggestStatus)
       ) {
         throw new BadRequestException(
@@ -2615,6 +2681,7 @@ export class SuggestService {
       SuggestStatus.CASH_RECEIVED,
       SuggestStatus.SPENT,
       SuggestStatus.NOT_SPENT,
+      SuggestStatus.PARTIALLY_SPENT,
       SuggestStatus.FUND_RETURNED,
       SuggestStatus.STOCK_ISSUE_ORDERED,
       SuggestStatus.EQUIPMENT_RECEIVED,
@@ -2706,6 +2773,7 @@ export class SuggestService {
         await manager.delete(SuggestPaymentOrder, {
           suggestId: s.id!,
         });
+        if (s.isMonthlyExpense) await this.clearMonthlyItemSplit(manager, s.id!);
 
         paymentOrder = await manager.save(SuggestPaymentOrder, {
           code,
@@ -2799,6 +2867,7 @@ export class SuggestService {
         if (!existing) {
           throw new BadRequestException('Đề xuất chưa có lệnh chi để sửa');
         }
+        if (s.isMonthlyExpense) await this.clearMonthlyItemSplit(manager, s.id!);
 
         paymentOrder = await manager.save(SuggestPaymentOrder, {
           ...(existing ?? {}),
@@ -3021,6 +3090,159 @@ export class SuggestService {
     );
 
     return saved;
+  }
+
+  // ========== BƯỚC 6C — SALES chi một phần (chi tháng nhiều trường) ==========
+
+  /**
+   * Kinh doanh chọn trường đã chi thật; không nhập số. Số đã chi = phần của
+   * các trường đó lúc Giám đốc duyệt, phần dư chờ Thủ quỹ nhận lại.
+   */
+  async confirmPartiallySpent(
+    id: number,
+    user: AuthUser,
+    spentItemIds: number[],
+    reason: string,
+    files?: UploadedAttachment[],
+  ) {
+    type PartialSummary = {
+      spentAmount: number;
+      returnAmount: number;
+      items: { id: number; label: string; amount: number | null; spent: boolean }[];
+    };
+    let summary: PartialSummary | null = null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CONFIRM_PARTIALLY_SPENT,
+      user,
+      note: reason,
+      mutate: (s) => {
+        s.spentAt = new Date();
+        s.notSpentReason = reason;
+      },
+      extra: async (manager, s) => {
+        if (!s.isMonthlyExpense) {
+          throw new BadRequestException(
+            'Chỉ đề xuất chi tháng nhiều trường mới chi một phần được',
+          );
+        }
+        // Trường Giám đốc không duyệt không có trong lệnh chi.
+        const rows = (
+          await manager.find(SuggestMonthlyItem, {
+            where: { suggestId: s.id! },
+            relations: { school: true, subject: { catalog: true }, expensePeriod: true },
+            order: { position: 'ASC', id: 'ASC' },
+          })
+        ).filter((row) => !row.excluded);
+        const order = await manager.findOne(SuggestPaymentOrder, {
+          where: { suggestId: s.id! },
+        });
+        if (!order) throw new BadRequestException('Đề xuất chưa có lệnh chi');
+        const result = partialSpendSummary(rows, Number(order.amount), spentItemIds);
+        const chosen = new Set(spentItemIds);
+        for (const row of rows) {
+          await manager.update(
+            SuggestMonthlyItem,
+            { id: row.id },
+            { spent: chosen.has(row.id) },
+          );
+        }
+        summary = {
+          ...result,
+          items: rows.map((row) => ({
+            id: row.id,
+            label: monthlyItemLabel(row),
+            amount: row.approvedAmount,
+            spent: chosen.has(row.id),
+          })),
+        };
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          files,
+          user.id,
+          ExpenseAction.CONFIRM_PARTIALLY_SPENT,
+        );
+      },
+      logData: () => ({ partialSpend: summary }),
+    });
+
+    // Gán trong callback nên TypeScript tưởng vẫn là null.
+    const done = summary as PartialSummary | null;
+    if (done) {
+      const spentCount = done.items.filter((item) => item.spent).length;
+      await this.notifyExpense(
+        {
+          suggestId: saved.id!,
+          title: '↩️ Nhận lại phần dư',
+          message:
+            `Kinh doanh đã chi ${spentCount}/${done.items.length} trường của đề xuất ${saved.code},` +
+            ` vui lòng nhận lại phần dư ${formatMoneyVnd(done.returnAmount)} đ`,
+          senderId: user.id,
+          meta: { status: saved.status, returnAmount: done.returnAmount },
+        },
+        { roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT] },
+      );
+    }
+
+    return saved;
+  }
+
+  /** Thủ quỹ nhận lại phần dư của lần chi một phần — đề xuất thành Đã chi. */
+  async confirmRemainderReturned(id: number, user: AuthUser, note?: string) {
+    let returnAmount: number | null = null;
+    let cashAccount: string | null = null;
+
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CONFIRM_REMAINDER_RETURNED,
+      user,
+      note,
+      extra: async (manager, s) => {
+        const rows = (
+          await manager.find(SuggestMonthlyItem, {
+            where: { suggestId: s.id! },
+          })
+        ).filter((row) => !row.excluded);
+        const order = await manager.findOne(SuggestPaymentOrder, {
+          where: { suggestId: s.id! },
+        });
+        if (!order) throw new BadRequestException('Đề xuất chưa có lệnh chi');
+        returnAmount = partialSpendSummary(
+          rows,
+          Number(order.amount),
+          rows.filter((row) => row.spent).map((row) => row.id),
+        ).returnAmount;
+        cashAccount = order.cashAccount ?? null;
+      },
+      // Sổ quỹ đọc returnAmount để ghi bút toán thu phần dư.
+      logData: () => ({ returnAmount, cashAccount }),
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '✅ Thủ quỹ đã nhận lại phần dư',
+        message:
+          `Thủ quỹ đã nhận lại phần dư ${formatMoneyVnd(returnAmount ?? 0)} đ` +
+          ` của đề xuất ${saved.code}`,
+        senderId: user.id,
+        meta: { status: saved.status, returnAmount },
+      },
+      { userIds: saved.createdBy ? [saved.createdBy] : [] },
+    );
+
+    return saved;
+  }
+
+  /** Kế toán lập/sửa số tiền: phần chia theo trường lúc duyệt không còn đúng. */
+  private async clearMonthlyItemSplit(manager: EntityManager, suggestId: number) {
+    await manager.update(
+      SuggestMonthlyItem,
+      { suggestId },
+      { approvedAmount: null, spent: null },
+    );
   }
 
   // ================= BƯỚC 7 — THỦ QUỸ xác nhận đã nhận lại quỹ =================
@@ -4313,10 +4535,19 @@ export class SuggestService {
     });
     if (!s) throw new NotFoundException('Đề xuất chi không tồn tại');
     const sections = await this.loadManagementExpenseSections(s);
+    const rows = s.isMonthlyExpense
+      ? await this.dataSource.getRepository(SuggestMonthlyItem).find({
+          where: { suggestId: s.id! },
+          order: { position: 'ASC', id: 'ASC' },
+        })
+      : [];
+    const amounts = monthlyItemAmounts(rows, sections);
     return {
       sections,
-      // Chi tháng: số tiền lệnh chi sẽ lập khi Giám đốc duyệt.
+      // Chi tháng: số tiền lệnh chi sẽ lập khi Giám đốc duyệt (duyệt tất cả).
       remainingTotal: monthlyRemainingTotal(sections),
+      // Còn chi của từng dòng trường — để Giám đốc bỏ bớt trường và thấy số mới.
+      items: rows.map((row, index) => ({ id: row.id, amount: amounts[index] })),
     };
   }
 
@@ -4519,6 +4750,7 @@ export class SuggestService {
       params.treStatuses = [
         SuggestStatus.PAYMENT_ORDERED,
         SuggestStatus.NOT_SPENT,
+        SuggestStatus.PARTIALLY_SPENT,
       ];
     }
     if (roles.includes(ExpenseRole.TECHNICAL)) {

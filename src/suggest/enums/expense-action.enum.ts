@@ -23,6 +23,10 @@ export enum ExpenseAction {
     CONFIRM_CASH_RECEIVED = 'CONFIRM_CASH_RECEIVED',
     CONFIRM_SPENT = 'CONFIRM_SPENT',
     CONFIRM_NOT_SPENT = 'CONFIRM_NOT_SPENT',
+  /** Chi tháng nhiều trường: kinh doanh chọn trường đã chi, phần còn lại hoàn quỹ. */
+  CONFIRM_PARTIALLY_SPENT = 'CONFIRM_PARTIALLY_SPENT',
+  /** Thủ quỹ nhận lại phần dư của lần chi một phần. */
+  CONFIRM_REMAINDER_RETURNED = 'CONFIRM_REMAINDER_RETURNED',
     CONFIRM_FUND_RETURNED = 'CONFIRM_FUND_RETURNED',
 
     // ===== nhánh ĐỀ XUẤT THIẾT BỊ =====
