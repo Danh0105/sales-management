@@ -217,6 +217,44 @@ describe('mapSuggestEvents', () => {
     ]);
   });
 
+  it('chi tháng không qua Kế toán: số tiền lấy từ bước Giám đốc duyệt của từng vòng', () => {
+    const { lines, issues } = mapSuggestEvents([
+      event('APPROVE_MONTHLY', '2026-08-11', {
+        data: { paymentOrder: { code: 'LC-1', amount: 1000000 } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-08-13', {
+        data: { cashAccount: '1112' },
+      }),
+      event('CONFIRM_FUND_RETURNED', '2026-08-14'),
+      event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-15', {
+        data: { paymentOrder: { code: 'LC-2', amount: 3000000 } },
+      }),
+      event('APPROVE_MONTHLY', '2026-08-15', {
+        data: { paymentOrder: { code: 'LC-2', amount: 3000000 } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-08-16', {
+        data: { cashAccount: '1112' },
+      }),
+    ]);
+    expect(issues).toEqual([]);
+    expect(
+      lines.filter((line) => line.payment > 0).map((line) => line.payment),
+    ).toEqual([toCents('1000000'), toCents('3000000')]);
+  });
+
+  it('chi tháng: bước duyệt cũ không chụp lệnh chi thì giữ số tiền trước đó', () => {
+    const { lines } = mapSuggestEvents([
+      event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-11', {
+        data: { paymentOrder: { code: 'LC-1', amount: 1000000 } },
+      }),
+      event('APPROVE_MONTHLY', '2026-08-12', { data: { paymentOrder: null } as never }),
+      event('CONFIRM_CASH_RELEASED', '2026-08-13', {
+        data: { cashAccount: '1112' },
+      }),
+    ]);
+    expect(lines[0].payment).toBe(toCents('1000000'));
+  });
+
   it('chi tháng: kế toán sửa số tiền rồi xuất lại thì lấy số tiền mới', () => {
     const { lines } = mapSuggestEvents([
       event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-11', {

@@ -29,7 +29,22 @@ const salesAdmin = { actorRoles: [ExpenseRole.SALES_ADMIN], isOwner: false };
 const treasurer = { actorRoles: [ExpenseRole.TREASURER], isOwner: false };
 
 describe('Luồng đề xuất chi tháng', () => {
-  it('đi đúng thứ tự: Kế toán nhập tiền, Giám đốc duyệt, Thủ quỹ xuất tiền', () => {
+  it('đề xuất mới: Giám đốc duyệt thẳng rồi Thủ quỹ xuất tiền', () => {
+    let status = assertExpenseTransition(
+      ExpenseAction.APPROVE_MONTHLY,
+      SuggestStatus.PENDING_APPROVAL,
+      director,
+    );
+    expect(status).toBe(SuggestStatus.PAYMENT_ORDERED);
+    status = assertExpenseTransition(
+      ExpenseAction.CONFIRM_CASH_RELEASED,
+      status,
+      treasurer,
+    );
+    expect(status).toBe(SuggestStatus.CASH_RELEASED);
+  });
+
+  it('đề xuất cũ còn chờ Kế toán: Kế toán nhập tiền, Giám đốc duyệt, Thủ quỹ xuất tiền', () => {
     let status = SuggestStatus.PENDING_ACCOUNTING;
     status = assertExpenseTransition(
       ExpenseAction.CREATE_MONTHLY_PAYMENT_ORDER,
@@ -203,7 +218,7 @@ describe('Tạo đề xuất chi tháng', () => {
     return { service, manager };
   };
 
-  it('lưu môn và kỳ, cố định tiền, chuyển Kế toán công nợ', async () => {
+  it('client cũ gửi một trường: lưu môn và kỳ, gửi thẳng Giám đốc', async () => {
     const { service, manager } = makeService([school, subject, period]);
     await service.create(
       {
@@ -220,14 +235,15 @@ describe('Tạo đề xuất chi tháng', () => {
       expect.objectContaining({
         isMonthlyExpense: true,
         requestKind: ExpenseRequestKind.CASH,
-        status: SuggestStatus.PENDING_ACCOUNTING,
+        status: SuggestStatus.PENDING_APPROVAL,
         subjectId: 901,
         expensePeriodId: 77,
+        amount: null,
       }),
     );
     expect((service as never as { notifyExpense: jest.Mock }).notifyExpense)
       .toHaveBeenCalledWith(expect.anything(), {
-        roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        roles: [ExpenseRole.DIRECTOR],
       });
   });
 

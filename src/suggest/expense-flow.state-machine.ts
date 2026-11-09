@@ -69,8 +69,11 @@ export type ExpenseAssignee = 'stockInHandler' | 'acceptor';
  *                                      └─ PAYMENT_ORDERED (lập lại lệnh chi)
  * PENDING_APPROVAL → REJECTED (kết thúc - bị từ chối)
  *
- * Chi tháng: PENDING_ACCOUNTING → PENDING_APPROVAL → PAYMENT_ORDERED
- *             (Kế toán nhập tiền)   (Giám đốc duyệt)   → CASH_RELEASED
+ * Chi tháng: PENDING_APPROVAL → PAYMENT_ORDERED → CASH_RELEASED → …
+ *             (Giám đốc duyệt, hệ thống lập lệnh chi = tổng Còn chi Chi Ngoài)
+ *   Sau hoàn quỹ / khi sửa số tiền: Kế toán công nợ lập/sửa lệnh chi →
+ *   PENDING_APPROVAL → Giám đốc duyệt lại. PENDING_ACCOUNTING chỉ còn cho đề
+ *   xuất tạo trước khi bỏ bước Kế toán nhập tiền.
  *
  * Với ĐỀ XUẤT THIẾT BỊ (kind = EQUIPMENT), nhánh sau APPROVED đổi sang phòng
  * kỹ thuật:

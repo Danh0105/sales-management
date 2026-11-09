@@ -5,15 +5,15 @@ export enum ExpenseAction {
     SALE_ADMIN_REVIEW = 'SALE_ADMIN_REVIEW',
     SALE_ADMIN_REJECT = 'SALE_ADMIN_REJECT',
     APPROVE = 'APPROVE',
-  /** Giám đốc duyệt đề xuất chi tháng sau khi kế toán đã nhập số tiền. */
+  /** Giám đốc duyệt đề xuất chi tháng; chưa có lệnh chi thì hệ thống lập theo tổng Còn chi. */
   APPROVE_MONTHLY = 'APPROVE_MONTHLY',
     REJECT = 'REJECT',
-  /** Giám đốc từ chối đề xuất chi tháng sau khi kế toán đã nhập số tiền. */
+  /** Giám đốc từ chối đề xuất chi tháng. */
   REJECT_MONTHLY = 'REJECT_MONTHLY',
     /** Chủ đề xuất tự rút đơn khi chưa được duyệt. */
     WITHDRAW = 'WITHDRAW',
     CREATE_PAYMENT_ORDER = 'CREATE_PAYMENT_ORDER',
-  /** Kế toán nhập số tiền chi tháng, sau đó chuyển Giám đốc duyệt. */
+  /** Kế toán lập lại lệnh chi tháng sau hoàn quỹ (hoặc đề xuất cũ chờ nhập tiền), rồi Giám đốc duyệt. */
   CREATE_MONTHLY_PAYMENT_ORDER = 'CREATE_MONTHLY_PAYMENT_ORDER',
     /** Kế toán công nợ sửa lệnh chi đã lập — các bước sau phải làm lại. */
     EDIT_PAYMENT_ORDER = 'EDIT_PAYMENT_ORDER',

@@ -240,6 +240,22 @@ describe('buildManagementViewSections', () => {
     expect(monthly.map((x) => x.subjectId)).toEqual([3]);
   });
 
+  it('ghi trường của bảng để màn duyệt nhiều trường tách được', () => {
+    const [view] = buildManagementViewSections(
+      [
+        {
+          id: 1,
+          school: { id: 445, name: 'TH A' },
+          period: { id: 1, month: 9, year: 2026 },
+          managementExpenseItems: [item(0, s1)],
+          revenueItems: [],
+        },
+      ],
+      {},
+    );
+    expect(view).toMatchObject({ schoolId: 445, schoolName: 'TH A' });
+  });
+
   it('không có dòng nào thì không có bảng', () => {
     expect(
       buildManagementViewSections(

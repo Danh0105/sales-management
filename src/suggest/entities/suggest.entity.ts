@@ -15,6 +15,7 @@ import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
 import { SuggestStockInOrder } from './suggest-stock-in-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 import { SuggestAssignment } from './suggest-assignment.entity';
+import { SuggestMonthlyItem } from './suggest-monthly-item.entity';
 
 /** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
 export interface RequestedEquipmentItem {
@@ -328,4 +329,12 @@ export class Suggest {
     /** Người bàn giao + người hỗ trợ Giám đốc giao khi duyệt (kể cả người đã từ chối). */
     @OneToMany(() => SuggestAssignment, (a) => a.suggest)
     assignments?: SuggestAssignment[];
+
+    /**
+     * Các trường của đề xuất chi tháng (trường + năm học + môn + kỳ). Đề xuất
+     * chi tháng tạo trước khi có bảng này không có dòng nào — đọc từ
+     * `schoolId/subjectId/expensePeriodId` ở trên.
+     */
+    @OneToMany(() => SuggestMonthlyItem, (item) => item.suggest)
+    monthlyItems?: SuggestMonthlyItem[];
 }

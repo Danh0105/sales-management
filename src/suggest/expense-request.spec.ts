@@ -409,9 +409,13 @@ describe('Expense request school mapping', () => {
     expect(qb.andWhere).toHaveBeenCalledWith('s.status = :status', {
       status: SuggestStatus.SPENT,
     });
-    expect(qb.andWhere).toHaveBeenCalledWith('s.schoolId = :schoolId', {
-      schoolId: 445,
-    });
+    // Đề xuất chi tháng nhiều trường: khớp cả trường thứ 2 trở đi.
+    expect(qb.andWhere).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\(s\.schoolId = :schoolId OR EXISTS[\s\S]*suggest_monthly_items[\s\S]*school_id = :schoolId/,
+      ),
+      { schoolId: 445 },
+    );
     expect(qb.andWhere).toHaveBeenCalledWith('s.schoolYear = :schoolYear', {
       schoolYear: '2099-2100',
     });

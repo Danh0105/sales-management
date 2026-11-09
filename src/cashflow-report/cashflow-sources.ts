@@ -153,7 +153,8 @@ SELECT h.id AS history_id,
   h."suggestId" AS suggest_id,
   h.action,
   to_char(h."snapshotAt", 'YYYY-MM-DD') AS event_date,
-  h.data,
+  -- Bỏ ảnh chụp bảng Chi Ngoài (lớn) của bước duyệt; sổ quỹ không dùng.
+  h.data - 'managementExpense' AS data,
   s.code AS suggest_code,
   s.content,
   e.id AS requester_id,
@@ -169,6 +170,7 @@ LEFT JOIN suggest_payment_order po ON po."suggestId" = s.id
 WHERE h.action IN (
   'CREATE_PAYMENT_ORDER', 'EDIT_PAYMENT_ORDER',
   'CREATE_MONTHLY_PAYMENT_ORDER', 'EDIT_MONTHLY_PAYMENT_ORDER',
+  'APPROVE_MONTHLY',
   'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
@@ -437,8 +439,8 @@ const FUND_SOURCE_LABEL: Record<string, string> = {
 
 /**
  * Dựng các lần xuất tiền / nhận lại quỹ của từng đề nghị chi theo thứ tự thời gian:
- * - số tiền = snapshot lệnh chi gần nhất trước lần xuất (CREATE_PAYMENT_ORDER),
- *   không có thì lấy số tiền lệnh chi hiện tại;
+ * - số tiền = snapshot lệnh chi gần nhất trước lần xuất (CREATE_PAYMENT_ORDER,
+ *   hoặc APPROVE_MONTHLY của chi tháng), không có thì lấy số tiền lệnh chi hiện tại;
  * - tài khoản = tài khoản thủ quỹ chọn lúc xuất (data.cashAccount); lần xuất
  *   cuối cùng lấy thêm từ lệnh chi hiện tại. Bản ghi cũ chỉ có nhóm nguồn tiền
  *   → GROUP_ONLY;
@@ -469,7 +471,12 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
     for (const event of list) {
       if (
         event.action === 'CREATE_PAYMENT_ORDER' ||
-        event.action === 'CREATE_MONTHLY_PAYMENT_ORDER'
+        event.action === 'CREATE_MONTHLY_PAYMENT_ORDER' ||
+        // Chi tháng: lệnh chi được lập (hoặc chốt lại) lúc Giám đốc duyệt, lịch
+        // sử bước duyệt chụp số tiền lệnh chi.
+        (event.action === 'APPROVE_MONTHLY' &&
+          event.data?.paymentOrder?.amount !== undefined &&
+          event.data?.paymentOrder?.amount !== null)
       ) {
         const snapshot = event.data?.paymentOrder;
         orderAmount =

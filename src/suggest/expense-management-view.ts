@@ -44,6 +44,9 @@ export interface ManagementViewRow {
 
 export interface ManagementViewSection {
   schoolExpenseId: number;
+  /** Đề xuất chi tháng nhiều trường cần biết bảng thuộc trường nào. */
+  schoolId: number | null;
+  schoolName: string | null;
   periodId: number | null;
   periodName: string;
   subjectId: number;
@@ -261,6 +264,8 @@ export function buildManagementViewSections(
 
       sections.push({
         schoolExpenseId: sheet.id,
+        schoolId: sheet?.school?.id ?? null,
+        schoolName: sheet?.school?.name ?? null,
         periodId: sheet?.period?.id ?? null,
         periodName: periodLabel(sheet?.period),
         subjectId: subject.id,

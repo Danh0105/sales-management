@@ -1,5 +1,13 @@
-import { Transform, Type } from 'class-transformer';
 import {
+  ClassConstructor,
+  plainToInstance,
+  Transform,
+  Type,
+} from 'class-transformer';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsInt,
@@ -8,6 +16,7 @@ import {
   IsString,
   Matches,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
 
 /** Endpoint gửi multipart/form-data (kèm file) nên `items` tới dưới dạng chuỗi JSON. */
@@ -20,6 +29,22 @@ export const parseJsonArray = ({ value }: { value: unknown }) => {
     return value;
   }
 };
+
+/**
+ * Như `parseJsonArray` nhưng đổi từng phần tử thành instance của DTO. Cần vì
+ * `@Type` chạy TRƯỚC `@Transform`: chuỗi JSON parse xong chỉ là object thường,
+ * `whitelist` sẽ xoá sạch thuộc tính của chúng.
+ */
+export const parseJsonArrayOf =
+  <T>(cls: ClassConstructor<T>) =>
+  ({ value }: { value: unknown }) => {
+    const parsed = parseJsonArray({ value });
+    return Array.isArray(parsed)
+      ? parsed.map((item) =>
+          item && typeof item === 'object' ? plainToInstance(cls, item) : item,
+        )
+      : parsed;
+  };
 
 /** Endpoint gửi multipart/form-data nên boolean tới dưới dạng chuỗi "true"/"false". */
 export const parseBoolean = ({ value }: { value: unknown }) => {
@@ -50,6 +75,32 @@ export class RequestedEquipmentItemDto {
   @IsInt()
   warehouseItemId?: number;
 }
+
+/** Một trường của đề xuất chi tháng: trường + năm học + môn + kỳ kế toán. */
+export class MonthlyExpenseItemDto {
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  schoolId!: number;
+
+  /** Bỏ trống thì server tự điền năm học hiện tại. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
+  schoolYear?: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  subjectId!: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  expensePeriodId!: number;
+}
+
+export const MAX_MONTHLY_EXPENSE_ITEMS = 50;
 
 export class CreateExpenseRequestDto {
   @IsString()
@@ -100,6 +151,20 @@ export class CreateExpenseRequestDto {
   @IsString()
   @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
   schoolYear?: string;
+
+  /**
+   * Đề xuất chi tháng gồm nhiều trường. Multipart gửi chuỗi JSON. Client cũ
+   * gửi một trường qua `schoolId/subjectId/expensePeriodId` vẫn được nhận.
+   */
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArrayOf(MonthlyExpenseItemDto)({ value }))
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Đề xuất chi tháng phải chọn ít nhất một trường' })
+  @ArrayMaxSize(MAX_MONTHLY_EXPENSE_ITEMS, {
+    message: `Một đề xuất chi tháng tối đa ${MAX_MONTHLY_EXPENSE_ITEMS} trường`,
+  })
+  @ValidateNested({ each: true })
+  monthlyItems?: MonthlyExpenseItemDto[];
 
   @Type(() => Number)
   @IsOptional()
