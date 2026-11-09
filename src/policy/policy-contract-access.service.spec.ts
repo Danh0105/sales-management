@@ -16,6 +16,24 @@ function queryBuilder(result: unknown = { id: 1 }) {
 describe('PolicyContractAccessService', () => {
   const fileName = '123e4567-e89b-12d3-a456-426614174000.pdf';
 
+  it.each(['accountant', 'ketoan_congno', 'thuquy'])(
+    'role QL thu chi %s được xem hợp đồng mọi trường nhưng không đổi policy scope',
+    async (role) => {
+      const qb = queryBuilder();
+      const service = new PolicyContractAccessService(
+        {} as any,
+        {} as any,
+        {} as any,
+        { createQueryBuilder: () => qb } as any,
+      );
+
+      await service.assertCanRead({ id: 27, roles: [role] }, fileName);
+
+      expect(qb.andWhere).not.toHaveBeenCalled();
+      expect(qb.getOne).toHaveBeenCalled();
+    },
+  );
+
   it('giám đốc Long An bị ép theo province_id=7', async () => {
     const qb = queryBuilder();
     const service = new PolicyContractAccessService(

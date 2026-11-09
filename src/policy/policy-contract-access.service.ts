@@ -17,6 +17,16 @@ import { resolvePolicyScope } from './policy-scope';
 const CONTRACT_PREFIX = '/uploads/policy-contracts/';
 const CONTRACT_EXTENSIONS = new Set(['.pdf', '.jpg', '.jpeg', '.png']);
 
+/**
+ * Các vai trò nghiệp vụ QL thu chi cần đối chiếu hợp đồng của mọi trường,
+ * nhưng không vì vậy mà được mở toàn bộ API/danh sách Chính sách.
+ */
+export const CASHFLOW_CONTRACT_VIEW_ALL_ROLES = [
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+] as const;
+
 function isSafeContractName(name: string): boolean {
   if (
     !name ||
@@ -90,7 +100,14 @@ export class PolicyContractAccessService {
       throw new NotFoundException('Không tìm thấy file');
     }
 
-    const scope = resolvePolicyScope(user);
+    const roles = user?.roles ?? [];
+    const scope = roles.some((role) =>
+      CASHFLOW_CONTRACT_VIEW_ALL_ROLES.includes(
+        role as (typeof CASHFLOW_CONTRACT_VIEW_ALL_ROLES)[number],
+      ),
+    )
+      ? { kind: 'all' as const }
+      : resolvePolicyScope(user);
     const url = `${CONTRACT_PREFIX}${name}`;
     const qb = this.policyRepo
       .createQueryBuilder('policy')
