@@ -1391,6 +1391,53 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('Vai trò Nhân viên: chọn công ty nhân viên thuộc về → phiếu mới chọn sẵn công ty', async () => {
+    await employee('E', ['employee'], dept1);
+    // Chưa xếp công ty.
+    expect((await requests.meta(U.E)).me.companyId).toBeNull();
+    let row = (await config.overview(U.D)).employees.find((e) => e.id === U.E.id);
+    expect(row).toMatchObject({ companyId: null, companyName: null });
+
+    const placed = await config.setEmployeeDepartment(U.D, U.E.id, {
+      departmentId: dept1,
+      companyId: companyY,
+    });
+    expect(placed).toMatchObject({ departmentId: dept1, companyId: companyY, companyName: 'Công ty Thử nghiệm Y' });
+    expect((await requests.meta(U.E)).me.companyId).toBe(companyY);
+    row = (await config.overview(U.D)).employees.find((e) => e.id === U.E.id);
+    expect(row).toMatchObject({ companyId: companyY, companyName: 'Công ty Thử nghiệm Y' });
+
+    // Đổi công ty: ghi đè đúng một dòng, có nhật ký; gán lại y nguyên không ghi thêm.
+    await config.setEmployeeDepartment(U.D, U.E.id, { departmentId: dept1, companyId: companyX });
+    await config.setEmployeeDepartment(U.D, U.E.id, { departmentId: dept1, companyId: companyX });
+    expect((await requests.meta(U.E)).me.companyId).toBe(companyX);
+    const [{ rows, logs }] = await ds.query(
+      `SELECT (SELECT count(*)::int FROM financial_employee_companies WHERE employee_id = $1) AS rows,
+              (SELECT count(*)::int FROM financial_audit_logs
+                WHERE entity_type = 'EMPLOYEE' AND entity_id = $1 AND action = 'EMPLOYEE_COMPANY_CHANGED') AS logs`,
+      [U.E.id],
+    );
+    expect({ rows, logs }).toEqual({ rows: 1, logs: 2 });
+
+    // Không gửi companyId (client cũ) → giữ nguyên công ty.
+    await config.setEmployeeDepartment(U.D, U.E.id, { departmentId: dept1 });
+    expect((await requests.meta(U.E)).me.companyId).toBe(companyX);
+
+    // Công ty không tồn tại / ngừng sử dụng → chặn; người không có quyền cấu hình → chặn.
+    await expect(
+      config.setEmployeeDepartment(U.D, U.E.id, { departmentId: dept1, companyId: 2_000_000_000 }),
+    ).rejects.toThrow('Không tìm thấy công ty');
+    const stopped = await config.createCompany(U.D, { code: `Z${run}`.slice(0, 30), name: 'Công ty đã nghỉ' });
+    await config.updateCompany(U.D, stopped.id, { isActive: false });
+    await expect(
+      config.setEmployeeDepartment(U.D, U.E.id, { departmentId: dept1, companyId: stopped.id }),
+    ).rejects.toThrow('Công ty đã ngừng sử dụng');
+    await expect(
+      config.setEmployeeDepartment(U.A, U.E.id, { departmentId: dept1, companyId: companyY }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect((await requests.meta(U.E)).me.companyId).toBe(companyX);
+  });
+
   it('Tạo tài khoản nhân viên ở màn Phân quyền: role employee, đúng phòng ban', async () => {
     const phone = `08${String(Date.now()).slice(-9)}`;
     const account = await config.createAccount(U.D, {

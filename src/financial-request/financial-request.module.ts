@@ -21,6 +21,7 @@ import { FinancialRefund } from './entities/financial-refund.entity';
 import { FinancialRequestAttachment } from './entities/financial-request-attachment.entity';
 import { FinancialRequestItem } from './entities/financial-request-item.entity';
 import { FinancialRequestSupplier } from './entities/financial-request-supplier.entity';
+import { FinancialEmployeeCompany } from './entities/financial-employee-company.entity';
 import { FinancialRequest } from './entities/financial-request.entity';
 import { FinancialRoleAssignment } from './entities/financial-role-assignment.entity';
 import { FinancialSalaryAdvanceDeduction } from './entities/financial-salary-advance-deduction.entity';
@@ -60,6 +61,7 @@ import { FinancialRequestService } from './financial-request.service';
       FinancialSalaryAdvanceDeduction,
       FinancialAuditLog,
       FinancialPayeeProfile,
+      FinancialEmployeeCompany,
       Employee,
       Department,
       Payroll,

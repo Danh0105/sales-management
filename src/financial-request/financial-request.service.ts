@@ -42,6 +42,7 @@ import { FinancialApprovalStep } from './entities/financial-approval-step.entity
 import { FinancialApprovalWorkflow } from './entities/financial-approval-workflow.entity';
 import { FinancialAuditLog } from './entities/financial-audit-log.entity';
 import { FinancialCompany } from './entities/financial-company.entity';
+import { FinancialEmployeeCompany } from './entities/financial-employee-company.entity';
 import { FinancialExpenseCategory } from './entities/financial-expense-category.entity';
 import { FinancialPayeeProfile } from './entities/financial-payee-profile.entity';
 import { FinancialPayment } from './entities/financial-payment.entity';
@@ -185,7 +186,7 @@ export class FinancialRequestService {
 
   async meta(user: AuthUser) {
     const ctx = await this.access.context(user);
-    const [companies, categories, departments, cashAccounts, me, payee] =
+    const [companies, categories, departments, cashAccounts, me, payee, myCompany] =
       await Promise.all([
         this.companyRepo.find({
           where: { isActive: true },
@@ -209,6 +210,9 @@ export class FinancialRequestService {
         this.dataSource
           .getRepository(FinancialPayeeProfile)
           .findOne({ where: { employeeId: ctx.userId } }),
+        this.dataSource
+          .getRepository(FinancialEmployeeCompany)
+          .findOne({ where: { employeeId: ctx.userId } }),
       ]);
     const moneyRoles = [FinanceRole.ACCOUNTANT, FinanceRole.CASHIER];
     return {
@@ -230,6 +234,10 @@ export class FinancialRequestService {
         name: me?.name ?? ctx.name,
         departmentId: me?.department?.id ?? null,
         departmentName: me?.department?.name ?? null,
+        // Công ty được xếp ở màn Phân quyền — form đề nghị chọn sẵn (đổi được).
+        companyId: companies.some((c) => c.id === myCompany?.companyId)
+          ? (myCompany?.companyId ?? null)
+          : null,
         position: this.positionOf(me),
         bankName: me?.bankName ?? null,
         bankAccountNumber: me?.bankAccountNumber ?? null,

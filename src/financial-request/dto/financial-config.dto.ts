@@ -318,6 +318,12 @@ export class EmployeeDepartmentDto {
   @Type(() => Number)
   @IsInt()
   departmentId!: number;
+
+  /** Công ty nhân viên thuộc về; bỏ trống = giữ nguyên. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  companyId?: number;
 }
 
 /** Tài khoản đăng nhập mới tạo từ màn Phân quyền — luôn mang role hệ thống `employee`. */

@@ -34,6 +34,7 @@ import { FinancialApprovalDelegation } from './entities/financial-approval-deleg
 import { FinancialApprovalStep } from './entities/financial-approval-step.entity';
 import { FinancialApprovalWorkflow } from './entities/financial-approval-workflow.entity';
 import { FinancialCompany } from './entities/financial-company.entity';
+import { FinancialEmployeeCompany } from './entities/financial-employee-company.entity';
 import { FinancialExpenseCategory } from './entities/financial-expense-category.entity';
 import { FinancialPolicy } from './entities/financial-policy.entity';
 import { FinancialRequest } from './entities/financial-request.entity';
@@ -162,6 +163,12 @@ export class FinancialConfigService {
         .getRepository(Department)
         .find({ order: { name: 'ASC' } }),
     ]);
+    const employeeCompanies = new Map(
+      (
+        await this.dataSource.getRepository(FinancialEmployeeCompany).find()
+      ).map((row) => [row.employeeId, row.companyId]),
+    );
+    const companyById = new Map(companies.map((c) => [c.id, c]));
     const departmentManagerIds = await Promise.all(
       departments.map((d) => this.access.departmentManagerIds(null, d.id)),
     );
@@ -205,12 +212,18 @@ export class FinancialConfigService {
         reason: d.reason,
         revokedAt: d.revokedAt,
       })),
-      employees: employees.map((e) => ({
-        id: e.id,
-        name: e.name,
-        departmentId: e.department?.id ?? null,
-        departmentName: e.department?.name ?? null,
-      })),
+      employees: employees.map((e) => {
+        const companyId = employeeCompanies.get(e.id as number) ?? null;
+        const company = companyId ? companyById.get(companyId) : undefined;
+        return {
+          id: e.id,
+          name: e.name,
+          departmentId: e.department?.id ?? null,
+          departmentName: e.department?.name ?? null,
+          companyId,
+          companyName: company ? company.shortName || company.name : null,
+        };
+      }),
       departments: departments.map((d, index) => ({
         id: d.id,
         name: d.name,
@@ -645,11 +658,49 @@ export class FinancialConfigService {
           },
         );
       }
+      // Công ty nhân viên thuộc về (bảng riêng của phân hệ, một công ty/người).
+      const companyRepo = manager.getRepository(FinancialEmployeeCompany);
+      const current = await companyRepo.findOne({ where: { employeeId } });
+      let companyId = current?.companyId ?? null;
+      if (dto.companyId !== undefined) {
+        const company = await manager
+          .getRepository(FinancialCompany)
+          .findOne({ where: { id: dto.companyId } });
+        if (!company) throw new BadRequestException('Không tìm thấy công ty');
+        if (!company.isActive) {
+          throw new BadRequestException('Công ty đã ngừng sử dụng');
+        }
+        if (companyId !== company.id) {
+          await companyRepo.save(
+            companyRepo.create({ employeeId, companyId: company.id }),
+          );
+          await this.audit(
+            manager,
+            ctx,
+            'EMPLOYEE',
+            employeeId,
+            'EMPLOYEE_COMPANY_CHANGED',
+            {
+              employeeName: employee.name,
+              fromCompanyId: companyId,
+              toCompanyId: company.id,
+            },
+          );
+          companyId = company.id;
+        }
+      }
+      const company = companyId
+        ? await manager
+            .getRepository(FinancialCompany)
+            .findOne({ where: { id: companyId } })
+        : null;
       return {
         employeeId,
         employeeName: employee.name ?? `#${employeeId}`,
         departmentId: department.id,
         departmentName: department.name,
+        companyId,
+        companyName: company ? company.shortName || company.name : null,
       };
     });
   }
