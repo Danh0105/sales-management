@@ -29,3 +29,10 @@ export const CASHFLOW_CREATE_ROLES = [
   ...CASHFLOW_WRITE_ROLES,
   ...CASHFLOW_SALES_ADMIN_ROLES,
 ] as const;
+
+/**
+ * Xem lương giáo viên cộng tác viên theo trường / môn trong Quản lý thu chi.
+ * Không gồm Sales Admin: lương từng giáo viên là số liệu kế toán / nhân sự, và
+ * module giảng dạy cố ý ẩn đơn giá tiết với phía kinh doanh.
+ */
+export const CASHFLOW_TEACHER_PAY_ROLES = [...CASHFLOW_WRITE_ROLES] as const;

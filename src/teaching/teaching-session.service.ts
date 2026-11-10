@@ -171,7 +171,7 @@ export const STAFF_TEACHER_SQL =
  * vì điền đơn giá cũng không đúng. Dùng chung cho cột "thiếu giá N buổi" và
  * danh sách chi tiết các buổi đó.
  */
-const MISSING_RATE_SQL =
+export const MISSING_RATE_SQL =
   `(ss.status = '${SessionStatus.PRESENT}' AND ss.ratePerPeriod IS NULL AND ss.gasAllowance IS NULL ` +
   `AND NOT ${STAFF_TEACHER_SQL})`;
 

@@ -40,12 +40,14 @@ import { TeachingScheduleService } from './teaching-schedule.service';
 import { TeachingSessionService } from './teaching-session.service';
 import { AttendanceExportService } from './attendance-export.service';
 import { FuelAllowanceTierService } from './fuel-allowance-tier.service';
+import { CollaboratorPayrollService } from './collaborator-payroll.service';
 
 import { SchoolClassController } from './school-class.controller';
 import { TeacherController } from './teacher.controller';
 import { TeachingScheduleController } from './teaching-schedule.controller';
 import { TeachingSessionController } from './teaching-session.controller';
 import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
+import { CollaboratorPayrollController } from './collaborator-payroll.controller';
 
 @Module({
   imports: [
@@ -84,6 +86,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     TeachingScheduleController,
     TeachingSessionController,
     FuelAllowanceTierController,
+    CollaboratorPayrollController,
   ],
   providers: [
     SubjectResolverService,
@@ -99,6 +102,7 @@ import { FuelAllowanceTierController } from './fuel-allowance-tier.controller';
     TeachingBulkService,
     FuelAllowanceTierService,
     AttendanceExportService,
+    CollaboratorPayrollService,
   ],
   exports: [
     SubjectResolverService,
