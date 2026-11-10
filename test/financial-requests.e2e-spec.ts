@@ -1671,8 +1671,9 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     );
 
     await pay(d.id, 300_000);
+    // Không chọn người nhận (màn cũ) → chỉ cách chọn NCC.
     await expect(pay(d.id, 1)).rejects.toThrow(
-      'Không còn khoản nào phải chi cho người đề nghị',
+      'Không còn khoản nào phải chi cho người đề nghị — phiếu này chuyển tiền cho nhà cung cấp: chọn NCC ở ô "Chuyển cho"',
     );
     await pay(d.id, 1_500_000, ncc1.id);
     await pay(d.id, 500_000, ncc1.id);

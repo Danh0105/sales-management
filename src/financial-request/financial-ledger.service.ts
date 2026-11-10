@@ -515,12 +515,19 @@ export class FinancialLedgerService {
     );
     const left = totals?.remaining ?? 0;
     const who = supplier ? `NCC ${supplier.name}` : 'người đề nghị';
+    // Không chọn người nhận trên phiếu có NCC: thường do màn cũ chưa có ô
+    // "Chuyển cho" — chỉ rõ cách chọn thay vì chỉ báo hết tiền.
+    const hint = supplier
+      ? ''
+      : ' — phiếu này chuyển tiền cho nhà cung cấp: chọn NCC ở ô "Chuyển cho" (tải lại trang nếu chưa thấy ô này)';
     if (left <= 0) {
-      throw new BadRequestException(`Không còn khoản nào phải chi cho ${who}`);
+      throw new BadRequestException(
+        `Không còn khoản nào phải chi cho ${who}${hint}`,
+      );
     }
     if (amount > left) {
       throw new BadRequestException(
-        `Số tiền chi ${formatVnd(amount)} đ vượt số còn phải chi cho ${who} (${formatVnd(left)} đ)`,
+        `Số tiền chi ${formatVnd(amount)} đ vượt số còn phải chi cho ${who} (${formatVnd(left)} đ)${hint}`,
       );
     }
     return supplier ?? null;
