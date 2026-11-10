@@ -26,6 +26,11 @@ import { DataSource } from 'typeorm';
 
 import { CashAccount } from '../src/cashflow-report/cash-account.entity';
 import { CashflowReportService } from '../src/cashflow-report/cashflow-report.service';
+import {
+  FINANCIAL_MOVEMENTS_SQL,
+  FinancialMovementRow,
+  mapFinancialMovements,
+} from '../src/cashflow-report/cashflow-sources';
 import { SourceDeletionService } from '../src/cashflow-report/source-deletion.service';
 import { Department } from '../src/department/department.entity';
 import { Employee } from '../src/employee/employee.entity';
@@ -42,6 +47,7 @@ import { FinancialPolicy } from '../src/financial-request/entities/financial-pol
 import { FinancialRefund } from '../src/financial-request/entities/financial-refund.entity';
 import { FinancialRequestAttachment } from '../src/financial-request/entities/financial-request-attachment.entity';
 import { FinancialRequestItem } from '../src/financial-request/entities/financial-request-item.entity';
+import { FinancialRequestSupplier } from '../src/financial-request/entities/financial-request-supplier.entity';
 import { FinancialRequest } from '../src/financial-request/entities/financial-request.entity';
 import { FinancialRoleAssignment } from '../src/financial-request/entities/financial-role-assignment.entity';
 import { FinancialSalaryAdvanceDeduction } from '../src/financial-request/entities/financial-salary-advance-deduction.entity';
@@ -86,6 +92,7 @@ const ENTITIES = [
   FinancialDocumentSequence,
   FinancialRequest,
   FinancialRequestItem,
+  FinancialRequestSupplier,
   FinancialApprovalStep,
   FinancialPayment,
   FinancialRefund,
@@ -1471,6 +1478,234 @@ suite('Đề nghị tài chính — tích hợp trên Postgres', () => {
     expect((await requests.meta(U.O)).me.savedPayee).toBeNull();
     const meB = (await requests.meta(U.B)).me;
     expect(meB.bankAccountNumber).not.toBe('9988776655');
+  });
+
+  it('Thanh toán chi phí chuyển thẳng cho nhiều NCC + một phần cho người đề nghị', async () => {
+    const pay = (
+      id: number,
+      amount: number,
+      supplierId?: number | null,
+      by = U.T,
+    ) =>
+      ledger.recordPayment(
+        id,
+        {
+          amount,
+          supplierId,
+          date: '2026-11-10',
+          method: PaymentMethod.BANK_TRANSFER,
+          cashAccountCode: '1121',
+          transactionRef: `FT-NCC-${amount}`,
+          idempotencyKey: idem(),
+        },
+        by,
+      );
+    const lines = [
+      { description: 'Máy chiếu', quantity: '1', unitPrice: '2000000', supplierIndex: 0 },
+      { description: 'Loa', quantity: '2', unitPrice: '500000', supplierIndex: 1 },
+      { description: 'Taxi chở đồ', quantity: '1', unitPrice: '300000' },
+    ];
+
+    // Loại phiếu khác không được gán NCC.
+    await expect(
+      requests.create(U.A, {
+        type: FinancialRequestType.ADVANCE,
+        companyId: companyX,
+        title: 'Tạm ứng có NCC',
+        directManagerId: U.M.id,
+        items: [{ description: 'x', quantity: '1', unitPrice: '1' }],
+        suppliers: [{ name: 'NCC lạ' }],
+      }),
+    ).rejects.toThrow('Chỉ phiếu Thanh toán chi phí');
+
+    let d = await requests.create(U.A, {
+      type: FinancialRequestType.EXPENSE_PAYMENT,
+      companyId: companyX,
+      title: 'Mua thiết bị phòng học',
+      directManagerId: U.M.id,
+      suppliers: [
+        { name: 'Công ty Thiết bị A', bankName: 'VCB', bankAccountNumber: '0071000111' },
+        { name: 'Cửa hàng Âm thanh B' },
+      ],
+      items: lines,
+    });
+    expect(d.suppliers.map((s) => s.name)).toEqual([
+      'Công ty Thiết bị A',
+      'Cửa hàng Âm thanh B',
+    ]);
+    const [ncc1, ncc2] = d.suppliers;
+    expect(d.items.map((i) => [i.supplierId, i.supplierName])).toEqual([
+      [ncc1.id, 'Công ty Thiết bị A'],
+      [ncc2.id, 'Cửa hàng Âm thanh B'],
+      [null, null],
+    ]);
+    expect(d.recipients.map((r) => [r.kind, r.name, r.amount, r.remaining])).toEqual([
+      ['REQUESTER', U.A.name, 300_000, 0],
+      ['SUPPLIER', 'Công ty Thiết bị A', 2_000_000, 0],
+      ['SUPPLIER', 'Cửa hàng Âm thanh B', 1_000_000, 0],
+    ]);
+    expect(d.totalAmount).toBe(3_300_000);
+
+    // NCC thiếu thông tin chuyển khoản → không gửi duyệt được.
+    await expect(requests.submit(U.A, d.id)).rejects.toThrow(
+      'NCC 2 (Cửa hàng Âm thanh B): thiếu ngân hàng, số tài khoản',
+    );
+    // Thêm NCC không có dòng nào → cũng chặn.
+    d = await requests.update(U.A, d.id, {
+      version: d.version,
+      suppliers: [
+        { id: ncc1.id, name: 'Công ty Thiết bị A (HCM)', bankName: 'VCB', bankAccountNumber: '0071000111' },
+        { id: ncc2.id, name: 'Cửa hàng Âm thanh B', bankName: 'ACB', bankAccountNumber: '123456789', bankAccountHolder: 'NGUYEN VAN B' },
+        { name: 'NCC thừa', bankName: 'TCB', bankAccountNumber: '5555666677' },
+      ],
+    });
+    // Đổi tên NCC mà không gửi lại dòng → tên trên dòng cập nhật theo.
+    expect(d.items[0].supplierName).toBe('Công ty Thiết bị A (HCM)');
+    await expect(requests.submit(U.A, d.id)).rejects.toThrow(
+      'NCC 3 (NCC thừa): chưa gán dòng chi tiết nào',
+    );
+    d = await requests.update(U.A, d.id, {
+      version: d.version,
+      suppliers: d.suppliers.slice(0, 2).map((s) => ({ ...s })),
+      items: lines,
+    });
+    expect(d.suppliers).toHaveLength(2);
+    // Số tài khoản NCC trùng tài khoản cá nhân của người đề nghị → cảnh báo.
+    const own = await ds.query(
+      `SELECT bank_account_number AS n FROM employee WHERE id = $1`,
+      [U.A.id],
+    );
+    d = await requests.update(U.A, d.id, {
+      version: d.version,
+      suppliers: [
+        { ...d.suppliers[0] },
+        { ...d.suppliers[1], bankAccountNumber: own[0].n },
+      ],
+    });
+    expect(d.warnings.join(' ')).toContain('trùng tài khoản cá nhân');
+    d = await requests.update(U.A, d.id, {
+      version: d.version,
+      suppliers: [
+        { ...d.suppliers[0] },
+        { ...d.suppliers[1], bankAccountNumber: '123456789' },
+      ],
+    });
+    expect(d.warnings.join(' ')).not.toContain('trùng tài khoản cá nhân');
+
+    await requests.submit(U.A, d.id);
+    d = await approveAll(d.id);
+    expect(d.approvalStatus).toBe(ApprovalStatus.APPROVED);
+    expect(d.recipients.map((r) => r.remaining)).toEqual([
+      300_000, 2_000_000, 1_000_000,
+    ]);
+
+    // Người ngoài phạm vi tiền (quản lý) chỉ thấy số tài khoản NCC đã che.
+    const asManager = await requests.detail(U.M, d.id);
+    expect(asManager.suppliers[1].bankAccountNumber).toBe('•••• 6789');
+
+    // Không vượt số còn phải chi của từng người nhận.
+    await expect(pay(d.id, 2_000_001, ncc1.id)).rejects.toThrow(
+      'vượt số còn phải chi cho NCC Công ty Thiết bị A (HCM)',
+    );
+    await expect(pay(d.id, 300_001)).rejects.toThrow(
+      'vượt số còn phải chi cho người đề nghị',
+    );
+    // NCC của phiếu khác → chặn.
+    const other = await requests.create(U.B, {
+      type: FinancialRequestType.EXPENSE_PAYMENT,
+      companyId: companyX,
+      title: 'Phiếu khác',
+      directManagerId: U.M.id,
+      suppliers: [{ name: 'NCC phiếu khác', bankName: 'VCB', bankAccountNumber: '0000111122' }],
+      items: [{ description: 'x', quantity: '1', unitPrice: '1000', supplierIndex: 0 }],
+    });
+    await expect(pay(d.id, 1, other.suppliers[0].id)).rejects.toThrow(
+      'Nhà cung cấp không thuộc chứng từ này',
+    );
+
+    await pay(d.id, 300_000);
+    await expect(pay(d.id, 1)).rejects.toThrow(
+      'Không còn khoản nào phải chi cho người đề nghị',
+    );
+    await pay(d.id, 1_500_000, ncc1.id);
+    await pay(d.id, 500_000, ncc1.id);
+    d = await requests.detail(U.A, d.id);
+    expect(d.paymentStatus).toBe(PaymentStatus.PARTIALLY_PAID);
+    expect(d.recipients.map((r) => [r.paidAmount, r.remaining])).toEqual([
+      [300_000, 0],
+      [2_000_000, 0],
+      [0, 1_000_000],
+    ]);
+    const ncc2Payment = await pay(d.id, 1_000_000, ncc2.id);
+    d = await requests.detail(U.A, d.id);
+    expect(d.paymentStatus).toBe(PaymentStatus.PAID);
+    expect(d.paidAmount).toBe(3_300_000);
+    expect(d.payments.map((p) => p.recipientName)).toEqual([
+      U.A.name,
+      'Công ty Thiết bị A (HCM)',
+      'Công ty Thiết bị A (HCM)',
+      'Cửa hàng Âm thanh B',
+    ]);
+
+    // Huỷ lần chi cho NCC 2 → NCC 2 lại còn phải chi, các người nhận khác giữ nguyên.
+    await ledger.voidPayment(d.id, ncc2Payment.id, { reason: 'Chuyển nhầm' }, U.K);
+    d = await requests.detail(U.A, d.id);
+    expect(d.recipients.map((r) => r.remaining)).toEqual([0, 0, 1_000_000]);
+    await pay(d.id, 1_000_000, ncc2.id);
+
+    // Sổ quỹ: lần chi cho NCC ghi đối tượng là NCC.
+    const rows: FinancialMovementRow[] = await ds.query(
+      `SELECT * FROM (${FINANCIAL_MOVEMENTS_SQL}) m WHERE m.request_id = $1`,
+      [d.id],
+    );
+    const ledgerLines = mapFinancialMovements(rows).lines;
+    expect(ledgerLines.map((l) => l.partnerName).sort()).toEqual(
+      [
+        U.A.name,
+        'Công ty Thiết bị A (HCM)',
+        'Công ty Thiết bị A (HCM)',
+        'Cửa hàng Âm thanh B',
+      ].sort(),
+    );
+    expect(
+      ledgerLines.find((l) => l.partnerName === U.A.name)?.partnerCode,
+    ).toBeTruthy();
+    expect(
+      ledgerLines.find((l) => l.partnerName === 'Cửa hàng Âm thanh B')
+        ?.partnerCode,
+    ).toBeNull();
+
+    // PDF in được; sao chép giữ NCC và liên kết dòng.
+    const { buffer } = await pdf.render(U.A, d.id);
+    expect(buffer.subarray(0, 4).toString()).toBe('%PDF');
+    await dumpPdf('thanh-toan-nhieu-ncc', d.id);
+    const copied = await requests.copy(U.A, d.id);
+    expect(copied.suppliers.map((s) => s.name)).toEqual([
+      'Công ty Thiết bị A (HCM)',
+      'Cửa hàng Âm thanh B',
+    ]);
+    expect(copied.items.map((i) => i.supplierId)).toEqual([
+      copied.suppliers[0].id,
+      copied.suppliers[1].id,
+      null,
+    ]);
+
+    // Phiếu thanh toán cũ (không NCC): chi như trước, không cần chọn người nhận.
+    const plain = await requests.create(U.A, {
+      type: FinancialRequestType.EXPENSE_PAYMENT,
+      companyId: companyX,
+      title: 'Thanh toán thường',
+      directManagerId: U.M.id,
+      items: [{ description: 'Văn phòng phẩm', quantity: '1', unitPrice: '200000' }],
+    });
+    expect(plain.suppliers).toEqual([]);
+    expect(plain.recipients).toHaveLength(1);
+    await requests.submit(U.A, plain.id);
+    await approveAll(plain.id);
+    await pay(plain.id, 200_000);
+    expect((await requests.detail(U.A, plain.id)).paymentStatus).toBe(
+      PaymentStatus.PAID,
+    );
   });
 
   const countRows = async (sql: string, params: unknown[]) =>

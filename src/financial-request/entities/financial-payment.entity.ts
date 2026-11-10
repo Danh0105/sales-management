@@ -13,6 +13,7 @@ import {
 import { MovementStatus, PaymentMethod } from '../financial-request.constants';
 import { bigintTransformer } from '../financial-money';
 import { FinancialRequest } from './financial-request.entity';
+import { FinancialRequestSupplier } from './financial-request-supplier.entity';
 
 /**
  * Phiếu chi: công ty chi tiền cho nhân viên (tạm ứng, thanh toán, trả thêm khi hoàn ứng).
@@ -41,6 +42,20 @@ export class FinancialPayment {
 
   @Column({ type: 'bigint', transformer: bigintTransformer })
   amount!: number;
+
+  /** Chuyển cho NCC nào của phiếu; NULL = chuyển cho người đề nghị. */
+  @Column({ name: 'supplier_id', type: 'int', nullable: true })
+  supplierId!: number | null;
+
+  @ManyToOne(() => FinancialRequestSupplier, {
+    nullable: true,
+    onDelete: 'RESTRICT',
+  })
+  @JoinColumn({
+    name: 'supplier_id',
+    foreignKeyConstraintName: 'FK_financial_payments_supplier',
+  })
+  supplier?: FinancialRequestSupplier | null;
 
   @Column({ name: 'paid_at', type: 'date' })
   paidAt!: string;

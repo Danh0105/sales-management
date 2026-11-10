@@ -24,6 +24,8 @@ import {
 import { FinancialAdvanceAllocation } from './entities/financial-advance-allocation.entity';
 import { FinancialPayment } from './entities/financial-payment.entity';
 import { FinancialRefund } from './entities/financial-refund.entity';
+import { FinancialRequestItem } from './entities/financial-request-item.entity';
+import { FinancialRequestSupplier } from './entities/financial-request-supplier.entity';
 import { FinancialRequest } from './entities/financial-request.entity';
 import { FinancialSalaryAdvanceDeduction } from './entities/financial-salary-advance-deduction.entity';
 import {
@@ -54,6 +56,7 @@ import {
   SettlementStatus,
 } from './financial-request.constants';
 import { paymentAccountGroup } from './financial-payment-account';
+import { recipientTotals } from './financial-suppliers';
 import {
   formatVnd,
   requireText,
@@ -477,6 +480,52 @@ export class FinancialLedgerService {
     }
   }
 
+  /**
+   * Phiếu có NCC nhận tiền: lần chi phải ghi rõ chuyển cho ai (NCC hoặc người
+   * đề nghị) và không vượt số còn phải chi của người đó. Phiếu không có NCC
+   * thì mọi lần chi là của người đề nghị như trước.
+   */
+  private async assertRecipientRemaining(
+    manager: EntityManager,
+    request: FinancialRequest,
+    supplierId: number | null,
+    amount: number,
+  ): Promise<FinancialRequestSupplier | null> {
+    const suppliers = await manager
+      .getRepository(FinancialRequestSupplier)
+      .find({ where: { requestId: request.id } });
+    if (supplierId === null && !suppliers.length) return null;
+    const supplier =
+      supplierId !== null
+        ? suppliers.find((s) => s.id === supplierId)
+        : undefined;
+    if (supplierId !== null && !supplier) {
+      throw new BadRequestException('Nhà cung cấp không thuộc chứng từ này');
+    }
+    const [items, payments] = await Promise.all([
+      manager
+        .getRepository(FinancialRequestItem)
+        .find({ where: { requestId: request.id } }),
+      manager
+        .getRepository(FinancialPayment)
+        .find({ where: { requestId: request.id } }),
+    ]);
+    const totals = recipientTotals(suppliers, items, payments).find(
+      (r) => r.supplierId === supplierId,
+    );
+    const left = totals?.remaining ?? 0;
+    const who = supplier ? `NCC ${supplier.name}` : 'người đề nghị';
+    if (left <= 0) {
+      throw new BadRequestException(`Không còn khoản nào phải chi cho ${who}`);
+    }
+    if (amount > left) {
+      throw new BadRequestException(
+        `Số tiền chi ${formatVnd(amount)} đ vượt số còn phải chi cho ${who} (${formatVnd(left)} đ)`,
+      );
+    }
+    return supplier ?? null;
+  }
+
   async recordPayment(id: number, dto: MoneyMovementDto, user: AuthUser) {
     const ctx = await this.access.context(user);
     const result = await this.dataSource.transaction(async (manager) => {
@@ -511,6 +560,12 @@ export class FinancialLedgerService {
           `Số tiền chi ${formatVnd(dto.amount)} đ vượt số còn phải chi ${formatVnd(remaining)} đ`,
         );
       }
+      const supplier = await this.assertRecipientRemaining(
+        manager,
+        request,
+        dto.supplierId ?? null,
+        dto.amount,
+      );
       // Thủ quỹ chọn tài khoản thanh toán ở bước chi tiền (bước cuối).
       const cashAccountCode = await this.assertCashAccount(
         manager,
@@ -521,6 +576,7 @@ export class FinancialLedgerService {
         manager.getRepository(FinancialPayment).create({
           requestId: id,
           amount: dto.amount,
+          supplierId: supplier?.id ?? null,
           paidAt: dto.date,
           method: dto.method,
           cashAccountCode,
@@ -554,16 +610,21 @@ export class FinancialLedgerService {
           method: dto.method,
           cashAccountCode: payment.cashAccountCode,
           transactionRef: payment.transactionRef,
+          ...(supplier
+            ? { supplierId: supplier.id, supplierName: supplier.name }
+            : {}),
         },
       });
-      return { payment, request, replay: false };
+      return { payment, request, replay: false, supplier };
     });
     if (!result.replay) {
       await this.notifier.notify(
         [result.request.requesterId],
         result.request,
         'PAID',
-        `${result.request.code}: đã chi ${formatVnd(dto.amount)} đ cho bạn.`,
+        result.supplier
+          ? `${result.request.code}: đã chuyển ${formatVnd(dto.amount)} đ cho NCC ${result.supplier.name}.`
+          : `${result.request.code}: đã chi ${formatVnd(dto.amount)} đ cho bạn.`,
         ctx.userId,
       );
     }

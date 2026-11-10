@@ -86,6 +86,56 @@ export class FinancialRequestItemDto {
   @MaxLength(255)
   supplierName?: string | null;
 
+  /**
+   * Thanh toán chi phí: vị trí (từ 0) của NCC nhận tiền dòng này trong mảng
+   * `suppliers` cùng payload — hoặc trong danh sách NCC đang lưu nếu payload
+   * không gửi `suppliers`. NULL/bỏ trống = trả cho người đề nghị.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  supplierIndex?: number | null;
+
+  @IsOptional()
+  @Transform(emptyToNull)
+  @IsString()
+  @MaxLength(2000)
+  note?: string | null;
+}
+
+/** Nhà cung cấp nhận tiền (phiếu Thanh toán chi phí). */
+export class FinancialRequestSupplierDto {
+  /** Có id = sửa NCC đang có; không có = NCC mới. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  id?: number;
+
+  @IsString()
+  @MinLength(1, { message: 'Nhập tên nhà cung cấp' })
+  @MaxLength(255)
+  name!: string;
+
+  @IsOptional()
+  @Transform(emptyToNull)
+  @IsString()
+  @MaxLength(255)
+  bankAccountHolder?: string | null;
+
+  @IsOptional()
+  @Transform(emptyToNull)
+  @IsString()
+  @MaxLength(255)
+  bankName?: string | null;
+
+  @IsOptional()
+  @Transform(emptyToNull)
+  @Matches(/^[0-9A-Za-z\- ]{4,50}$/, {
+    message: 'Số tài khoản NCC chỉ gồm chữ số/chữ cái, 4–50 ký tự',
+  })
+  bankAccountNumber?: string | null;
+
   @IsOptional()
   @Transform(emptyToNull)
   @IsString()
@@ -233,6 +283,14 @@ class FinancialRequestBaseDto {
   @ValidateNested({ each: true })
   @Type(() => FinancialRequestItemDto)
   items?: FinancialRequestItemDto[];
+
+  /** Chỉ phiếu Thanh toán chi phí: các NCC nhận tiền chuyển khoản thẳng. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => FinancialRequestSupplierDto)
+  suppliers?: FinancialRequestSupplierDto[];
 
   @IsOptional()
   @IsArray()

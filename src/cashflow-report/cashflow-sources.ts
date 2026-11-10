@@ -93,6 +93,8 @@ export interface FinancialMovementRow {
   requester_id: number;
   requester_code: string | null;
   requester_name: string;
+  /** Lần chi chuyển thẳng cho nhà cung cấp; NULL = chi cho người đề nghị. */
+  supplier_name?: string | null;
 }
 
 const ROW_CONTEXT_SELECT = `
@@ -194,9 +196,11 @@ SELECT 'PAYMENT' AS direction,
   p.transaction_ref,
   r.requester_id,
   r.requester_code,
-  r.requester_name
+  r.requester_name,
+  sp.name AS supplier_name
 FROM financial_payments p
 JOIN financial_requests r ON r.id = p.request_id
+LEFT JOIN financial_request_suppliers sp ON sp.id = p.supplier_id
 WHERE p.status = 'RECORDED'
 UNION ALL
 SELECT 'REFUND' AS direction,
@@ -211,7 +215,8 @@ SELECT 'REFUND' AS direction,
   f.transaction_ref,
   r.requester_id,
   r.requester_code,
-  r.requester_name
+  r.requester_name,
+  NULL AS supplier_name
 FROM financial_refunds f
 JOIN financial_requests r ON r.id = f.request_id
 WHERE f.status = 'RECORDED'
@@ -691,8 +696,11 @@ export function mapFinancialMovements(
       accountCode: row.cash_account,
       receipt: isReceipt ? amount : 0n,
       payment: isReceipt ? 0n : amount,
-      partnerCode: row.requester_code ?? `NV${row.requester_id}`,
-      partnerName: row.requester_name,
+      // Chuyển thẳng cho NCC: đối tượng là NCC (chưa có danh mục NCC → không mã).
+      partnerCode: row.supplier_name
+        ? null
+        : (row.requester_code ?? `NV${row.requester_id}`),
+      partnerName: row.supplier_name || row.requester_name,
       isInternalTransfer: false,
       source,
     });

@@ -32,6 +32,7 @@ import {
   CreateFinancialRequestDto,
   FinancialRequestItemDto,
   FinancialRequestQueryDto,
+  FinancialRequestSupplierDto,
   SalaryAdvanceCheckQueryDto,
   SavePayeeProfileDto,
   UpdateFinancialRequestDto,
@@ -48,6 +49,7 @@ import { FinancialPolicy } from './entities/financial-policy.entity';
 import { FinancialRefund } from './entities/financial-refund.entity';
 import { FinancialRequestAttachment } from './entities/financial-request-attachment.entity';
 import { FinancialRequestItem } from './entities/financial-request-item.entity';
+import { FinancialRequestSupplier } from './entities/financial-request-supplier.entity';
 import { FinancialRequest } from './entities/financial-request.entity';
 import { FinancialSalaryAdvanceDeduction } from './entities/financial-salary-advance-deduction.entity';
 import { FinancialWorkflowStep } from './entities/financial-workflow-step.entity';
@@ -89,6 +91,11 @@ import {
 } from './financial-money';
 import { openStoredFile, storeFile } from './financial-storage';
 import { isControllerApprovalStep } from './financial-payment-account';
+import {
+  recipientTotals,
+  sameAccount,
+  supplierSubmitErrors,
+} from './financial-suppliers';
 import {
   nextStepsAfterDecision,
   pickWorkflow,
@@ -141,6 +148,8 @@ interface ComputedItem {
   invoiceNumber: string | null;
   invoiceType: FinancialRequestItem['invoiceType'];
   supplierName: string | null;
+  /** Vị trí NCC trong danh sách NCC của phiếu; NULL = trả cho người đề nghị. */
+  supplierIndex: number | null;
   note: string | null;
   overLimit: boolean;
 }
@@ -627,6 +636,7 @@ export class FinancialRequestService {
       audit,
       workflow,
       paymentAccount,
+      suppliers,
     ] = await Promise.all([
       this.itemRepo.find({
         where: { requestId: request.id },
@@ -662,6 +672,7 @@ export class FinancialRequestService {
             .getRepository(CashAccount)
             .findOne({ where: { code: request.paymentAccountCode } })
         : Promise.resolve(null),
+      this.loadSuppliers(manager, request.id),
     ]);
 
     const allocations =
@@ -716,11 +727,43 @@ export class FinancialRequestService {
       items.map((i) => i.approvedAmount ?? i.amount),
     );
 
+    const maskBank = (value: string | null) =>
+      canSeeBank ? value : FinancialAccessService.maskAccount(value);
+    const supplierById = new Map(suppliers.map((sp) => [sp.id, sp]));
+    // Người nhận tiền: người đề nghị (nếu còn dòng của họ hoặc phiếu không có
+    // NCC) + từng NCC; số tiền = tổng các dòng gán cho họ.
+    const recipients = recipientTotals(suppliers, items, payments)
+      .filter((r) => r.supplierId !== null || r.amount > 0 || !suppliers.length)
+      .map((r) => {
+        const supplier =
+          r.supplierId !== null ? supplierById.get(r.supplierId) : undefined;
+        return {
+          supplierId: r.supplierId,
+          kind: supplier ? ('SUPPLIER' as const) : ('REQUESTER' as const),
+          name: supplier
+            ? supplier.name
+            : request.payeeName || request.requesterName,
+          bankAccountHolder: supplier
+            ? supplier.bankAccountHolder
+            : request.bankAccountHolder,
+          bankName: supplier ? supplier.bankName : request.bankName,
+          bankAccountNumber: maskBank(
+            supplier ? supplier.bankAccountNumber : request.bankAccountNumber,
+          ),
+          amount: r.amount,
+          paidAmount: r.paidAmount,
+          // Chỉ phiếu đã duyệt mới có nghĩa vụ chi.
+          remaining:
+            request.approvalStatus === ApprovalStatus.APPROVED ? r.remaining : 0,
+        };
+      });
+
     const warnings = await this.collectWarnings(
       ctx,
       request,
       items,
       canSeeBank,
+      suppliers,
     );
 
     return {
@@ -762,6 +805,16 @@ export class FinancialRequestService {
       paymentAccountCode: request.paymentAccountCode,
       paymentAccountName: paymentAccount?.name ?? null,
       paymentNote: request.paymentNote,
+      suppliers: suppliers.map((sp) => ({
+        id: sp.id,
+        lineNo: sp.lineNo,
+        name: sp.name,
+        bankAccountHolder: sp.bankAccountHolder,
+        bankName: sp.bankName,
+        bankAccountNumber: maskBank(sp.bankAccountNumber),
+        note: sp.note,
+      })),
+      recipients,
       currency: request.currency,
       totalAmount: request.totalAmount,
       approvedAmount: request.approvedAmount,
@@ -840,6 +893,10 @@ export class FinancialRequestService {
         invoiceNumber: item.invoiceNumber,
         invoiceType: item.invoiceType,
         supplierName: item.supplierName,
+        supplierId:
+          item.supplierId !== null && supplierById.has(item.supplierId)
+            ? item.supplierId
+            : null,
         note: item.note,
         overLimit: item.overLimit,
         attachmentCount: attachments.filter(
@@ -890,6 +947,12 @@ export class FinancialRequestService {
       payments: payments.map((p) => ({
         id: p.id,
         amount: p.amount,
+        supplierId: p.supplierId,
+        recipientName:
+          (p.supplierId !== null
+            ? supplierById.get(p.supplierId)?.name
+            : undefined) ??
+          (request.payeeName || request.requesterName),
         date: p.paidAt,
         method: p.method,
         cashAccountCode: p.cashAccountCode,
@@ -996,8 +1059,25 @@ export class FinancialRequestService {
     request: FinancialRequest,
     items: FinancialRequestItem[],
     canSeeBank: boolean,
+    suppliers: FinancialRequestSupplier[] = [],
   ): Promise<string[]> {
     const warnings: string[] = [];
+    if (canSeeBank && suppliers.length) {
+      const requester = await this.employeeRepo.findOne({
+        where: { id: request.requesterId },
+        select: ['id', 'bankAccountNumber'],
+      });
+      for (const supplier of suppliers) {
+        if (
+          sameAccount(supplier.bankAccountNumber, requester?.bankAccountNumber) ||
+          sameAccount(supplier.bankAccountNumber, request.bankAccountNumber)
+        ) {
+          warnings.push(
+            `Tài khoản của NCC "${supplier.name}" trùng tài khoản cá nhân của người đề nghị — kiểm tra trước khi chi.`,
+          );
+        }
+      }
+    }
     for (const item of items.filter((i) => i.overLimit)) {
       warnings.push(
         `Dòng ${item.lineNo} (${item.description}) vượt định mức danh mục "${item.categoryName}".`,
@@ -1132,6 +1212,7 @@ export class FinancialRequestService {
           invoiceNumber: null,
           invoiceType: null,
           supplierName: null,
+          supplierIndex: null,
           note: null,
           overLimit: false,
         },
@@ -1158,6 +1239,15 @@ export class FinancialRequestService {
         );
       }
       const amount = lineAmount(item.quantity, item.unitPrice);
+      const supplierIndex = item.supplierIndex ?? null;
+      if (
+        supplierIndex !== null &&
+        request.type !== FinancialRequestType.EXPENSE_PAYMENT
+      ) {
+        throw new BadRequestException(
+          'Chỉ phiếu Thanh toán chi phí được chuyển tiền cho nhà cung cấp',
+        );
+      }
       return {
         id: item.id,
         description: item.description.trim(),
@@ -1171,6 +1261,7 @@ export class FinancialRequestService {
         invoiceNumber: item.invoiceNumber?.trim() || null,
         invoiceType: item.invoiceType ?? null,
         supplierName: item.supplierName ?? null,
+        supplierIndex,
         note: item.note ?? null,
         overLimit: !!(category?.limitAmount && amount > category.limitAmount),
       };
@@ -1182,8 +1273,19 @@ export class FinancialRequestService {
     manager: EntityManager,
     request: FinancialRequest,
     items: ComputedItem[],
+    suppliers: FinancialRequestSupplier[] = [],
   ) {
     const repo = manager.getRepository(FinancialRequestItem);
+    const supplierOf = (item: ComputedItem, line: number) => {
+      if (item.supplierIndex === null) return null;
+      const supplier = suppliers[item.supplierIndex];
+      if (!supplier) {
+        throw new BadRequestException(
+          `Dòng ${line}: nhà cung cấp nhận tiền không tồn tại`,
+        );
+      }
+      return supplier;
+    };
     const existing = await repo.find({ where: { requestId: request.id } });
     const keepIds = new Set(items.filter((i) => i.id).map((i) => i.id));
     for (const item of items) {
@@ -1201,6 +1303,7 @@ export class FinancialRequestService {
         ? existing.find((e) => e.id === item.id)
         : undefined;
       const entity = current ?? repo.create({ requestId: request.id });
+      const supplier = supplierOf(item, lineNo);
       Object.assign(entity, {
         lineNo: lineNo++,
         description: item.description,
@@ -1213,7 +1316,9 @@ export class FinancialRequestService {
         incurredDate: item.incurredDate,
         invoiceNumber: item.invoiceNumber,
         invoiceType: item.invoiceType,
-        supplierName: item.supplierName,
+        // Gán NCC nhận tiền thì tên NCC của dòng theo danh sách NCC.
+        supplierName: supplier ? supplier.name : item.supplierName,
+        supplierId: supplier?.id ?? null,
         note: item.note,
         overLimit: item.overLimit,
         // Người đề nghị sửa lại sau khi bị trả về → số chấp nhận cũ không còn giá trị.
@@ -1226,6 +1331,81 @@ export class FinancialRequestService {
       await repo.save(entity);
     }
     request.totalAmount = sumMoney(items.map((i) => i.amount));
+  }
+
+  private loadSuppliers(manager: EntityManager, requestId: number) {
+    return manager
+      .getRepository(FinancialRequestSupplier)
+      .find({ where: { requestId }, order: { lineNo: 'ASC', id: 'ASC' } });
+  }
+
+  /**
+   * Ghi danh sách NCC nhận tiền (chỉ Thanh toán chi phí): có id thì sửa, thiếu
+   * thì xoá (dòng chi tiết của NCC bị xoá quay về người đề nghị), mới thì thêm.
+   * Trả về danh sách theo đúng thứ tự gửi lên để dòng chi tiết tra theo vị trí.
+   */
+  private async saveSuppliers(
+    manager: EntityManager,
+    request: FinancialRequest,
+    dtoSuppliers: FinancialRequestSupplierDto[],
+  ): Promise<FinancialRequestSupplier[]> {
+    if (
+      request.type !== FinancialRequestType.EXPENSE_PAYMENT &&
+      dtoSuppliers.length
+    ) {
+      throw new BadRequestException(
+        'Chỉ phiếu Thanh toán chi phí được chuyển tiền cho nhà cung cấp',
+      );
+    }
+    const repo = manager.getRepository(FinancialRequestSupplier);
+    const existing = await this.loadSuppliers(manager, request.id);
+    for (const supplier of dtoSuppliers) {
+      if (supplier.id && !existing.some((e) => e.id === supplier.id)) {
+        throw new BadRequestException(
+          `Nhà cung cấp #${supplier.id} không thuộc chứng từ này`,
+        );
+      }
+    }
+    const keepIds = new Set(dtoSuppliers.map((s) => s.id).filter(Boolean));
+    const removed = existing.filter((e) => !keepIds.has(e.id));
+    if (removed.length) await repo.delete(removed.map((e) => e.id));
+    const saved: FinancialRequestSupplier[] = [];
+    let lineNo = 1;
+    for (const dto of dtoSuppliers) {
+      const name = dto.name.trim();
+      if (!name) {
+        throw new BadRequestException(`NCC ${lineNo}: nhập tên nhà cung cấp`);
+      }
+      const entity =
+        (dto.id ? existing.find((e) => e.id === dto.id) : undefined) ??
+        repo.create({ requestId: request.id });
+      Object.assign(entity, {
+        lineNo: lineNo++,
+        name,
+        bankAccountHolder: dto.bankAccountHolder?.trim() || null,
+        bankName: dto.bankName?.trim() || null,
+        bankAccountNumber: dto.bankAccountNumber?.trim() || null,
+        note: dto.note?.trim() || null,
+      });
+      saved.push(await repo.save(entity));
+    }
+    return saved;
+  }
+
+  /** Đổi tên NCC mà không gửi lại dòng chi tiết → cập nhật tên NCC trên các dòng. */
+  private async syncItemSupplierNames(
+    manager: EntityManager,
+    requestId: number,
+  ) {
+    await manager.query(
+      `UPDATE "financial_request_items" i
+         SET "supplier_name" = s."name"
+        FROM "financial_request_suppliers" s
+       WHERE s."id" = i."supplier_id"
+         AND i."request_id" = $1
+         AND i."supplier_name" IS DISTINCT FROM s."name"`,
+      [requestId],
+    );
   }
 
   private async saveAllocations(
@@ -1371,13 +1551,18 @@ export class FinancialRequestService {
       await this.applyManager(manager, request, dto.directManagerId);
       await repo.save(request);
 
+      const suppliers = await this.saveSuppliers(
+        manager,
+        request,
+        dto.suppliers ?? [],
+      );
       const items = await this.computeItems(
         manager,
         request,
         dto.items ?? [],
         dto.requestedAmount,
       );
-      await this.saveItems(manager, request, items ?? []);
+      await this.saveItems(manager, request, items ?? [], suppliers);
       if (request.type === FinancialRequestType.SETTLEMENT) {
         await this.saveAllocations(manager, request, dto.allocations ?? []);
       }
@@ -1391,6 +1576,7 @@ export class FinancialRequestService {
         changes: {
           totalAmount: request.totalAmount,
           items: items?.length ?? 0,
+          ...(suppliers.length ? { suppliers: suppliers.length } : {}),
         },
       });
       return request.id;
@@ -1457,13 +1643,20 @@ export class FinancialRequestService {
       ) {
         requestedAmount = request.totalAmount || undefined; // cập nhật lại diễn giải kỳ lương
       }
+      const suppliers =
+        dto.suppliers !== undefined
+          ? await this.saveSuppliers(manager, request, dto.suppliers)
+          : await this.loadSuppliers(manager, request.id);
       const items = await this.computeItems(
         manager,
         request,
         dto.items,
         requestedAmount,
       );
-      if (items) await this.saveItems(manager, request, items);
+      if (items) await this.saveItems(manager, request, items, suppliers);
+      else if (dto.suppliers !== undefined) {
+        await this.syncItemSupplierNames(manager, request.id);
+      }
       if (request.type === FinancialRequestType.SETTLEMENT && dto.allocations) {
         await this.saveAllocations(manager, request, dto.allocations);
       }
@@ -1479,6 +1672,9 @@ export class FinancialRequestService {
             (k) => !['version', 'bankAccountNumber'].includes(k),
           ),
           bankAccountChanged: dto.bankAccountNumber !== undefined,
+          ...(dto.suppliers !== undefined
+            ? { suppliers: suppliers.map((s) => s.name) }
+            : {}),
           before,
           after: {
             totalAmount: request.totalAmount,
@@ -1527,6 +1723,12 @@ export class FinancialRequestService {
       where: { requestId: id },
       order: { lineNo: 'ASC' },
     });
+    // NCC là đối tác của công ty (không phải thông tin cá nhân) → luôn chép.
+    const suppliers =
+      source.type === FinancialRequestType.EXPENSE_PAYMENT
+        ? await this.loadSuppliers(this.dataSource.manager, id)
+        : [];
+    const supplierIndex = new Map(suppliers.map((sp, index) => [sp.id, index]));
     const own = source.requesterId === ctx.userId;
     const dto: CreateFinancialRequestDto = {
       type: source.type,
@@ -1560,7 +1762,16 @@ export class FinancialRequestService {
         unitPrice: i.unitPrice,
         invoiceType: i.invoiceType,
         supplierName: i.supplierName,
+        supplierIndex:
+          i.supplierId !== null ? (supplierIndex.get(i.supplierId) ?? null) : null,
         note: i.note,
+      })),
+      suppliers: suppliers.map((sp) => ({
+        name: sp.name,
+        bankAccountHolder: sp.bankAccountHolder,
+        bankName: sp.bankName,
+        bankAccountNumber: sp.bankAccountNumber,
+        note: sp.note,
       })),
     } as CreateFinancialRequestDto;
     try {
@@ -1715,6 +1926,12 @@ export class FinancialRequestService {
         ) {
           errors.push('Ngày kết thúc công tác phải sau ngày bắt đầu');
         }
+        errors.push(
+          ...supplierSubmitErrors(
+            await this.loadSuppliers(manager, request.id),
+            items,
+          ),
+        );
         break;
       case FinancialRequestType.SETTLEMENT: {
         const allocations = await manager

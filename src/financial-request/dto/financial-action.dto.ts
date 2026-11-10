@@ -107,6 +107,16 @@ export class MoneyMovementDto {
   @Min(1)
   amount!: number;
 
+  /**
+   * Chi tiền: chuyển cho NCC nào của phiếu (id trong `suppliers`); bỏ trống =
+   * chuyển cho người đề nghị. Không dùng khi ghi nhận hoàn trả.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  supplierId?: number | null;
+
   /** Ngày chi / ngày thu (YYYY-MM-DD). */
   @IsDateString()
   date!: string;

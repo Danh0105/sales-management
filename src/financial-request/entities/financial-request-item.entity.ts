@@ -14,6 +14,7 @@ import { InvoiceType } from '../financial-request.constants';
 import { bigintTransformer } from '../financial-money';
 import { FinancialExpenseCategory } from './financial-expense-category.entity';
 import { FinancialRequest } from './financial-request.entity';
+import { FinancialRequestSupplier } from './financial-request-supplier.entity';
 
 /**
  * Một dòng chi tiết. `quantity`/`unitPrice` là numeric chính xác (đọc ra dạng
@@ -134,6 +135,23 @@ export class FinancialRequestItem {
     nullable: true,
   })
   supplierName!: string | null;
+
+  /**
+   * NCC nhận tiền của dòng này (chỉ phiếu Thanh toán chi phí); NULL = trả cho
+   * người đề nghị. Gán NCC thì `supplierName` lấy theo tên NCC.
+   */
+  @Column({ name: 'supplier_id', type: 'int', nullable: true })
+  supplierId!: number | null;
+
+  @ManyToOne(() => FinancialRequestSupplier, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
+  @JoinColumn({
+    name: 'supplier_id',
+    foreignKeyConstraintName: 'FK_financial_request_items_supplier',
+  })
+  supplier?: FinancialRequestSupplier | null;
 
   /** Ghi chú / giải trình chi phí. */
   @Column({ type: 'text', nullable: true })

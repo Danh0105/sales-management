@@ -220,14 +220,21 @@ export class FinancialPdfService {
         ]);
       }
     }
-    info.push(['Người thụ hưởng', detail.payeeName ?? '']);
+    // Nhiều người nhận (NCC) → thông tin chuyển khoản in thành bảng riêng.
+    const multiRecipients = detail.suppliers.length > 0;
+    info.push([
+      'Người thụ hưởng',
+      multiRecipients
+        ? `${detail.recipients.length} người nhận — xem bảng Thông tin chuyển khoản`
+        : (detail.payeeName ?? ''),
+    ]);
     if (detail.paymentAccountCode) {
       info.push([
         'Tài khoản thanh toán',
         `${detail.paymentAccountCode}${detail.paymentAccountName ? ` — ${detail.paymentAccountName}` : ''}`,
       ]);
     }
-    if (detail.bankName || detail.bankAccountNumber) {
+    if (!multiRecipients && (detail.bankName || detail.bankAccountNumber)) {
       info.push(['Ngân hàng', detail.bankName ?? '']);
       info.push([
         'Số tài khoản',
@@ -322,6 +329,42 @@ export class FinancialPdfService {
     };
 
     const blocks: unknown[] = [];
+    if (multiRecipients) {
+      blocks.push(
+        {
+          text: 'Thông tin chuyển khoản',
+          bold: true,
+          margin: [0, 10, 0, 4],
+          fontSize: 10,
+        },
+        {
+          table: {
+            headerRows: 1,
+            dontBreakRows: true,
+            widths: [22, '*', 90, 110, 70],
+            body: [
+              ['STT', 'Người nhận', 'Ngân hàng', 'Số TK — Chủ TK', 'Số tiền'].map(
+                (text) => ({
+                  text,
+                  bold: true,
+                  alignment: 'center',
+                  fillColor: '#eef2f7',
+                }),
+              ),
+              ...detail.recipients.map((r, index) => [
+                { text: String(index + 1), alignment: 'center' },
+                r.kind === 'REQUESTER' ? `${r.name} (người đề nghị)` : r.name,
+                r.bankName ?? '',
+                `${r.bankAccountNumber ?? ''}${r.bankAccountHolder ? ` — ${r.bankAccountHolder}` : ''}`,
+                { text: formatVnd(r.amount), alignment: 'right' },
+              ]),
+            ],
+          },
+          fontSize: 8.5,
+          layout: { hLineColor: '#9aa5b1', vLineColor: '#9aa5b1' },
+        },
+      );
+    }
     if (isSettlement && detail.allocations.length) {
       blocks.push(
         {

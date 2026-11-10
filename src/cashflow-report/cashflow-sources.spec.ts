@@ -377,6 +377,20 @@ describe('mapFinancialMovements', () => {
     });
   });
 
+  it('chi chuyển thẳng cho NCC → đối tượng là NCC, không mã nhân viên', () => {
+    expect(FINANCIAL_MOVEMENTS_SQL).toContain(
+      'LEFT JOIN financial_request_suppliers sp ON sp.id = p.supplier_id',
+    );
+    const { lines } = mapFinancialMovements([
+      financialMovement({ supplier_name: 'Công ty TNHH Thiết bị A' }),
+    ]);
+    expect(lines[0]).toMatchObject({
+      partnerCode: null,
+      partnerName: 'Công ty TNHH Thiết bị A',
+      payment: toCents('2500000'),
+    });
+  });
+
   it('phiếu hoàn trả → bút toán thu', () => {
     const { lines } = mapFinancialMovements([
       financialMovement({
