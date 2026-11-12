@@ -45,6 +45,12 @@ import {
   normalizeSharedFields,
 } from './expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import { SchoolExpenseManagementConfirmation } from './entities/school-expense-management-confirmation.entity';
+import {
+  confirmationView,
+  isManagementConfirmed,
+  loadManagementConfirmations,
+} from './management-confirmations';
 import {
   assertLinkedRowsKept,
   keepLinkedPaymentFields,
@@ -242,6 +248,11 @@ export class RealExpensesService {
         (i) => this.withOtherCosts(i),
       );
     }
+
+    // Xác nhận đúng BBCS theo từng môn.
+    (data as any).managementConfirmations = (
+      await loadManagementConfirmations(this.dataSource.manager, [data.id])
+    ).map(confirmationView);
 
     return data;
   }
@@ -465,8 +476,13 @@ export class RealExpensesService {
     // trưởng còn sửa được toàn bộ. Khoá thì bỏ qua phần managementExpenseItems
     // của body (giữ nguyên dòng cũ), không ảnh hưởng tới doanh thu/chi trường.
     const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
+    // Xác nhận đúng BBCS theo từng môn (trước 12/11/2026 cờ ở cả bảng thu chi).
     const managementLocked =
-      schoolExpense.managementExpenseConfirmed && !isChiefAccountant;
+      (await isManagementConfirmed(
+        this.dataSource.manager,
+        schoolExpenseId,
+        body.subjectId,
+      )) && !isChiefAccountant;
     // Kế toán / KT công nợ / thủ quỹ: khoá rồi vẫn cập nhật cột chi của các
     // dòng cũ (Ngày chi, Nguồn chi, Đã chi, Người chi, Ghi chú).
     const managementPaymentOnly =
@@ -1274,72 +1290,107 @@ export class RealExpensesService {
     };
   }
 
+  /** Môn phải thuộc trường của bảng thu chi. */
+  private async assertSubjectOfSheet(schoolExpense: SchoolExpense, subjectId: number) {
+    if (!Number.isInteger(subjectId) || subjectId <= 0) {
+      throw new BadRequestException('Chọn môn cần xác nhận BBCS');
+    }
+    const subject = await this.subjectRepository.findOne({ where: { id: subjectId } });
+    if (!subject || subject.schoolId !== schoolExpense.school?.id) {
+      throw new BadRequestException('Môn không thuộc trường của bảng thu chi');
+    }
+  }
+
   /**
-   * Sales admin xác nhận bảng "Chi Ngoài" → khoá chỉnh sửa (chỉ kế toán
-   * trưởng còn sửa được sau khi khoá). Idempotent: gọi lại khi đã khoá vẫn
-   * trả về trạng thái hiện tại, không lỗi.
+   * Cờ cũ ở cấp bảng thu chi giữ đồng bộ (= còn môn nào đã xác nhận) để bản
+   * trước 12/11/2026 vẫn chạy được nếu phải quay lại.
    */
-  async confirmManagementExpense(id: number, user?: AuthUser) {
-    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+  private async syncLegacyConfirmation(manager: EntityManager, data: SchoolExpense) {
+    const first = await manager
+      .getRepository(SchoolExpenseManagementConfirmation)
+      .findOne({ where: { schoolExpenseId: data.id }, order: { confirmedAt: 'ASC' } });
+    data.managementExpenseConfirmed = !!first;
+    data.managementExpenseConfirmedBy = first?.confirmedBy ?? null;
+    data.managementExpenseConfirmedByName = first?.confirmedByName ?? null;
+    data.managementExpenseConfirmedAt = first?.confirmedAt ?? null;
+    await manager.save(SchoolExpense, data);
+  }
+
+  /**
+   * Sales admin xác nhận bảng "Chi Ngoài" của MỘT MÔN → khoá chỉnh sửa môn đó
+   * (chỉ kế toán trưởng còn sửa được). Idempotent: gọi lại khi đã khoá vẫn trả
+   * về trạng thái hiện tại, không lỗi.
+   */
+  async confirmManagementExpense(id: number, subjectId: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({
+      where: { id },
+      relations: { school: true },
+    });
     if (!data) {
       throw new NotFoundException('SchoolExpense not found');
     }
     assertNotFinalized(data);
+    await this.assertSubjectOfSheet(data, subjectId);
 
-    if (!data.managementExpenseConfirmed) {
-      data.managementExpenseConfirmed = true;
-      data.managementExpenseConfirmedBy = user?.id ?? null;
-      data.managementExpenseConfirmedByName = user?.name ?? null;
-      data.managementExpenseConfirmedAt = new Date();
-      await this.schoolExpenseRepository.save(data);
-
-      await this.historyRepository.save({
+    await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(SchoolExpenseManagementConfirmation);
+      if (await repo.exists({ where: { schoolExpenseId: id, subjectId } })) return;
+      const confirmedAt = new Date();
+      await repo.insert({
+        schoolExpenseId: id,
+        subjectId,
+        confirmedBy: user?.id ?? null,
+        confirmedByName: user?.name ?? null,
+        confirmedAt,
+      });
+      await this.syncLegacyConfirmation(manager, data);
+      await manager.save(SchoolExpenseHistory, {
         schoolExpenseId: id,
         updatedById: user?.id,
         updatedByName: user?.name,
         action: 'CONFIRM_MANAGEMENT_EXPENSE',
         entityType: 'management_expense',
-        oldData: { managementExpenseConfirmed: false },
-        newData: {
-          managementExpenseConfirmed: true,
-          managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
-        },
+        oldData: { subjectId, managementExpenseConfirmed: false },
+        newData: { subjectId, managementExpenseConfirmed: true, managementExpenseConfirmedAt: confirmedAt },
       });
-    }
+    });
 
     return this.lockState(data);
   }
 
-  /** Kế toán trưởng mở khoá "Xác nhận đúng BBCS" của bảng Chi Ngoài. */
-  async unconfirmManagementExpense(id: number, user?: AuthUser) {
-    const data = await this.schoolExpenseRepository.findOne({ where: { id } });
+  /** Kế toán trưởng mở khoá "Xác nhận đúng BBCS" của bảng Chi Ngoài MỘT MÔN. */
+  async unconfirmManagementExpense(id: number, subjectId: number, user?: AuthUser) {
+    const data = await this.schoolExpenseRepository.findOne({
+      where: { id },
+      relations: { school: true },
+    });
     if (!data) {
       throw new NotFoundException('SchoolExpense not found');
     }
     assertNotFinalized(data);
+    await this.assertSubjectOfSheet(data, subjectId);
 
-    if (data.managementExpenseConfirmed) {
-      const oldData = {
-        managementExpenseConfirmed: true,
-        managementExpenseConfirmedByName: data.managementExpenseConfirmedByName,
-        managementExpenseConfirmedAt: data.managementExpenseConfirmedAt,
-      };
-      data.managementExpenseConfirmed = false;
-      data.managementExpenseConfirmedBy = null;
-      data.managementExpenseConfirmedByName = null;
-      data.managementExpenseConfirmedAt = null;
-      await this.schoolExpenseRepository.save(data);
-
-      await this.historyRepository.save({
+    await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(SchoolExpenseManagementConfirmation);
+      const existing = await repo.findOne({ where: { schoolExpenseId: id, subjectId } });
+      if (!existing) return;
+      await repo.delete({ schoolExpenseId: id, subjectId });
+      await this.syncLegacyConfirmation(manager, data);
+      await manager.save(SchoolExpenseHistory, {
         schoolExpenseId: id,
         updatedById: user?.id,
         updatedByName: user?.name,
         action: 'UNCONFIRM_MANAGEMENT_EXPENSE',
         entityType: 'management_expense',
-        oldData,
-        newData: { managementExpenseConfirmed: false },
+        oldData: {
+          subjectId,
+          managementExpenseConfirmed: true,
+          managementExpenseConfirmedByName: existing.confirmedByName,
+          managementExpenseConfirmedAt: existing.confirmedAt,
+        },
+        newData: { subjectId, managementExpenseConfirmed: false },
       });
-    }
+    });
 
     return this.lockState(data);
   }
@@ -1405,9 +1456,14 @@ export class RealExpensesService {
     return this.lockState(data);
   }
 
-  private lockState(data: SchoolExpense) {
+  private async lockState(data: SchoolExpense) {
     return {
       id: data.id,
+      // Xác nhận đúng BBCS theo từng môn; các cờ managementExpense* bên dưới là
+      // dạng cũ (= còn môn nào đã xác nhận), giữ cho màn hình bản cũ.
+      managementConfirmations: (
+        await loadManagementConfirmations(this.dataSource.manager, [data.id])
+      ).map(confirmationView),
       managementExpenseConfirmed: data.managementExpenseConfirmed,
       managementExpenseConfirmedBy: data.managementExpenseConfirmedBy,
       managementExpenseConfirmedByName: data.managementExpenseConfirmedByName,

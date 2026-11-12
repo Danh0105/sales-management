@@ -14,6 +14,7 @@ import { ExpensePeriod } from '../expense-periods/expense-period.entity';
 import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
+import { SchoolExpenseManagementConfirmation } from './entities/school-expense-management-confirmation.entity';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
 import { Subject } from '../subject/subject.entity';
 
@@ -29,6 +30,7 @@ import { Subject } from '../subject/subject.entity';
             ManagementExpenseItem,
             ManagementExpenseOtherCost,
             Subject,
+            SchoolExpenseManagementConfirmation,
         ]),
     ],
 

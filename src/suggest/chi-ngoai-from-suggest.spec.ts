@@ -1,3 +1,4 @@
+import { SchoolExpenseManagementConfirmation } from '../school-expenses/entities/school-expense-management-confirmation.entity';
 import { ExpenseRole } from './constants/expense-roles';
 import { SuggestMonthlyItem } from './entities/suggest-monthly-item.entity';
 import { SuggestService } from './suggest.service';
@@ -45,13 +46,22 @@ const monthlyRow = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   }) as unknown as SuggestMonthlyItem;
 
-function setup(rows = [monthlyRow()], isMonthlyExpense = true) {
+function setup(rows = [monthlyRow()], isMonthlyExpense = true, confirmations: unknown[] = []) {
   const sql: { text: string; params: unknown[] }[] = [];
+  let sheets: unknown[] = [sheet];
   const manager = {
     find: jest.fn().mockResolvedValue(rows),
     findOne: jest.fn().mockResolvedValue({ amount: 250_000, cashAccount: '1111' }),
     update: jest.fn(),
-    getRepository: jest.fn(() => ({ find: jest.fn().mockResolvedValue([sheet]) })),
+    // Bảng thu chi + xác nhận BBCS theo môn (mặc định chưa môn nào xác nhận).
+    getRepository: jest.fn((entity: unknown) => ({
+      find: jest
+        .fn()
+        .mockResolvedValue(entity === SchoolExpenseManagementConfirmation ? confirmations : sheets),
+    })),
+    setSheets: (value: unknown[]) => {
+      sheets = value;
+    },
     query: jest.fn(async (text: string, params: unknown[] = []) => {
       sql.push({ text, params });
       if (text.includes('FROM school_expenses')) return [{ id: 40 }];
@@ -144,9 +154,7 @@ describe('Đề xuất chi tháng đã chi → bảng Chi Ngoài', () => {
 
   it('bảng của trường không còn dòng nào → không ghi, lịch sử ghi số chưa ghi được', async () => {
     const { service, manager, row, updates } = setup();
-    manager.getRepository.mockReturnValue({
-      find: jest.fn().mockResolvedValue([{ ...sheet, managementExpenseItems: [] }]),
-    });
+    manager.setSheets([{ ...sheet, managementExpenseItems: [] }]);
     await service.confirmSpent(5, sales, 'ok', []);
     expect(updates()).toEqual([]);
     expect((row.data as any).chiNgoai.items[0]).toMatchObject({
@@ -173,5 +181,16 @@ describe('Đề xuất chi tháng đã chi → bảng Chi Ngoài', () => {
       [71, null, null, undefined],
       [72, '2026-11-12', '1121', 'DX-5'],
     ]);
+  });
+  it('BBCS xác nhận theo môn: môn 8 đã xác nhận không làm môn 9 hiện đã xác nhận', async () => {
+    const { service, manager } = setup([monthlyRow()], true, [{ schoolExpenseId: 40, subjectId: 8 }]);
+    const sections = await (service as any).loadSchoolManagementSections(
+      5,
+      3,
+      { schoolYear: '2026-2027' },
+      manager,
+    );
+    const bySubject = Object.fromEntries(sections.map((s: any) => [s.subjectId, s.confirmed]));
+    expect(bySubject).toEqual({ 8: true, 9: false });
   });
 });

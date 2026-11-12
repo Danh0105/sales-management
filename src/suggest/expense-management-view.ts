@@ -231,6 +231,8 @@ export function buildManagementViewSections(
   sheets: any[],
   filter: { schoolYear?: string | null; subjectId?: number | null },
   suggestPayments?: ManagementViewSuggestPayments,
+  /** "Xác nhận đúng BBCS" theo môn: khoá `${schoolExpenseId}:${subjectId}`. */
+  confirmedKeys?: Set<string>,
 ): ManagementViewSection[] {
   const sections: ManagementViewSection[] = [];
   const ordered = [...sheets].sort(
@@ -289,7 +291,9 @@ export function buildManagementViewSections(
         subjectId: subject.id,
         subjectName: subject.catalog?.name || subject.name || `Môn #${subject.id}`,
         schoolYear: subject.schoolYear ?? null,
-        confirmed: !!sheet?.managementExpenseConfirmed,
+        confirmed: confirmedKeys
+          ? confirmedKeys.has(`${sheet.id}:${subject.id}`)
+          : !!sheet?.managementExpenseConfirmed,
         finalized: !!sheet?.finalized,
         otherCostColumns: columns.map((cost, index) => ({
           key: otherCostKey(cost, index),

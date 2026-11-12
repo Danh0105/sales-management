@@ -23,6 +23,7 @@ import {
   recomputeManagementOutside,
 } from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import { isManagementConfirmed } from '../school-expenses/management-confirmations';
 import {
   keepLinkedPaymentFields,
   linkedRowDeleteError,
@@ -79,13 +80,18 @@ export class ManagementExpenseItemsService {
   }
 
   /**
-   * Bảng "Chi Ngoài" bị khoá sau khi sales admin xác nhận
-   * (`SchoolExpense.managementExpenseConfirmed`) — chỉ kế toán trưởng còn sửa
-   * được sau khi khoá.
+   * Bảng "Chi Ngoài" của một môn bị khoá sau khi sales admin "Xác nhận đúng
+   * BBCS" môn đó — chỉ kế toán trưởng còn sửa được sau khi khoá.
    */
-  private assertNotLocked(schoolExpense: SchoolExpense, user?: AuthUser) {
+  private async assertNotLocked(
+    schoolExpense: SchoolExpense,
+    subjectId: number | null | undefined,
+    user?: AuthUser,
+  ) {
     assertNotFinalized(schoolExpense);
-    if (!schoolExpense.managementExpenseConfirmed) return;
+    if (!(await isManagementConfirmed(this.dataSource.manager, schoolExpense.id, subjectId))) {
+      return;
+    }
     const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
     if (!isChiefAccountant) {
       throw new ForbiddenException(
@@ -170,7 +176,7 @@ export class ManagementExpenseItemsService {
       throw new BadRequestException('Subject does not belong to school');
     }
 
-    this.assertNotLocked(schoolExpense, user);
+    await this.assertNotLocked(schoolExpense, subject.id, user);
 
     const shared = normalizeSharedFields(body);
     const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
@@ -293,7 +299,7 @@ export class ManagementExpenseItemsService {
 
     const oldData = { ...data };
 
-    this.assertNotLocked(data.schoolExpense, user);
+    await this.assertNotLocked(data.schoolExpense, data.subject?.id, user);
 
     if (body.subjectId && Number(body.subjectId) !== data.subject?.id) {
       const subject = await this.subjectRepository.findOne({
@@ -420,7 +426,7 @@ export class ManagementExpenseItemsService {
       throw new NotFoundException('ManagementExpenseItem not found');
     }
 
-    this.assertNotLocked(data.schoolExpense, user);
+    await this.assertNotLocked(data.schoolExpense, data.subject?.id, user);
 
     const linkedRow = (
       await loadLinkedManagementRows(this.dataSource.manager, { itemIds: [id] })

@@ -105,6 +105,8 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       create: jest.fn((_entity: any, data: any) => data),
       save: jest.fn(async (entity: any, data?: any) => data ?? entity),
       update: jest.fn().mockResolvedValue(undefined),
+      // Xác nhận BBCS theo môn (bảng school_expense_management_confirmations).
+      getRepository: () => ({ exists: jest.fn().mockResolvedValue(confirmed) }),
       // Khoá bảng + đọc dòng có tiền từ đề xuất chi: mặc định chưa có.
       query: jest.fn(async (text: string) => {
         if (!linked) return [];

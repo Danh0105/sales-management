@@ -40,6 +40,7 @@ import {
   ManagementViewSection,
   ManagementViewSuggestPayments,
 } from './expense-management-view';
+import { loadManagementConfirmations } from '../school-expenses/management-confirmations';
 import {
   allocateSuggestPayment,
   loadSuggestPayments,
@@ -4442,7 +4443,16 @@ export class SuggestService {
         },
       ]),
     );
-    return buildManagementViewSections(sheets, filter, viewPayments);
+    const confirmations = await loadManagementConfirmations(
+      manager,
+      sheets.map((sheet) => sheet.id),
+    );
+    return buildManagementViewSections(
+      sheets,
+      filter,
+      viewPayments,
+      new Set(confirmations.map((c) => `${c.schoolExpenseId}:${c.subjectId}`)),
+    );
   }
 
   /**

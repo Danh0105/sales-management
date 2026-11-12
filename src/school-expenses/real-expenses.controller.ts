@@ -135,10 +135,12 @@ export class RealExpensesController {
   @Roles(...CASHFLOW_SALES_ADMIN_ROLES, 'ketoan_truong')
   confirmManagementExpense(
     @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
     @Req() req: RequestWithUser,
   ) {
     return this.realExpensesService.confirmManagementExpense(
       Number(id),
+      Number(subjectId),
       req.user,
     );
   }
@@ -148,10 +150,12 @@ export class RealExpensesController {
   @Roles('ketoan_truong')
   unconfirmManagementExpense(
     @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
     @Req() req: RequestWithUser,
   ) {
     return this.realExpensesService.unconfirmManagementExpense(
       Number(id),
+      Number(subjectId),
       req.user,
     );
   }
