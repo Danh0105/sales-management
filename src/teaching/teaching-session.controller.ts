@@ -339,6 +339,8 @@ export class TeachingSessionController {
             lessonName: { type: 'string', minLength: 1, maxLength: 255 },
             lessonEvaluation: { type: 'string', minLength: 1, maxLength: 2000 },
             actualStudentCount: { type: 'integer', minimum: 0 },
+            totalStudentCount: { type: 'integer', minimum: 0 },
+            absentStudentNames: { type: 'string', description: 'JSON array họ tên học sinh vắng', example: '["Nguyễn Văn A"]' },
             images: { type: 'array', maxItems: 10, items: { type: 'string', format: 'binary' } },
         },
     } })

@@ -139,6 +139,7 @@ import {
   LessonImageEntity,
 } from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
+import { lessonStudentCounts } from './lesson-student-counts';
 import {
   TEACHER_COLLABORATOR_ROLE,
   TEACHER_STAFF_ROLE,
@@ -1716,6 +1717,15 @@ export class TeachingSessionService {
       throw error;
     }
 
+    // Kiểm sĩ số trước khi lưu ảnh để không phải dọn file khi request sai.
+    let studentCounts: ReturnType<typeof lessonStudentCounts>;
+    try {
+      studentCounts = lessonStudentCounts(dto);
+    } catch (error) {
+      this.logCheckoutFailure(trace, error);
+      throw error;
+    }
+
     let lessonImages: LessonImage[];
     try {
       lessonImages = await this.lessonImageStorage.storeMany(files);
@@ -1792,7 +1802,9 @@ export class TeachingSessionService {
 
         session.lessonName = dto.lessonName;
         session.lessonEvaluation = dto.lessonEvaluation;
-        session.actualStudentCount = dto.actualStudentCount;
+        session.actualStudentCount = studentCounts.actualStudentCount;
+        session.totalStudentCount = studentCounts.totalStudentCount;
+        session.absentStudentNames = studentCounts.absentStudentNames;
         session.lessonImages = lessonImages;
         const submittedAt = new Date();
         session.lessonSubmittedAt = submittedAt;
@@ -2784,6 +2796,8 @@ export class TeachingSessionService {
         'ss.lessonEvaluation AS "lessonEvaluation"',
         'ss.lessonImages AS "lessonImages"',
         'ss.actualStudentCount AS "actualStudentCount"',
+        'ss.totalStudentCount AS "totalStudentCount"',
+        'ss.absentStudentNames AS "absentStudentNames"',
         'ss.lessonSubmittedAt AS "lessonSubmittedAt"',
         'ss.lessonReportAlertAt AS "lessonReportAlertAt"',
         'ss.note AS "note"',
@@ -2974,6 +2988,10 @@ export class TeachingSessionService {
       lessonName: row.lessonName ?? null,
       lessonEvaluation: row.lessonEvaluation ?? null,
       actualStudentCount: this.nullableNumber(row.actualStudentCount),
+      totalStudentCount: this.nullableNumber(row.totalStudentCount),
+      absentStudentNames: Array.isArray(row.absentStudentNames)
+        ? row.absentStudentNames
+        : null,
       lessonSubmittedAt: row.lessonSubmittedAt
         ? new Date(row.lessonSubmittedAt).toISOString()
         : null,
