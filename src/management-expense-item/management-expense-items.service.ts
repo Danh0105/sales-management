@@ -23,6 +23,13 @@ import {
   recomputeManagementOutside,
 } from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  keepLinkedPaymentFields,
+  linkedRowDeleteError,
+  loadLinkedManagementRows,
+  loadSuggestPayments,
+  withSuggestPayments,
+} from './suggest-payments';
 
 @Injectable()
 export class ManagementExpenseItemsService {
@@ -246,7 +253,11 @@ export class ManagementExpenseItemsService {
     }
 
     const items = await qb.getMany();
-    return items.map((i) => this.withOtherCosts(i));
+    const payments = await loadSuggestPayments(
+      this.dataSource.manager,
+      items.map((item) => item.id),
+    );
+    return items.map((i) => withSuggestPayments(this.withOtherCosts(i), payments));
   }
 
   // FIND ONE
@@ -257,7 +268,10 @@ export class ManagementExpenseItemsService {
       throw new NotFoundException('ManagementExpenseItem not found');
     }
 
-    return this.withOtherCosts(data);
+    return withSuggestPayments(
+      this.withOtherCosts(data),
+      await loadSuggestPayments(this.dataSource.manager, [data.id]),
+    );
   }
 
   // UPDATE
@@ -334,15 +348,20 @@ export class ManagementExpenseItemsService {
     const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
       computeOtherCostRows(rawOtherCosts, shared);
 
+    const built = buildManagementExpenseItemData(
+      merged,
+      shared.rowIndex,
+      merged,
+      totalOtherCostAmount,
+      totalOtherTaxAmount,
+    );
+    // Dòng có tiền từ đề xuất chi: Ngày chi / Nguồn chi / Đã chi giữ nguyên.
+    const linkedRow = (
+      await loadLinkedManagementRows(this.dataSource.manager, { itemIds: [id] })
+    ).get(id);
     Object.assign(
       data,
-      buildManagementExpenseItemData(
-        merged,
-        shared.rowIndex,
-        merged,
-        totalOtherCostAmount,
-        totalOtherTaxAmount,
-      ),
+      linkedRow ? keepLinkedPaymentFields(built, linkedRow, built.totalOutside) : built,
     );
 
     await this.assertPaidWithinOutside(
@@ -402,6 +421,11 @@ export class ManagementExpenseItemsService {
     }
 
     this.assertNotLocked(data.schoolExpense, user);
+
+    const linkedRow = (
+      await loadLinkedManagementRows(this.dataSource.manager, { itemIds: [id] })
+    ).get(id);
+    if (linkedRow) throw linkedRowDeleteError(linkedRow.payments);
 
     await this.historyRepository.save({
       schoolExpenseId: data.schoolExpense?.id,

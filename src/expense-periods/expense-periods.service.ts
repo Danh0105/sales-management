@@ -14,6 +14,7 @@ import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
+import { loadSuggestPayments } from '../management-expense-item/suggest-payments';
 
 @Injectable()
 export class ExpensePeriodsService {
@@ -357,6 +358,12 @@ export class ExpensePeriodsService {
                     );
                 }
 
+                // Đã chi do đề xuất chi ghi vào thuộc kỳ gốc (tiền đã xuất cho kỳ
+                // đó) — bản sao không mang theo, kẻo sổ thu chi tính thêm lần nữa.
+                const suggestPaid = await loadSuggestPayments(
+                    manager,
+                    (sourceExpense.managementExpenseItems || []).map((item) => item.id),
+                );
                 for (const item of sourceExpense.managementExpenseItems || []) {
                     const {
                         id: _itemId,
@@ -364,10 +371,17 @@ export class ExpensePeriodsService {
                         otherCosts,
                         ...rest
                     } = item;
+                    const fromSuggest = suggestPaid.get(item.id)?.total ?? 0;
 
                     const newItem = await manager.save(
                         manager.create(ManagementExpenseItem, {
                             ...rest,
+                            ...(fromSuggest > 0
+                                ? {
+                                      paidAmount: Number(rest.paidAmount ?? 0) - fromSuggest,
+                                      remaining: Number(rest.remaining ?? 0) + fromSuggest,
+                                  }
+                                : {}),
                             schoolExpense: newSchoolExpense,
                             subject: item.subject,
                         }),

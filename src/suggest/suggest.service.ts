@@ -38,7 +38,13 @@ import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
 import {
   buildManagementViewSections,
   ManagementViewSection,
+  ManagementViewSuggestPayments,
 } from './expense-management-view';
+import {
+  allocateSuggestPayment,
+  loadSuggestPayments,
+  suggestCodesLabel,
+} from '../management-expense-item/suggest-payments';
 import {
   formatMoneyVnd,
   monthlyItemAmounts,
@@ -120,6 +126,23 @@ export interface UploadedAttachment {
   fileUrl: string;
   fileName: string;
 }
+
+/** Ghi vào lịch sử đề xuất: phần Đã chi đã ghi sang bảng Chi Ngoài. */
+type ChiNgoaiPaymentLog =
+  | { skipped: string; paidDate?: undefined; cashAccount?: undefined; items?: undefined }
+  | {
+      skipped?: undefined;
+      paidDate: string;
+      cashAccount: string | null;
+      items: {
+        monthlyItemId: number;
+        label: string;
+        amount: number;
+        /** Bảng không còn dòng nào để ghi. */
+        unallocated: number;
+        rows: { itemId: number; schoolExpenseId: number; rowIndex: number; amount: number }[];
+      }[];
+    };
 
 @Injectable()
 export class SuggestService {
@@ -3035,6 +3058,7 @@ export class SuggestService {
     note?: string,
     files?: UploadedAttachment[],
   ) {
+    let chiNgoai: ChiNgoaiPaymentLog | null = null;
     return this.expenseTransition({
       id,
       action: ExpenseAction.CONFIRM_SPENT,
@@ -3051,7 +3075,18 @@ export class SuggestService {
           user.id,
           ExpenseAction.CONFIRM_SPENT,
         );
+        if (s.isMonthlyExpense) {
+          const rows = (
+            await manager.find(SuggestMonthlyItem, {
+              where: { suggestId: s.id! },
+              relations: { school: true, subject: { catalog: true }, expensePeriod: true },
+              order: { position: 'ASC', id: 'ASC' },
+            })
+          ).filter((row) => !row.excluded);
+          chiNgoai = await this.recordChiNgoaiPayments(manager, s, rows);
+        }
       },
+      logData: () => (chiNgoai ? { chiNgoai } : {}),
     });
   }
 
@@ -3111,6 +3146,7 @@ export class SuggestService {
       items: { id: number; label: string; amount: number | null; spent: boolean }[];
     };
     let summary: PartialSummary | null = null;
+    let chiNgoai: ChiNgoaiPaymentLog | null = null;
 
     const saved = await this.expenseTransition({
       id,
@@ -3148,6 +3184,11 @@ export class SuggestService {
             { spent: chosen.has(row.id) },
           );
         }
+        chiNgoai = await this.recordChiNgoaiPayments(
+          manager,
+          s,
+          rows.filter((row) => chosen.has(row.id)),
+        );
         summary = {
           ...result,
           items: rows.map((row) => ({
@@ -3165,7 +3206,7 @@ export class SuggestService {
           ExpenseAction.CONFIRM_PARTIALLY_SPENT,
         );
       },
-      logData: () => ({ partialSpend: summary }),
+      logData: () => ({ partialSpend: summary, ...(chiNgoai ? { chiNgoai } : {}) }),
     });
 
     // Gán trong callback nên TypeScript tưởng vẫn là null.
@@ -4368,8 +4409,9 @@ export class SuggestService {
     schoolId: number,
     periodId: number | null,
     filter: { schoolYear?: string | null; subjectId?: number | null },
+    manager: EntityManager = this.dataSource.manager,
   ): Promise<ManagementViewSection[]> {
-    const sheets = await this.dataSource.getRepository(SchoolExpense).find({
+    const sheets = await manager.getRepository(SchoolExpense).find({
       where: {
         school: { id: schoolId },
         ...(periodId ? { period: { id: periodId } } : {}),
@@ -4384,7 +4426,135 @@ export class SuggestService {
         revenueItems: { subject: true },
       },
     });
-    return buildManagementViewSections(sheets, filter);
+    const payments = await loadSuggestPayments(
+      manager,
+      sheets.flatMap((sheet) =>
+        (sheet.managementExpenseItems ?? []).map((item) => item.id),
+      ),
+    );
+    const viewPayments: ManagementViewSuggestPayments = new Map(
+      [...payments].map(([itemId, info]) => [
+        itemId,
+        {
+          paidDate: info.latest.paidDate,
+          cashAccount: info.latest.cashAccount,
+          codes: suggestCodesLabel(info),
+        },
+      ]),
+    );
+    return buildManagementViewSections(sheets, filter, viewPayments);
+  }
+
+  /**
+   * Kinh doanh xác nhận đã chi (cả đề xuất, hoặc các trường đã tích khi chi một
+   * phần): ghi Ngày chi / Nguồn chi / Đã chi vào bảng Chi Ngoài của từng trường.
+   * Chỉ đề xuất chi tháng có lệnh chi hệ thống lập lúc Giám đốc duyệt (biết phần
+   * của từng trường). Phần của trường chia cho các dòng theo Còn chi hiện tại.
+   * Không chặn việc xác nhận: không ghi được thì ghi lý do vào lịch sử.
+   */
+  private async recordChiNgoaiPayments(
+    manager: EntityManager,
+    s: Suggest,
+    rows: SuggestMonthlyItem[],
+  ): Promise<ChiNgoaiPaymentLog | null> {
+    if (!rows.length) return null;
+    if (rows.some((row) => row.approvedAmount === null || row.approvedAmount === undefined)) {
+      return {
+        skipped:
+          'Lệnh chi do Kế toán lập/sửa nên không chia được theo trường — Chi Ngoài không tự ghi, nhập tay ở QL thu chi',
+      };
+    }
+    const order = await manager.findOne(SuggestPaymentOrder, {
+      where: { suggestId: s.id! },
+    });
+    const cashAccount = order?.cashAccount ?? null;
+    const paidDate = vnToday();
+
+    // Khoá các bảng Chi Ngoài liên quan theo thứ tự id, cùng khoá mà "Lưu" bảng
+    // dùng — tránh ghi lẫn khi có người đang lưu bảng.
+    const sheetIds = (
+      await manager.query<{ id: number }[]>(
+        `SELECT id FROM school_expenses
+         WHERE (school_id, period_id) IN (
+           SELECT * FROM unnest($1::int[], $2::int[])
+         )
+         ORDER BY id FOR UPDATE`,
+        [
+          rows.map((row) => row.schoolId ?? 0),
+          rows.map((row) => row.expensePeriodId ?? 0),
+        ],
+      )
+    ).map((row) => Number(row.id));
+
+    const items: ChiNgoaiPaymentLog['items'] = [];
+    for (const row of rows) {
+      const amount = Number(row.approvedAmount) || 0;
+      if (amount <= 0 || !row.schoolId || !row.expensePeriodId || !row.subjectId) {
+        continue;
+      }
+      const sections = (
+        await this.loadSchoolManagementSections(
+          row.schoolId,
+          row.expensePeriodId,
+          { schoolYear: row.schoolYear ?? null, subjectId: row.subjectId },
+          manager,
+        )
+      ).filter(
+        (section) =>
+          sheetIds.includes(section.schoolExpenseId) &&
+          section.schoolId === row.schoolId &&
+          section.subjectId === row.subjectId &&
+          section.periodId === row.expensePeriodId,
+      );
+      const viewRows = sections.flatMap((section) =>
+        section.rows
+          .filter((viewRow) => viewRow.itemId)
+          .map((viewRow) => ({
+            itemId: viewRow.itemId!,
+            remaining: viewRow.remaining,
+            schoolExpenseId: section.schoolExpenseId,
+            rowIndex: viewRow.rowIndex,
+          })),
+      );
+      const { allocations, unallocated } = allocateSuggestPayment(viewRows, amount);
+      for (const allocation of allocations) {
+        await manager.query(
+          `UPDATE management_expense_items
+           SET "paidAmount" = "paidAmount" + $2,
+               "remaining" = "totalOutside" - "paidAmount" - $2
+           WHERE id = $1`,
+          [allocation.itemId, allocation.amount],
+        );
+        await manager.query(
+          `INSERT INTO management_expense_suggest_payments
+             (management_expense_item_id, suggest_id, suggest_monthly_item_id,
+              amount, paid_date, cash_account)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [allocation.itemId, s.id, row.id, allocation.amount, paidDate, cashAccount],
+        );
+      }
+      items.push({
+        monthlyItemId: row.id,
+        label: monthlyItemLabel(row),
+        amount,
+        unallocated,
+        rows: allocations.map((allocation) => {
+          const viewRow = viewRows.find((r) => r.itemId === allocation.itemId)!;
+          return {
+            itemId: allocation.itemId,
+            schoolExpenseId: viewRow.schoolExpenseId,
+            rowIndex: viewRow.rowIndex,
+            amount: allocation.amount,
+          };
+        }),
+      });
+      if (unallocated > 0) {
+        this.logger.warn(
+          `Đề xuất ${s.code ?? s.id}: ${monthlyItemLabel(row)} không còn dòng Chi Ngoài để ghi ${unallocated} đ`,
+        );
+      }
+    }
+    return { paidDate, cashAccount, items };
   }
 
   /** Dòng trường của đề xuất chi tháng; đề xuất cũ chưa có dòng thì lấy từ các cột đơn. */

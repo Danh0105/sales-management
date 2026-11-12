@@ -1,4 +1,5 @@
 import { Cents, toCents } from './cashflow-money';
+import { suggestPaidOfRowSql } from '../management-expense-item/suggest-payments';
 import {
   CollectedLedger,
   LedgerIssue,
@@ -11,7 +12,8 @@ import {
  * Bút toán thu chi lấy từ nghiệp vụ đang có — không có bảng sổ quỹ riêng:
  * - Hóa Đơn (revenue_items): "Thu/Chi" + "Số tiền" + "Ngày chi" + "Khoản thu/chi".
  * - Chi Trường (school_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi".
- * - Chi Ngoài (management_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi".
+ * - Chi Ngoài (management_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi",
+ *   trừ phần Đã chi do đề xuất chi tháng ghi vào (đã tính ở bút toán đề xuất).
  * - Đề nghị chi (suggest_history): mỗi lần thủ quỹ xác nhận xuất tiền là một
  *   bút toán chi, mỗi lần nhận lại quỹ là một bút toán thu cùng tài khoản.
  * - Đề nghị tài chính nội bộ: phiếu chi đã ghi nhận là bút toán chi, phiếu
@@ -141,11 +143,13 @@ SELECT ${ROW_CONTEXT_SELECT},
 FROM school_expense_items t ${ROW_CONTEXT_JOINS}
 WHERE t."paidAmount" > 0 OR t."cashAccount" IS NOT NULL`;
 
+// Phần Đã chi do đề xuất chi ghi vào đã là bút toán xuất tiền của đề xuất —
+// dòng Chi Ngoài chỉ còn phần nhập tay (với Ngày chi / Nguồn chi nhập tay).
 export const MANAGEMENT_EXPENSE_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
   t.id AS item_id,
   t."rowIndex" AS row_index,
-  t."paidAmount"::text AS paid_amount,
+  (t."paidAmount" - ${suggestPaidOfRowSql('t')})::text AS paid_amount,
   to_char(t."expenseDate", 'YYYY-MM-DD') AS expense_date,
   t."cashAccount" AS cash_account,
   t.payer

@@ -186,6 +186,8 @@ describe('Kinh doanh chi một phần', () => {
       }),
       saveExpenseAttachments: jest.fn(),
       notifyExpense: jest.fn(),
+      // Ghi sang bảng Chi Ngoài: có spec riêng (chi-ngoai-from-suggest.spec.ts).
+      recordChiNgoaiPayments: jest.fn().mockResolvedValue(null),
     });
     return { service, manager, row };
   };
@@ -215,6 +217,10 @@ describe('Kinh doanh chi một phần', () => {
       { roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT] },
     );
     expect(notify.mock.calls[0][0].message).toContain('500.000 đ');
+    // Chỉ các trường đã tích được ghi Đã chi sang Chi Ngoài.
+    const record = (service as never as { recordChiNgoaiPayments: jest.Mock })
+      .recordChiNgoaiPayments;
+    expect(record.mock.calls[0][2].map((r: { id: number }) => r.id)).toEqual([11, 13]);
   });
 
   it('trường Giám đốc không duyệt không tham gia chi một phần', async () => {

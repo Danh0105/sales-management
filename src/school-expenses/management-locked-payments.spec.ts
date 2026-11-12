@@ -96,6 +96,8 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       confirmed = true,
       finalized = false,
       schoolExpenseItems = [] as any[],
+      // Dòng 72 có Đã chi 10.000 do đề xuất chi DX-5 ghi vào.
+      linked = false,
     } = {},
   ) {
     const manager = {
@@ -103,6 +105,22 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       create: jest.fn((_entity: any, data: any) => data),
       save: jest.fn(async (entity: any, data?: any) => data ?? entity),
       update: jest.fn().mockResolvedValue(undefined),
+      // Khoá bảng + đọc dòng có tiền từ đề xuất chi: mặc định chưa có.
+      query: jest.fn(async (text: string) => {
+        if (!linked) return [];
+        if (text.includes('FROM management_expense_suggest_payments')) {
+          return [
+            { item_id: 72, suggest_id: 5, code: 'DX-5', amount: '10000.00', paid_date: '2026-11-12', cash_account: '1121' },
+          ];
+        }
+        if (text.includes('FROM management_expense_items')) {
+          return [
+            { id: 71, paid: '0.00', expense_date: null, cash_account: null },
+            { id: 72, paid: '10000.00', expense_date: null, cash_account: null },
+          ];
+        }
+        return [];
+      }),
     };
     const queryRunner = {
       manager,
@@ -131,7 +149,7 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       repo(oldRows) as any,
       repo({ id: 3, schoolId: 5 }) as any,
       repo(null) as any,
-      { createQueryRunner: () => queryRunner } as any,
+      { createQueryRunner: () => queryRunner, manager } as any,
     );
     jest.spyOn(service, 'getItems').mockResolvedValue({} as any);
 
@@ -268,6 +286,100 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
 
     expect(calls(manager.delete)).toHaveLength(1);
     expect(calls(manager.update)).toHaveLength(0);
+  });
+
+  describe('dòng có Đã chi từ đề xuất chi', () => {
+    const kept = { paidAmount: 10000, expenseDate: null, cashAccount: null };
+
+    it('bảng chưa khoá: thiếu dòng liên kết khi lưu → báo lỗi kèm mã đề xuất, không xoá gì', async () => {
+      const { save, manager } = setup(['accountant'], [bodyRow(71, 0)], {
+        confirmed: false,
+        linked: true,
+      });
+
+      await expect(save()).rejects.toThrow('DX-5');
+      expect(manager.delete).not.toHaveBeenCalled();
+    });
+
+    it('bảng chưa khoá: dòng liên kết cập nhật tại chỗ, giữ Ngày chi / Nguồn chi / Đã chi', async () => {
+      const { save, manager, calls } = setup(
+        ['accountant'],
+        [bodyRow(71, 0), bodyRow(72, 1)],
+        { confirmed: false, linked: true },
+      );
+
+      await save();
+
+      // Không xoá dòng 72 (giữ id), xoá + tạo lại các dòng khác như cũ.
+      const [[, criteria]] = calls(manager.delete);
+      expect(criteria.id._value._value).toEqual([72]);
+      expect(calls(manager.create)).toHaveLength(1);
+      const [[, where, data]] = calls(manager.update);
+      expect(where).toEqual({ id: 72 });
+      // Đơn giá vẫn theo client (bảng chưa khoá), cột chi theo server.
+      expect(data).toMatchObject({ ...kept, ql1UnitPrice: 99999 });
+      expect(data.remaining).toBe(data.totalOutside - 10000);
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('FOR UPDATE'),
+        [9],
+      );
+    });
+
+    it('bảng đã khoá (kế toán): dòng liên kết chỉ đổi Người chi / Ghi chú', async () => {
+      const { save, manager, calls } = setup(
+        ['accountant'],
+        [bodyRow(71, 0), bodyRow(72, 1)],
+        { linked: true },
+      );
+
+      await save();
+
+      expect(calls(manager.update)).toEqual([
+        [ManagementExpenseItem, { id: 71 }, { ...payment, remaining: 21165300 - 18225 }],
+        [ManagementExpenseItem, { id: 72 }, { ...payment, ...kept, remaining: 18225 - 10000 }],
+      ]);
+    });
+
+    it.each([['troly_gd'], ['director']])(
+      '%s, bảng đã khoá: không ghi Ngày chi / Nguồn chi lên dòng liên kết',
+      async (role) => {
+        const { save, manager, calls } = setup(
+          [role],
+          [bodyRow(71, 0), bodyRow(72, 1)],
+          { linked: true },
+        );
+
+        await save();
+
+        expect(calls(manager.update)).toEqual([
+          [ManagementExpenseItem, { id: 71 }, dateSource],
+        ]);
+      },
+    );
+
+    it('kỳ đã kết thúc: không ghi Ngày chi / Nguồn chi lên dòng liên kết', async () => {
+      const { save, manager, calls } = setup(
+        ['accountant'],
+        [bodyRow(71, 0), bodyRow(72, 1)],
+        { finalized: true, linked: true },
+      );
+
+      await save();
+
+      expect(calls(manager.update)).toEqual([
+        [ManagementExpenseItem, { id: 71 }, dateSource],
+      ]);
+    });
+
+    it('Đã chi client gửi cho dòng liên kết không tính vào giới hạn tổng Đã chi', async () => {
+      const { save } = setup(
+        ['accountant'],
+        [bodyRow(71, 0), { ...bodyRow(72, 1), paidAmount: 999_999_999 }],
+        { linked: true },
+      );
+
+      await expect(save()).resolves.toBeDefined();
+    });
   });
 
   describe('kỳ đã "Kết thúc"', () => {

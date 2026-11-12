@@ -27,7 +27,7 @@ function makeService(existing: any) {
     repo({ id: 9, school: { id: 5 }, finalized: false }) as any,
     repo({ id: 3, schoolId: 5 }) as any,
     repo(null) as any,
-    { transaction } as any,
+    { transaction, manager: { query: jest.fn().mockResolvedValue([]) } } as any,
   );
   jest.spyOn(service as any, 'findOneWithOtherCosts').mockResolvedValue(null);
   return { service, transaction };

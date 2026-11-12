@@ -20,6 +20,8 @@ export interface ManagementViewOtherCost {
 }
 
 export interface ManagementViewRow {
+  /** id dòng `management_expense_items`. */
+  itemId: number | null;
   rowIndex: number;
   content: string;
   standalone: boolean;
@@ -40,7 +42,15 @@ export interface ManagementViewRow {
   remaining: number;
   payer: string | null;
   note: string | null;
+  /** Mã đề xuất chi đã ghi Đã chi vào dòng (ô Ngày chi / Nguồn chi / Đã chi bị khoá). */
+  suggestCodes?: string | null;
 }
+
+/** Phần Đã chi do đề xuất ghi vào từng dòng, theo id dòng. */
+export type ManagementViewSuggestPayments = Map<
+  number,
+  { paidDate: string; cashAccount: string | null; codes: string }
+>;
 
 export interface ManagementViewSection {
   schoolExpenseId: number;
@@ -141,6 +151,7 @@ function buildRow(
   item: any,
   revenue: any,
   columns: any[],
+  suggestPayments?: ManagementViewSuggestPayments,
 ): ManagementViewRow {
   // Dòng đi kèm Doanh Thu dùng chung Nội dung và số lượng của Doanh Thu; dòng
   // thêm riêng tự giữ các trường này.
@@ -180,8 +191,11 @@ function buildRow(
       0,
     );
   const paidAmount = toNumber(item?.paidAmount, 0);
+  const itemId = Number(item?.id) || null;
+  const fromSuggest = itemId ? suggestPayments?.get(itemId) : undefined;
 
   return {
+    itemId,
     rowIndex: toNumber(item?.rowIndex, 0),
     content: revenue
       ? (revenue.content ?? '')
@@ -198,12 +212,14 @@ function buildRow(
     ql2Expense,
     otherCosts,
     totalOutside,
-    paymentDate: dateOnly(item?.expenseDate),
-    cashAccount: item?.cashAccount ?? null,
+    // Dòng có tiền từ đề xuất: Ngày chi / Nguồn chi là của lần ghi gần nhất.
+    paymentDate: fromSuggest ? fromSuggest.paidDate : dateOnly(item?.expenseDate),
+    cashAccount: fromSuggest ? fromSuggest.cashAccount : (item?.cashAccount ?? null),
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer ?? null,
     note: item?.note ?? null,
+    ...(fromSuggest ? { suggestCodes: fromSuggest.codes } : {}),
   };
 }
 
@@ -214,6 +230,7 @@ function buildRow(
 export function buildManagementViewSections(
   sheets: any[],
   filter: { schoolYear?: string | null; subjectId?: number | null },
+  suggestPayments?: ManagementViewSuggestPayments,
 ): ManagementViewSection[] {
   const sections: ManagementViewSection[] = [];
   const ordered = [...sheets].sort(
@@ -248,6 +265,7 @@ export function buildManagementViewSections(
             item,
             revenueByRow.get(toNumber(item?.rowIndex, 0)),
             columns,
+            suggestPayments,
           ),
         )
         .sort((a, b) => a.rowIndex - b.rowIndex);

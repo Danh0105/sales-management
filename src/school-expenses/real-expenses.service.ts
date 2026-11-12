@@ -10,6 +10,8 @@ import {
   DataSource,
   EntityManager,
   EntityTarget,
+  In,
+  Not,
   ObjectLiteral,
   Repository,
 } from 'typeorm';
@@ -43,18 +45,26 @@ import {
   normalizeSharedFields,
 } from './expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  assertLinkedRowsKept,
+  keepLinkedPaymentFields,
+  LinkedManagementRow,
+  loadLinkedManagementRows,
+  loadSuggestPayments,
+  withSuggestPayments,
+} from '../management-expense-item/suggest-payments';
 
 /**
  * Ghi một nhóm cột lên các dòng cũ, khớp theo `id` client gửi kèm (không theo
  * vị trí) — xoá / thêm dòng ở client không làm ghi nhầm sang dòng khác; dòng
- * không khớp id thì bỏ qua. Trả về snapshot cho lịch sử.
+ * không khớp id (hoặc `build` trả null) thì bỏ qua. Trả về snapshot cho lịch sử.
  */
 async function updateRowsById<R extends { id: number; rowIndex: number }>(
   manager: EntityManager,
   entity: EntityTarget<ObjectLiteral>,
   oldRows: R[],
   items: unknown,
-  build: (item: any, old: R) => ObjectLiteral,
+  build: (item: any, old: R) => ObjectLiteral | null,
 ) {
   const byId = new Map<number, any>(
     (Array.isArray(items) ? items : [])
@@ -68,6 +78,7 @@ async function updateRowsById<R extends { id: number; rowIndex: number }>(
     if (!item) continue;
 
     const data = build(item, old);
+    if (!data) continue;
     await manager.update(entity, { id: old.id }, data);
     snapshot.push({ rowIndex: old.rowIndex, ...data });
   }
@@ -417,6 +428,13 @@ export class RealExpensesService {
       }),
     ]);
 
+    // Dòng Chi Ngoài có tiền từ đề xuất chi: 3 ô Ngày chi / Nguồn chi / Đã chi
+    // khoá, dòng không xoá được. Đọc lại trong transaction trước khi ghi.
+    const linkedBefore = await loadLinkedManagementRows(this.dataSource.manager, {
+      schoolExpenseId,
+      subjectId: body.subjectId,
+    });
+
     if (finalizedDateSourceOnly) {
       await this.saveFinalizedDateSource(
         schoolExpenseId,
@@ -482,13 +500,15 @@ export class RealExpensesService {
       ? pickLockedManagementRows(body.managementExpenseItems)
       : [];
 
+    if (!managementLocked) assertLinkedRowsKept(linkedBefore, body.managementExpenseItems);
+
     if (managementPaymentOnly) {
       assertManagementPaidWithinOutside(
-        this.lockedPaidTotals(oldManagement, body, lockedManagementRows),
+        this.lockedPaidTotals(oldManagement, body, lockedManagementRows, linkedBefore),
       );
     } else if (!managementLocked) {
       assertManagementPaidWithinOutside(
-        this.submittedPaidTotals(oldManagement, body, oldOtherCostsByRow),
+        this.submittedPaidTotals(oldManagement, body, oldOtherCostsByRow, linkedBefore),
       );
     }
 
@@ -498,6 +518,17 @@ export class RealExpensesService {
     await queryRunner.startTransaction();
 
     try {
+      // Cùng khoá với bước kinh doanh xác nhận đã chi (ghi Đã chi vào Chi Ngoài).
+      await queryRunner.manager.query(
+        `SELECT id FROM school_expenses WHERE id = $1 FOR UPDATE`,
+        [schoolExpenseId],
+      );
+      const linked = await loadLinkedManagementRows(queryRunner.manager, {
+        schoolExpenseId,
+        subjectId: body.subjectId,
+      });
+      if (!managementLocked) assertLinkedRowsKept(linked, body.managementExpenseItems);
+
       // Delete old items for this subject
       await queryRunner.manager.delete(RevenueItem, {
         schoolExpense: {
@@ -518,6 +549,7 @@ export class RealExpensesService {
       });
 
       if (!managementLocked) {
+        // Dòng có tiền từ đề xuất giữ nguyên id (cập nhật tại chỗ ở dưới).
         await queryRunner.manager.delete(ManagementExpenseItem, {
           schoolExpense: {
             id: schoolExpenseId,
@@ -525,6 +557,7 @@ export class RealExpensesService {
           subject: {
             id: body.subjectId,
           },
+          ...(linked.size ? { id: Not(In([...linked.keys()])) } : {}),
         });
       }
 
@@ -588,6 +621,7 @@ export class RealExpensesService {
 
       // Create management expense items (+ Chi khác của từng dòng)
       const newManagementSnapshot: any[] = [];
+      const keptLinkedIds = new Set<number>();
       for (const [index, item] of managementExpenseItems.entries()) {
         const shared = normalizeSharedFields(sharedItems[index], index);
         const rowIndex = shared.rowIndex;
@@ -600,19 +634,40 @@ export class RealExpensesService {
         const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
           computeOtherCostRows(rawOtherCosts, shared);
 
-        const entity = queryRunner.manager.create(ManagementExpenseItem, {
-          schoolExpense,
-          subject,
-          ...buildManagementExpenseItemData(
-            item,
-            index,
-            sharedItems[index],
-            totalOtherCostAmount,
-            totalOtherTaxAmount,
-          ),
-        });
+        const built = buildManagementExpenseItemData(
+          item,
+          index,
+          sharedItems[index],
+          totalOtherCostAmount,
+          totalOtherTaxAmount,
+        );
+        const linkedId = Number(item?.id);
+        const linkedRow =
+          linkedId && !keptLinkedIds.has(linkedId) ? linked.get(linkedId) : undefined;
 
-        const savedItem = await queryRunner.manager.save(entity);
+        let savedItem: { id: number };
+        if (linkedRow) {
+          // Dòng có tiền từ đề xuất: cập nhật tại chỗ (giữ id để giữ liên kết),
+          // Ngày chi / Nguồn chi / Đã chi giữ số trên server.
+          keptLinkedIds.add(linkedId);
+          await queryRunner.manager.update(
+            ManagementExpenseItem,
+            { id: linkedId },
+            keepLinkedPaymentFields(built, linkedRow, built.totalOutside),
+          );
+          await queryRunner.manager.delete(ManagementExpenseOtherCost, {
+            managementExpenseItemId: linkedId,
+          });
+          savedItem = { id: linkedId };
+        } else {
+          savedItem = await queryRunner.manager.save(
+            queryRunner.manager.create(ManagementExpenseItem, {
+              schoolExpense,
+              subject,
+              ...built,
+            }),
+          );
+        }
 
         if (otherCostRows.length) {
           await queryRunner.manager.save(
@@ -630,7 +685,11 @@ export class RealExpensesService {
           );
         }
 
-        newManagementSnapshot.push({ ...item, rowIndex, otherCosts: otherCostRows });
+        newManagementSnapshot.push({
+          ...(linkedRow ? keepLinkedPaymentFields(item, linkedRow, built.totalOutside) : item),
+          rowIndex,
+          otherCosts: otherCostRows,
+        });
       }
 
       // Bảng đã khoá: chỉ ghi cột chi lên dòng cũ — không thêm / xoá dòng, phần
@@ -642,20 +701,24 @@ export class RealExpensesService {
             ManagementExpenseItem,
             oldManagement,
             body.managementExpenseItems,
-            (item, old) =>
-              managementPaymentOnly
-                ? {
-                    ...buildManagementPaymentData(
-                      item,
-                      Number(old.totalOutside ?? 0),
-                    ),
-                    ...buildStandaloneContentData(
-                      item,
-                      old.rowIndex,
-                      revenueItems.length,
-                    ),
-                  }
-                : buildPaymentDateSourceData(item),
+            (item, old) => {
+              const linkedRow = linked.get(old.id);
+              if (!managementPaymentOnly) {
+                return linkedRow ? null : buildPaymentDateSourceData(item);
+              }
+              const totalOutside = Number(old.totalOutside ?? 0);
+              const data = {
+                ...buildManagementPaymentData(item, totalOutside),
+                ...buildStandaloneContentData(
+                  item,
+                  old.rowIndex,
+                  revenueItems.length,
+                ),
+              };
+              return linkedRow
+                ? keepLinkedPaymentFields(data, linkedRow, totalOutside)
+                : data;
+            },
           )),
         );
       }
@@ -718,6 +781,7 @@ export class RealExpensesService {
     oldManagement: ManagementExpenseItem[],
     body: any,
     addedRows: any[],
+    linked: Map<number, LinkedManagementRow>,
   ) {
     const items: any[] = Array.isArray(body.managementExpenseItems)
       ? body.managementExpenseItems
@@ -733,7 +797,7 @@ export class RealExpensesService {
     for (const old of oldManagement) {
       const paid = Number(old.paidAmount ?? 0);
       oldPaid += paid;
-      newPaid += Number(paidById.get(old.id) ?? paid);
+      newPaid += linked.has(old.id) ? paid : Number(paidById.get(old.id) ?? paid);
       totalOutside += recomputeManagementOutside(old, revenueItems[old.rowIndex] ?? old);
     }
 
@@ -745,6 +809,7 @@ export class RealExpensesService {
     oldManagement: ManagementExpenseItem[],
     body: any,
     oldOtherCostsByRow: Map<number, any[]>,
+    linked: Map<number, LinkedManagementRow>,
   ) {
     const items: any[] = Array.isArray(body.managementExpenseItems)
       ? body.managementExpenseItems
@@ -777,7 +842,8 @@ export class RealExpensesService {
         totalOtherCostAmount,
         totalOtherTaxAmount,
       );
-      newPaid += data.paidAmount;
+      const linkedRow = linked.get(Number(item?.id));
+      newPaid += linkedRow ? linkedRow.paidAmount : data.paidAmount;
       totalOutside += data.totalOutside;
     });
 
@@ -805,6 +871,14 @@ export class RealExpensesService {
     await queryRunner.startTransaction();
 
     try {
+      await queryRunner.manager.query(
+        `SELECT id FROM school_expenses WHERE id = $1 FOR UPDATE`,
+        [schoolExpenseId],
+      );
+      const linked = await loadLinkedManagementRows(queryRunner.manager, {
+        schoolExpenseId,
+        subjectId: body.subjectId,
+      });
       const schoolExpenseItems = await updateRowsById(
         queryRunner.manager,
         SchoolExpenseItem,
@@ -812,12 +886,13 @@ export class RealExpensesService {
         body.schoolExpenseItems,
         buildPaymentDateSourceData,
       );
+      // Dòng có tiền từ đề xuất: Ngày chi / Nguồn chi khoá.
       const managementExpenseItems = await updateRowsById(
         queryRunner.manager,
         ManagementExpenseItem,
         oldManagement,
         body.managementExpenseItems,
-        buildPaymentDateSourceData,
+        (item, old) => (linked.has(old.id) ? null : buildPaymentDateSourceData(item)),
       );
 
       await queryRunner.manager.save(SchoolExpenseHistory, {
@@ -918,11 +993,16 @@ export class RealExpensesService {
         }),
       ]);
 
+    const suggestPayments = await loadSuggestPayments(
+      this.dataSource.manager,
+      managementExpenseItems.map((item) => item.id),
+    );
+
     return {
       revenueItems,
       schoolExpenseItems,
-      managementExpenseItems: managementExpenseItems.map((i) =>
-        this.withOtherCosts(i),
+      managementExpenseItems: managementExpenseItems.map((item) =>
+        withSuggestPayments(this.withOtherCosts(item), suggestPayments),
       ),
     };
   }
