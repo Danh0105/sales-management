@@ -431,6 +431,16 @@ export class SourceDeletionService {
        FROM management_expense_suggest_payments WHERE suggest_id = $1`,
       [id],
     );
+    const [chiTruong] = await manager.query<{ rows: number; total: string | null }[]>(
+      `SELECT count(DISTINCT school_expense_item_id)::int AS rows, SUM(amount)::text AS total
+       FROM school_expense_suggest_payments WHERE suggest_id = $1`,
+      [id],
+    );
+    const [teacherRows] = await manager.query<{ rows: number; total: string | null }[]>(
+      `SELECT count(DISTINCT school_teacher_expense_item_id)::int AS rows, SUM(amount)::text AS total
+       FROM school_teacher_suggest_payments WHERE suggest_id = $1`,
+      [id],
+    );
     const code = suggest.code ?? `#${id}`;
     const items = [
       `Đề xuất chi ${code} — "${suggest.content}"${suggest.creator ? ` — ${suggest.creator}` : ''}${suggest.amount ? ` — ${money(suggest.amount)}` : ''}`,
@@ -442,6 +452,16 @@ export class SourceDeletionService {
     if (chiNgoai?.rows) {
       items.push(
         `Trả lại Đã chi ${money(chiNgoai.total)} đã ghi vào ${chiNgoai.rows} dòng Chi Ngoài (Còn chi tăng tương ứng)`,
+      );
+    }
+    if (chiTruong?.rows) {
+      items.push(
+        `Trả lại Đã chi ${money(chiTruong.total)} đã ghi vào ${chiTruong.rows} dòng Chi Trường (Còn lại tăng tương ứng)`,
+      );
+    }
+    if (teacherRows?.rows) {
+      items.push(
+        `Bỏ Ngày chi / Nguồn chi của ${teacherRows.rows} dòng Giáo viên trường đề xuất đã trả (${money(teacherRows.total)}) — thành chưa trả`,
       );
     }
     items.push(`${stats.history} dòng lịch sử xử lý và thông báo của đề xuất`);
@@ -470,12 +490,20 @@ export class SourceDeletionService {
         .filter((url) => SUGGEST_UPLOAD.test(url))
         .map((url) => ({ kind: 'suggest', path: url })),
       apply: async (m) => {
-        // Cùng khoá với "Lưu" bảng Chi Ngoài, rồi trả lại Đã chi đề xuất đã ghi;
+        // Cùng khoá với "Lưu" bảng thu chi, rồi trả lại Đã chi đề xuất đã ghi;
         // dòng liên kết tự xoá theo đề xuất (khoá ngoại CASCADE).
         await m.query(
           `SELECT id FROM school_expenses WHERE id IN (
              SELECT t.school_expense_id FROM management_expense_items t
              JOIN management_expense_suggest_payments p ON p.management_expense_item_id = t.id
+             WHERE p.suggest_id = $1
+             UNION
+             SELECT t.school_expense_id FROM school_expense_items t
+             JOIN school_expense_suggest_payments p ON p.school_expense_item_id = t.id
+             WHERE p.suggest_id = $1
+             UNION
+             SELECT t.school_expense_id FROM school_teacher_expense_items t
+             JOIN school_teacher_suggest_payments p ON p.school_teacher_expense_item_id = t.id
              WHERE p.suggest_id = $1)
            ORDER BY id FOR UPDATE`,
           [id],
@@ -490,6 +518,26 @@ export class SourceDeletionService {
              GROUP BY management_expense_item_id
            ) p
            WHERE t.id = p.management_expense_item_id`,
+          [id],
+        );
+        await m.query(
+          `UPDATE school_expense_items t
+           SET "paidAmount" = t."paidAmount" - p.total,
+               "remaining" = t."remaining" + p.total
+           FROM (
+             SELECT school_expense_item_id, SUM(amount) AS total
+             FROM school_expense_suggest_payments WHERE suggest_id = $1
+             GROUP BY school_expense_item_id
+           ) p
+           WHERE t.id = p.school_expense_item_id`,
+          [id],
+        );
+        // Ngày chi / Nguồn chi của dòng lương là của đề xuất (khoá ở QL thu chi).
+        await m.query(
+          `UPDATE school_teacher_expense_items t
+           SET expense_date = NULL, cash_account = NULL, updated_at = now()
+           WHERE t.id IN (SELECT school_teacher_expense_item_id
+                          FROM school_teacher_suggest_payments WHERE suggest_id = $1)`,
           [id],
         );
         await m.query(`DELETE FROM suggest_history WHERE "suggestId" = $1`, [
@@ -611,6 +659,13 @@ export class SourceDeletionService {
   ): Promise<Prepared> {
     const { table, prefix, label } = SHEET_TABLES[type];
     const isInvoice = type === 'INVOICE';
+    // Chi Ngoài / Chi Trường: phần Đã chi do đề xuất chi ghi vào không nằm trên dòng sổ này.
+    const paidTable =
+      type === 'MANAGEMENT_EXPENSE'
+        ? ('MANAGEMENT' as const)
+        : type === 'SCHOOL_EXPENSE'
+          ? ('SCHOOL_EXPENSE' as const)
+          : null;
     const posting = isInvoice
       ? `to_char(t."invoicePaymentDate", 'YYYY-MM-DD') AS cash_date,
          t."invoiceCashAccount" AS cash_account,
@@ -621,8 +676,8 @@ export class SourceDeletionService {
          'OUT' AS cash_direction,
          ${
            // Phần Đã chi do đề xuất chi ghi vào không nằm trên dòng sổ này.
-           type === 'MANAGEMENT_EXPENSE'
-             ? `(t."paidAmount" - ${suggestPaidOfRowSql('t')})::text`
+           paidTable
+             ? `(t."paidAmount" - ${suggestPaidOfRowSql('t', paidTable)})::text`
              : `t."paidAmount"::text`
          } AS cash_amount`;
     const [row] = await manager.query<
@@ -642,7 +697,7 @@ export class SourceDeletionService {
       }[]
     >(
       `SELECT t.school_expense_id, t.subject_id, t."rowIndex" AS row_index,
-         ${type === 'MANAGEMENT_EXPENSE' ? suggestPaidOfRowSql('t') : '0'}::text AS suggest_paid,
+         ${paidTable ? suggestPaidOfRowSql('t', paidTable) : '0'}::text AS suggest_paid,
          s.name AS school_name, sub.name AS subject_name, ep.month, ep.year,
          ${posting}
        FROM ${table} t
@@ -705,10 +760,10 @@ export class SourceDeletionService {
           isInvoice
             ? `UPDATE revenue_items SET "invoicePaymentDate" = NULL, "invoiceCashAccount" = NULL,
                  "invoiceCashDirection" = NULL, "invoiceCashAmount" = NULL WHERE id = $1`
-            : type === 'MANAGEMENT_EXPENSE'
+            : paidTable
               ? // Chỉ gỡ phần nhập tay; phần đề xuất chi ghi vào giữ nguyên.
-                `UPDATE ${table} t SET "remaining" = t."remaining" + (t."paidAmount" - ${suggestPaidOfRowSql('t')}),
-                   "paidAmount" = ${suggestPaidOfRowSql('t')},
+                `UPDATE ${table} t SET "remaining" = t."remaining" + (t."paidAmount" - ${suggestPaidOfRowSql('t', paidTable)}),
+                   "paidAmount" = ${suggestPaidOfRowSql('t', paidTable)},
                    "expenseDate" = NULL, "cashAccount" = NULL WHERE t.id = $1`
               : `UPDATE ${table} SET "remaining" = "remaining" + "paidAmount", "paidAmount" = 0,
                  "expenseDate" = NULL, "cashAccount" = NULL WHERE id = $1`,
@@ -739,9 +794,12 @@ export class SourceDeletionService {
         cash_date: string | null;
         cash_account: string | null;
         net_amount: string;
+        suggest_payments: number;
       }[]
     >(
       `SELECT t.school_expense_id, t.subject_id, t.row_index,
+         (SELECT count(*)::int FROM school_teacher_suggest_payments sp
+          WHERE sp.school_teacher_expense_item_id = t.id) AS suggest_payments,
          s.name AS school_name, sub.name AS subject_name, ep.month, ep.year,
          to_char(t.expense_date, 'YYYY-MM-DD') AS cash_date, t.cash_account,
          t.net_amount::text AS net_amount
@@ -777,8 +835,11 @@ export class SourceDeletionService {
           'Xoá Ngày chi và Nguồn chi của dòng (thành chưa trả); Thành tiền, Thuế TNCN, dấu Duyệt lương giữ nguyên.',
           'Muốn ghi lại vào sổ thì nhập lại ở màn QL thu chi.',
         ],
-        blockers:
-          row.cash_date !== null || row.cash_account !== null
+        blockers: Number(row.suggest_payments) > 0
+          ? [
+              'Dòng này do đề xuất chi trả (Ngày chi / Nguồn chi lấy từ đề xuất) — xoá đề xuất đó ở sổ nếu cần gỡ.',
+            ]
+          : row.cash_date !== null || row.cash_account !== null
             ? []
             : ['Dòng này không còn khoản chi nào trên sổ.'],
       },

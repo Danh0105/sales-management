@@ -135,11 +135,13 @@ WHERE t."invoiceCashDirection" IS NOT NULL
    OR t."invoiceCashAccount" IS NOT NULL
    OR t."paidAmount" > 0`;
 
+// Như Chi Ngoài: phần Đã chi do Đề xuất Chi Trường ghi vào đã là bút toán
+// xuất tiền của đề xuất — dòng chỉ còn phần nhập tay.
 export const SCHOOL_EXPENSE_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
   t.id AS item_id,
   t."rowIndex" AS row_index,
-  t."paidAmount"::text AS paid_amount,
+  (t."paidAmount" - ${suggestPaidOfRowSql('t', 'SCHOOL_EXPENSE')})::text AS paid_amount,
   to_char(t."expenseDate", 'YYYY-MM-DD') AS expense_date,
   t."cashAccount" AS cash_account
 FROM school_expense_items t ${ROW_CONTEXT_JOINS}
@@ -158,7 +160,11 @@ SELECT ${ROW_CONTEXT_SELECT},
 FROM management_expense_items t ${ROW_CONTEXT_JOINS}
 WHERE t."paidAmount" > 0 OR t."cashAccount" IS NOT NULL`;
 
-/** Dòng Giáo viên trường đã nhập Ngày chi hoặc Nguồn chi (thiếu một trong hai → lỗi). */
+/**
+ * Dòng Giáo viên trường đã nhập Ngày chi hoặc Nguồn chi (thiếu một trong hai →
+ * lỗi). Dòng do Đề xuất Chi GV trường trả không vào sổ lần nữa (đề xuất đã có
+ * bút toán xuất tiền).
+ */
 export const SCHOOL_TEACHER_ROWS_SQL = `
 SELECT ${ROW_CONTEXT_SELECT},
   t.id AS item_id,
@@ -167,7 +173,9 @@ SELECT ${ROW_CONTEXT_SELECT},
   to_char(t.expense_date, 'YYYY-MM-DD') AS expense_date,
   t.cash_account AS cash_account
 FROM school_teacher_expense_items t ${ROW_CONTEXT_JOINS}
-WHERE t.net_amount > 0 AND (t.expense_date IS NOT NULL OR t.cash_account IS NOT NULL)`;
+WHERE t.net_amount > 0 AND (t.expense_date IS NOT NULL OR t.cash_account IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM school_teacher_suggest_payments sp
+                  WHERE sp.school_teacher_expense_item_id = t.id)`;
 
 export const SUGGEST_EVENTS_SQL = `
 SELECT h.id AS history_id,

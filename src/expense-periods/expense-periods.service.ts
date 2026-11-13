@@ -348,11 +348,24 @@ export class ExpensePeriodsService {
                     );
                 }
 
+                // Như Chi Ngoài: Đã chi do Đề xuất Chi Trường ghi vào thuộc kỳ gốc.
+                const schoolSuggestPaid = await loadSuggestPayments(
+                    manager,
+                    (sourceExpense.schoolExpenseItems || []).map((item) => item.id),
+                    'SCHOOL_EXPENSE',
+                );
                 for (const item of sourceExpense.schoolExpenseItems || []) {
                     const { id: _itemId, schoolExpense: _se, ...rest } = item;
+                    const fromSuggest = schoolSuggestPaid.get(item.id)?.total ?? 0;
                     await manager.save(
                         manager.create(SchoolExpenseItem, {
                             ...rest,
+                            ...(fromSuggest > 0
+                                ? {
+                                      paidAmount: Number(rest.paidAmount ?? 0) - fromSuggest,
+                                      remaining: Number(rest.remaining ?? 0) + fromSuggest,
+                                  }
+                                : {}),
                             schoolExpense: newSchoolExpense,
                             subject: item.subject,
                         }),

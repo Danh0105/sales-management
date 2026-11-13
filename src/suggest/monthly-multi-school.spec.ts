@@ -103,6 +103,10 @@ describe('Tạo đề xuất chi tháng nhiều trường', () => {
     const service = Object.create(SuggestService.prototype) as SuggestService;
     Object.assign(service as object, {
       dataSource: { transaction: jest.fn((run) => run(manager)) },
+      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
+      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
+        items.map(() => 100_000),
+      ),
       generateCode: jest.fn().mockResolvedValue('DX-1'),
       writeExpenseLog: jest.fn(),
       expenseNextStepDetails: jest.fn(),
@@ -141,8 +145,8 @@ describe('Tạo đề xuất chi tháng nhiều trường', () => {
       ([entity]) => entity === SuggestMonthlyItem,
     );
     expect(itemsSave?.[1]).toEqual([
-      { suggestId: 125, ...itemA, position: 0 },
-      { suggestId: 125, ...itemB, position: 1 },
+      { suggestId: 125, ...itemA, position: 0, schoolTeacherId: null, requestedAmount: 100_000 },
+      { suggestId: 125, ...itemB, position: 1, schoolTeacherId: null, requestedAmount: 100_000 },
     ]);
     expect(
       (service as never as { notifyExpense: jest.Mock }).notifyExpense,
@@ -216,6 +220,10 @@ describe('Chủ đơn sửa đề xuất chi tháng nhiều trường', () => {
     const service = Object.create(SuggestService.prototype) as SuggestService;
     Object.assign(service as object, {
       dataSource: { transaction: jest.fn((run) => run(manager)) },
+      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
+      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
+        items.map(() => 100_000),
+      ),
       writeExpenseLog: jest.fn(),
       expenseNextStepDetails: jest.fn(),
       notifyExpense: jest.fn(),
@@ -287,8 +295,8 @@ describe('Chủ đơn sửa đề xuất chi tháng nhiều trường', () => {
       ([entity]) => entity === SuggestMonthlyItem,
     );
     expect(itemsSave?.[1]).toEqual([
-      { suggestId: 5, ...itemA, position: 0 },
-      { suggestId: 5, ...itemB, position: 1 },
+      { suggestId: 5, ...itemA, position: 0, schoolTeacherId: null, requestedAmount: 100_000 },
+      { suggestId: 5, ...itemB, position: 1, schoolTeacherId: null, requestedAmount: 100_000 },
     ]);
   });
 });

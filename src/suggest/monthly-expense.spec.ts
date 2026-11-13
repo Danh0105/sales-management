@@ -209,6 +209,10 @@ describe('Tạo đề xuất chi tháng', () => {
     const service = Object.create(SuggestService.prototype) as SuggestService;
     Object.assign(service as object, {
       dataSource: { transaction: jest.fn((run) => run(manager)) },
+      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
+      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
+        items.map(() => 100_000),
+      ),
       generateCode: jest.fn().mockResolvedValue('DX-1'),
       writeExpenseLog: jest.fn(),
       expenseNextStepDetails: jest.fn(),
@@ -329,6 +333,10 @@ describe('Chủ đơn sửa đề xuất chi tháng', () => {
     const service = Object.create(SuggestService.prototype) as SuggestService;
     Object.assign(service as object, {
       dataSource: { transaction: jest.fn((run) => run(manager)) },
+      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
+      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
+        items.map(() => 100_000),
+      ),
     });
     return { service, manager };
   };

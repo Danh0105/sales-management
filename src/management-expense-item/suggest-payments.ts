@@ -27,18 +27,56 @@ export interface ItemSuggestPayments {
 
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
-/** SQL: tổng Đã chi do đề xuất ghi vào dòng `alias` của management_expense_items. */
-export const suggestPaidOfRowSql = (alias: string) =>
-  `(SELECT COALESCE(SUM(sp.amount), 0) FROM management_expense_suggest_payments sp
-    WHERE sp.management_expense_item_id = ${alias}.id)`;
+/**
+ * Bảng dòng chi của QL thu chi mà đề xuất chi ghi tiền vào, kèm bảng liên kết.
+ * Chi Ngoài (đề xuất chi tháng) có từ 12/11/2026; Chi Trường và Giáo viên
+ * trường từ 13/11/2026. Chi Ngoài và Chi Trường cùng tên cột tiền
+ * (`paidAmount`, `expenseDate`, `cashAccount`).
+ */
+export const SUGGEST_PAYMENT_TABLES = {
+  MANAGEMENT: {
+    items: 'management_expense_items',
+    payments: 'management_expense_suggest_payments',
+    fk: 'management_expense_item_id',
+    label: 'Chi Ngoài',
+  },
+  SCHOOL_EXPENSE: {
+    items: 'school_expense_items',
+    payments: 'school_expense_suggest_payments',
+    fk: 'school_expense_item_id',
+    label: 'Chi Trường',
+  },
+  SCHOOL_TEACHER: {
+    items: 'school_teacher_expense_items',
+    payments: 'school_teacher_suggest_payments',
+    fk: 'school_teacher_expense_item_id',
+    label: 'Giáo viên trường',
+  },
+} as const;
+
+export type SuggestPaymentTable = keyof typeof SUGGEST_PAYMENT_TABLES;
+/** Bảng có cột Đã chi (`paidAmount`) — Giáo viên trường không có. */
+export type PaidSheetTable = Exclude<SuggestPaymentTable, 'SCHOOL_TEACHER'>;
+
+/** SQL: tổng Đã chi do đề xuất ghi vào dòng `alias` (mặc định bảng Chi Ngoài). */
+export const suggestPaidOfRowSql = (
+  alias: string,
+  table: SuggestPaymentTable = 'MANAGEMENT',
+) => {
+  const { payments, fk } = SUGGEST_PAYMENT_TABLES[table];
+  return `(SELECT COALESCE(SUM(sp.amount), 0) FROM ${payments} sp
+    WHERE sp.${fk} = ${alias}.id)`;
+};
 
 export async function loadSuggestPayments(
   manager: EntityManager,
   itemIds: number[],
+  table: SuggestPaymentTable = 'MANAGEMENT',
 ): Promise<Map<number, ItemSuggestPayments>> {
   const ids = [...new Set(itemIds.filter((id) => Number.isInteger(id) && id > 0))];
   const result = new Map<number, ItemSuggestPayments>();
   if (!ids.length) return result;
+  const { payments, fk } = SUGGEST_PAYMENT_TABLES[table];
 
   const rows = await manager.query<
     {
@@ -50,12 +88,12 @@ export async function loadSuggestPayments(
       cash_account: string | null;
     }[]
   >(
-    `SELECT p.management_expense_item_id AS item_id, p.suggest_id, s.code,
+    `SELECT p.${fk} AS item_id, p.suggest_id, s.code,
        p.amount::text AS amount, to_char(p.paid_date, 'YYYY-MM-DD') AS paid_date,
        p.cash_account
-     FROM management_expense_suggest_payments p
+     FROM ${payments} p
      JOIN suggest s ON s.id = p.suggest_id
-     WHERE p.management_expense_item_id = ANY($1)
+     WHERE p.${fk} = ANY($1)
      ORDER BY p.paid_date, p.id`,
     [ids],
   );
@@ -182,14 +220,16 @@ export function keepLinkedPaymentFields<T extends Record<string, any>>(
 export async function loadLinkedManagementRows(
   manager: EntityManager,
   where: { schoolExpenseId: number; subjectId?: number | null } | { itemIds: number[] },
+  table: PaidSheetTable = 'MANAGEMENT',
 ): Promise<Map<number, LinkedManagementRow>> {
+  const { items } = SUGGEST_PAYMENT_TABLES[table];
   const rows = await manager.query<
     { id: number; paid: string; expense_date: string | null; cash_account: string | null }[]
   >(
     `SELECT id, "paidAmount"::text AS paid,
        to_char("expenseDate", 'YYYY-MM-DD') AS expense_date,
        "cashAccount" AS cash_account
-     FROM management_expense_items
+     FROM ${items}
      WHERE ${
        'itemIds' in where
          ? 'id = ANY($1)'
@@ -206,6 +246,7 @@ export async function loadLinkedManagementRows(
   const payments = await loadSuggestPayments(
     manager,
     rows.map((row) => Number(row.id)),
+    table,
   );
   const result = new Map<number, LinkedManagementRow>();
   for (const row of rows) {
@@ -226,8 +267,9 @@ export async function loadLinkedManagementRows(
  * từ đề xuất phải còn trong dữ liệu gửi lên (khớp id), không thì là bị xoá.
  */
 export function assertLinkedRowsKept(
-  linked: Map<number, LinkedManagementRow>,
+  linked: Map<number, { payments: ItemSuggestPayments }>,
   items: unknown,
+  table: SuggestPaymentTable = 'MANAGEMENT',
 ) {
   const sent = new Set(
     (Array.isArray(items) ? items : [])
@@ -235,13 +277,65 @@ export function assertLinkedRowsKept(
       .filter((id) => Number.isInteger(id) && id > 0),
   );
   for (const [id, row] of linked) {
-    if (!sent.has(id)) throw linkedRowDeleteError(row.payments);
+    if (!sent.has(id)) throw linkedRowDeleteError(row.payments, table);
   }
 }
 
-export function linkedRowDeleteError(payments: ItemSuggestPayments) {
+export function linkedRowDeleteError(
+  payments: ItemSuggestPayments,
+  table: SuggestPaymentTable = 'MANAGEMENT',
+) {
   return new BadRequestException(
-    `Có dòng Chi Ngoài đã chi theo đề xuất ${suggestCodesLabel(payments)} nên không xoá được. ` +
+    `Có dòng ${SUGGEST_PAYMENT_TABLES[table].label} đã chi theo đề xuất ${suggestCodesLabel(payments)} nên không xoá được. ` +
       'Nếu bảng vừa được người khác cập nhật, hãy tải lại trang rồi lưu lại.',
   );
+}
+
+/** Dòng Giáo viên trường đã được đề xuất chi trả: Ngày chi / Nguồn chi là của đề xuất. */
+export interface LinkedTeacherRow {
+  expenseDate: string | null;
+  cashAccount: string | null;
+  payments: ItemSuggestPayments;
+}
+
+export async function loadLinkedTeacherRows(
+  manager: EntityManager,
+  where: { schoolExpenseId: number; subjectId?: number | null } | { itemIds: number[] },
+): Promise<Map<number, LinkedTeacherRow>> {
+  const rows = await manager.query<
+    { id: number; expense_date: string | null; cash_account: string | null }[]
+  >(
+    `SELECT t.id, to_char(t.expense_date, 'YYYY-MM-DD') AS expense_date, t.cash_account
+     FROM school_teacher_expense_items t
+     WHERE ${
+       'itemIds' in where
+         ? 't.id = ANY($1)'
+         : where.subjectId
+           ? 't.school_expense_id = $1 AND t.subject_id = $2'
+           : 't.school_expense_id = $1'
+     }
+       AND EXISTS (SELECT 1 FROM school_teacher_suggest_payments sp
+                   WHERE sp.school_teacher_expense_item_id = t.id)`,
+    'itemIds' in where
+      ? [where.itemIds]
+      : where.subjectId
+        ? [where.schoolExpenseId, where.subjectId]
+        : [where.schoolExpenseId],
+  );
+  const payments = await loadSuggestPayments(
+    manager,
+    rows.map((row) => Number(row.id)),
+    'SCHOOL_TEACHER',
+  );
+  const result = new Map<number, LinkedTeacherRow>();
+  for (const row of rows) {
+    const found = payments.get(Number(row.id));
+    if (!found) continue;
+    result.set(Number(row.id), {
+      expenseDate: row.expense_date,
+      cashAccount: row.cash_account,
+      payments: found,
+    });
+  }
+  return result;
 }

@@ -34,7 +34,32 @@ import { EmployeeRegion } from '../employee-region-school/entities/employee-regi
 import { Subject } from '../subject/subject.entity';
 import { ExpensePeriod } from '../expense-periods/expense-period.entity';
 import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
-import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
+import {
+  CASHFLOW_READ_ROLES,
+  CASHFLOW_TEACHER_PAY_ROLES,
+} from '../school-expenses/cashflow-roles';
+import { SchoolTeacher } from '../school-teacher-expense/school-teacher.entity';
+import {
+  CASHFLOW_SOURCE_LABELS,
+  CASHFLOW_TABLE_LABELS,
+  type CashflowGroup,
+  type CashflowItemRef,
+  type CashflowPaidRow,
+  type CashflowSource,
+  actorSchoolIds,
+  cashflowGroupLabel,
+  cashflowItemKey,
+  cashflowItemStatus,
+  cashflowSourceOf,
+  isCashflowSource,
+  loadOpenCashflowRequests,
+  loadSchoolExpenseGroups,
+  loadSchoolTeacherGroups,
+  lockCashflowKeys,
+  managementGroupsFromSections,
+  recordSchoolExpenseSuggestPayments,
+  recordSchoolTeacherSuggestPayments,
+} from './cashflow-sources';
 import {
   buildManagementViewSections,
   ManagementViewSection,
@@ -45,6 +70,7 @@ import {
   allocateSuggestPayment,
   loadSuggestPayments,
   suggestCodesLabel,
+  SUGGEST_PAYMENT_TABLES,
 } from '../management-expense-item/suggest-payments';
 import {
   formatMoneyVnd,
@@ -199,9 +225,14 @@ export class SuggestService {
       }
       const isMonthlyExpense =
         dto.isMonthlyExpense === true ||
+        dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
         dto.monthlyItems !== undefined;
+      // Bảng nguồn trong QL thu chi; client cũ không gửi = Chi Ngoài.
+      const cashflowSource: CashflowSource | null = isMonthlyExpense
+        ? (dto.cashflowSource ?? 'MANAGEMENT')
+        : null;
       const monthlyInput: MonthlyItemInput[] = isMonthlyExpense
         ? (dto.monthlyItems ?? monthlyItemsFromColumns(dto))
         : [];
@@ -238,11 +269,26 @@ export class SuggestService {
         let subject: Subject | undefined;
         let expensePeriod: ExpensePeriod | undefined;
         let monthlyItems: ResolvedMonthlyItem[] = [];
+        let requestedAmounts: number[] = [];
 
         if (isMonthlyExpense) {
-          monthlyItems = await this.resolveMonthlyItems(manager, monthlyInput);
+          monthlyItems = await this.resolveMonthlyItems(
+            manager,
+            monthlyInput,
+            cashflowSource!,
+          );
+          // Chống trùng + chỉ đề xuất khoản còn phải chi.
+          requestedAmounts = await this.prepareCashflowItems(
+            manager,
+            cashflowSource!,
+            monthlyItems,
+            actor,
+            null,
+          );
           // Dòng đầu chép lên các cột cũ để danh sách/bộ lọc cũ vẫn đọc được.
-          ({ school, subject, expensePeriod } = monthlyItems[0]);
+          school = monthlyItems[0].school;
+          subject = monthlyItems[0].subject ?? undefined;
+          expensePeriod = monthlyItems[0].expensePeriod;
         } else if (hasSchool) {
           school = (await manager.findOne(School, {
             where: { id: dto.schoolId },
@@ -290,6 +336,7 @@ export class SuggestService {
           deductPolicy: dto.deductPolicy ?? false,
           ...(school ? { schoolId: school.id, school } : {}),
           isMonthlyExpense,
+          cashflowSource,
           ...(subject ? { subjectId: subject.id, subject } : {}),
           ...(expensePeriod
             ? { expensePeriodId: expensePeriod.id, expensePeriod }
@@ -308,7 +355,7 @@ export class SuggestService {
         });
 
         const s = await manager.save(suggest);
-        await this.saveMonthlyItems(manager, s.id!, monthlyItems);
+        await this.saveMonthlyItems(manager, s.id!, monthlyItems, requestedAmounts);
 
         if (fileUrl) {
           await this.saveExpenseAttachments(
@@ -336,10 +383,10 @@ export class SuggestService {
         {
           suggestId: saved.id!,
           title: saved.isMonthlyExpense
-            ? '📋 Đề xuất chi tháng chờ duyệt'
+            ? `📋 ${this.monthlyKindLabel(saved)} chờ duyệt`
             : '📋 Đề xuất mới chờ phân loại',
           message: saved.isMonthlyExpense
-            ? `Có đề xuất chi tháng cần duyệt: ${saved.code} - ${saved.content}`
+            ? `Có ${this.monthlyKindLabel(saved).toLowerCase()} cần duyệt: ${saved.code} - ${saved.content}`
             : `Có đề xuất mới cần duyệt và phân loại: ${saved.code} - ${saved.content}`,
           senderId: actor.id,
           meta: { status: saved.status },
@@ -2163,16 +2210,21 @@ export class SuggestService {
     if (!existing) {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
+    const source = cashflowSourceOf(existing) ?? 'MANAGEMENT';
+    const table = CASHFLOW_TABLE_LABELS[source];
     // Đã có lệnh chi thì bảng chỉ để chụp vào lịch sử, đọc lỗi vẫn cho duyệt.
     // Chưa có lệnh chi thì số tiền lấy từ bảng nên đọc lỗi là dừng duyệt.
+    // Chi Trường / Giáo viên trường đọc số trong transaction duyệt.
     let sections: ManagementViewSection[] | null = null;
-    try {
-      sections = await this.loadManagementExpenseSections(existing);
-    } catch (error) {
-      this.logger.error(
-        `Không đọc được bảng Chi Ngoài của đề xuất ${id}`,
-        error as Error,
-      );
+    if (source === 'MANAGEMENT') {
+      try {
+        sections = await this.loadManagementExpenseSections(existing);
+      } catch (error) {
+        this.logger.error(
+          `Không đọc được bảng Chi Ngoài của đề xuất ${id}`,
+          error as Error,
+        );
+      }
     }
     const remainingTotal = sections ? monthlyRemainingTotal(sections) : 0;
     const managementSnapshot = sections
@@ -2180,6 +2232,8 @@ export class SuggestService {
       : {};
     let paymentOrder: SuggestPaymentOrder | null = null;
     let autoAmount = false;
+    // Chi Trường / Giáo viên trường: Còn chi từng khoản lúc duyệt (lưu vào lịch sử).
+    let cashflowAmounts: number[] | null = null;
     let decided: { id: number; label: string; amount: number; approved: boolean }[] = [];
     const saved = await this.expenseTransition({
       id,
@@ -2199,7 +2253,12 @@ export class SuggestService {
         });
         const rows = await manager.find(SuggestMonthlyItem, {
           where: { suggestId: s.id! },
-          relations: { school: true, subject: { catalog: true }, expensePeriod: true },
+          relations: {
+            school: true,
+            subject: { catalog: true },
+            schoolTeacher: true,
+            expensePeriod: true,
+          },
           order: { position: 'ASC', id: 'ASC' },
         });
         if (paymentOrder) {
@@ -2211,7 +2270,7 @@ export class SuggestService {
           }
           return;
         }
-        if (!sections) {
+        if (source === 'MANAGEMENT' && !sections) {
           throw new BadRequestException(
             'Không đọc được bảng Chi Ngoài để lập lệnh chi, vui lòng thử lại',
           );
@@ -2220,11 +2279,18 @@ export class SuggestService {
         if (rows.length === 0 && dto.approvedItemIds) {
           throw new BadRequestException('Đề xuất chỉ có một trường');
         }
-        const amounts = monthlyItemAmounts(rows, sections);
+        if (source !== 'MANAGEMENT' && rows.length === 0) {
+          throw new BadRequestException('Đề xuất chưa có khoản chi nào');
+        }
+        const amounts =
+          source === 'MANAGEMENT'
+            ? monthlyItemAmounts(rows, sections!)
+            : await this.cashflowItemAmounts(manager, source, rows);
         const { approvedIds, total } =
           rows.length > 0
             ? selectApprovedItems(rows, amounts, dto.approvedItemIds)
             : { approvedIds: new Set<number>(), total: remainingTotal };
+        cashflowAmounts = source === 'MANAGEMENT' ? null : amounts;
         const excludedCount = rows.filter((row) => !approvedIds.has(row.id)).length;
         if (excludedCount > 0 && !dto.note?.trim()) {
           throw new BadRequestException(
@@ -2235,7 +2301,7 @@ export class SuggestService {
           throw new BadRequestException(
             excludedCount > 0
               ? 'Các trường được chọn không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được'
-              : 'Bảng Chi Ngoài của các trường trong đề xuất không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được',
+              : `Bảng ${table} của các trường trong đề xuất không còn khoản nào cần chi (Còn chi = 0) nên không duyệt được`,
           );
         }
         autoAmount = true;
@@ -2280,8 +2346,10 @@ export class SuggestService {
       logData: () => ({
         requestKind: ExpenseRequestKind.CASH,
         amount: paymentOrder ? Number(paymentOrder.amount) : null,
-        // true = số tiền lấy từ tổng Còn chi của bảng Chi Ngoài lúc duyệt.
+        // true = số tiền lấy từ tổng Còn chi của bảng nguồn lúc duyệt.
         amountFromManagementExpense: autoAmount,
+        cashflowSource: source,
+        ...(cashflowAmounts ? { cashflowTable: table } : {}),
         // Trường nào được duyệt / không duyệt (chỉ khi hệ thống lập lệnh chi).
         ...(decided.length > 0 ? { items: decided } : {}),
         paymentOrder: paymentOrder
@@ -2298,7 +2366,7 @@ export class SuggestService {
     await this.notifyExpense(
       {
         suggestId: saved.id!,
-        title: '✅ Đề xuất chi tháng đã duyệt',
+        title: `✅ ${this.monthlyKindLabel(saved)} đã duyệt`,
         message:
           `Đề xuất ${saved.code} đã được Giám đốc duyệt, vui lòng xuất tiền` +
           (decided.some((item) => !item.approved)
@@ -2495,15 +2563,28 @@ export class SuggestService {
       let subjectId: number | null = null;
       let expensePeriodId: number | null = null;
       let monthlyItems: ResolvedMonthlyItem[] = [];
+      let requestedAmounts: number[] = [];
 
       // Có đủ định danh liên kết thì tự nhận diện đề xuất chi tháng, giúp các
       // client cũ không cần gửi thêm cờ isMonthlyExpense.
       if (
+        dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
         dto.monthlyItems !== undefined
       ) {
         isMonthlyExpense = true;
+      }
+      // Đổi bảng nguồn thì phải gửi lại danh sách khoản.
+      const cashflowSource: CashflowSource =
+        dto.cashflowSource ?? cashflowSourceOf(suggest) ?? 'MANAGEMENT';
+      if (
+        isMonthlyExpense &&
+        dto.cashflowSource !== undefined &&
+        dto.cashflowSource !== (cashflowSourceOf(suggest) ?? 'MANAGEMENT') &&
+        dto.monthlyItems === undefined
+      ) {
+        throw new BadRequestException('Đổi loại đề xuất thì phải chọn lại khoản chi');
       }
 
       if (isMonthlyExpense) {
@@ -2532,11 +2613,18 @@ export class SuggestService {
         if (input.length === 0) {
           throw new BadRequestException('Đề xuất chi tháng phải chọn trường');
         }
-        monthlyItems = await this.resolveMonthlyItems(manager, input);
+        monthlyItems = await this.resolveMonthlyItems(manager, input, cashflowSource);
+        requestedAmounts = await this.prepareCashflowItems(
+          manager,
+          cashflowSource,
+          monthlyItems,
+          actor,
+          suggest.id!,
+        );
         const first = monthlyItems[0];
         schoolId = first.school.id;
         schoolYear = first.schoolYear;
-        subjectId = first.subject.id;
+        subjectId = first.subject?.id ?? null;
         expensePeriodId = first.expensePeriod.id;
         wardId = null;
       } else if (changesSchool) {
@@ -2593,6 +2681,7 @@ export class SuggestService {
       suggest.schoolYear = schoolYear;
       suggest.wardId = wardId;
       suggest.isMonthlyExpense = isMonthlyExpense;
+      suggest.cashflowSource = isMonthlyExpense ? cashflowSource : null;
       suggest.subjectId = subjectId;
       suggest.expensePeriodId = expensePeriodId;
       if (fileUrl) suggest.fileUrl = fileUrl;
@@ -2628,7 +2717,7 @@ export class SuggestService {
       if (wasMonthlyExpense || isMonthlyExpense) {
         await manager.delete(SuggestPaymentOrder, { suggestId: s.id! });
         await manager.delete(SuggestMonthlyItem, { suggestId: s.id! });
-        await this.saveMonthlyItems(manager, s.id!, monthlyItems);
+        await this.saveMonthlyItems(manager, s.id!, monthlyItems, requestedAmounts);
       }
 
       if (fileUrl) {
@@ -2659,12 +2748,12 @@ export class SuggestService {
         suggestId: saved.s.id!,
         title: saved.needsReapproval
           ? saved.s.isMonthlyExpense
-            ? '🔁 Đề xuất chi tháng cần duyệt lại'
+            ? `🔁 ${this.monthlyKindLabel(saved.s)} cần duyệt lại`
             : '🔁 Đề xuất chi cần duyệt lại'
           : '✏️ Đề xuất chi đã được sửa',
         message: saved.needsReapproval
           ? saved.s.isMonthlyExpense
-            ? `Đề xuất chi tháng ${saved.s.code} đã được sửa, cần duyệt lại: ${saved.s.content}`
+            ? `${this.monthlyKindLabel(saved.s)} ${saved.s.code} đã được sửa, cần duyệt lại: ${saved.s.content}`
             : `Đề xuất ${saved.s.code} đã được sửa sau khi duyệt, cần duyệt lại: ${saved.s.content}`
           : `Đề xuất ${saved.s.code} đang chờ duyệt vừa được sửa: ${saved.s.content}`,
         senderId: actor.id,
@@ -3059,7 +3148,7 @@ export class SuggestService {
     note?: string,
     files?: UploadedAttachment[],
   ) {
-    let chiNgoai: ChiNgoaiPaymentLog | null = null;
+    let synced: Record<string, unknown> = {};
     return this.expenseTransition({
       id,
       action: ExpenseAction.CONFIRM_SPENT,
@@ -3077,17 +3166,13 @@ export class SuggestService {
           ExpenseAction.CONFIRM_SPENT,
         );
         if (s.isMonthlyExpense) {
-          const rows = (
-            await manager.find(SuggestMonthlyItem, {
-              where: { suggestId: s.id! },
-              relations: { school: true, subject: { catalog: true }, expensePeriod: true },
-              order: { position: 'ASC', id: 'ASC' },
-            })
-          ).filter((row) => !row.excluded);
-          chiNgoai = await this.recordChiNgoaiPayments(manager, s, rows);
+          const rows = (await this.loadMonthlyRows(manager, s.id!)).filter(
+            (row) => !row.excluded,
+          );
+          synced = await this.recordCashflowPayments(manager, s, rows);
         }
       },
-      logData: () => (chiNgoai ? { chiNgoai } : {}),
+      logData: () => synced,
     });
   }
 
@@ -3147,7 +3232,7 @@ export class SuggestService {
       items: { id: number; label: string; amount: number | null; spent: boolean }[];
     };
     let summary: PartialSummary | null = null;
-    let chiNgoai: ChiNgoaiPaymentLog | null = null;
+    let synced: Record<string, unknown> = {};
 
     const saved = await this.expenseTransition({
       id,
@@ -3165,13 +3250,9 @@ export class SuggestService {
           );
         }
         // Trường Giám đốc không duyệt không có trong lệnh chi.
-        const rows = (
-          await manager.find(SuggestMonthlyItem, {
-            where: { suggestId: s.id! },
-            relations: { school: true, subject: { catalog: true }, expensePeriod: true },
-            order: { position: 'ASC', id: 'ASC' },
-          })
-        ).filter((row) => !row.excluded);
+        const rows = (await this.loadMonthlyRows(manager, s.id!)).filter(
+          (row) => !row.excluded,
+        );
         const order = await manager.findOne(SuggestPaymentOrder, {
           where: { suggestId: s.id! },
         });
@@ -3185,7 +3266,7 @@ export class SuggestService {
             { spent: chosen.has(row.id) },
           );
         }
-        chiNgoai = await this.recordChiNgoaiPayments(
+        synced = await this.recordCashflowPayments(
           manager,
           s,
           rows.filter((row) => chosen.has(row.id)),
@@ -3207,7 +3288,7 @@ export class SuggestService {
           ExpenseAction.CONFIRM_PARTIALLY_SPENT,
         );
       },
-      logData: () => ({ partialSpend: summary, ...(chiNgoai ? { chiNgoai } : {}) }),
+      logData: () => ({ partialSpend: summary, ...synced }),
     });
 
     // Gán trong callback nên TypeScript tưởng vẫn là null.
@@ -4497,6 +4578,68 @@ export class SuggestService {
     );
   }
 
+  private loadMonthlyRows(manager: EntityManager, suggestId: number) {
+    return manager.find(SuggestMonthlyItem, {
+      where: { suggestId },
+      relations: {
+        school: true,
+        subject: { catalog: true },
+        schoolTeacher: true,
+        expensePeriod: true,
+      },
+      order: { position: 'ASC', id: 'ASC' },
+    });
+  }
+
+  /**
+   * Kinh doanh xác nhận đã chi: ghi về đúng bảng nguồn của đề xuất trong cùng
+   * transaction (lỗi thì đề xuất không thành Đã chi). Trả phần ghi vào lịch sử:
+   * Chi Ngoài giữ khoá `chiNgoai` như trước, Chi Trường / Giáo viên trường là
+   * `cashflowPayment`.
+   */
+  private async recordCashflowPayments(
+    manager: EntityManager,
+    s: Suggest,
+    rows: SuggestMonthlyItem[],
+  ): Promise<Record<string, unknown>> {
+    const source = cashflowSourceOf(s) ?? 'MANAGEMENT';
+    if (source === 'MANAGEMENT') {
+      const chiNgoai = await this.recordChiNgoaiPayments(manager, s, rows);
+      return chiNgoai ? { chiNgoai } : {};
+    }
+    const order = await manager.findOne(SuggestPaymentOrder, {
+      where: { suggestId: s.id! },
+    });
+    const paidRows: CashflowPaidRow[] = rows.map((row) => ({
+      monthlyItemId: row.id,
+      schoolId: row.schoolId,
+      expensePeriodId: row.expensePeriodId,
+      subjectId: row.subjectId,
+      schoolTeacherId: row.schoolTeacherId,
+      approvedAmount: row.approvedAmount,
+      label: monthlyItemLabel(row),
+    }));
+    const record =
+      source === 'SCHOOL_EXPENSE'
+        ? recordSchoolExpenseSuggestPayments
+        : recordSchoolTeacherSuggestPayments;
+    const log = await record(
+      manager,
+      s.id!,
+      paidRows,
+      vnToday(),
+      order?.cashAccount ?? null,
+    );
+    for (const item of log && 'items' in log && log.items ? log.items : []) {
+      if (item.unallocated > 0) {
+        this.logger.warn(
+          `Đề xuất ${s.code ?? s.id}: ${item.label} còn ${item.unallocated} đ không ghi được vào dòng ${log!.table} nào`,
+        );
+      }
+    }
+    return log ? { cashflowPayment: log } : {};
+  }
+
   /**
    * Kinh doanh xác nhận đã chi (cả đề xuất, hoặc các trường đã tích khi chi một
    * phần): ghi Ngày chi / Nguồn chi / Đã chi vào bảng Chi Ngoài của từng trường.
@@ -4640,6 +4783,7 @@ export class SuggestService {
   private async resolveMonthlyItems(
     manager: EntityManager,
     input: MonthlyItemInput[],
+    source: CashflowSource = 'MANAGEMENT',
   ): Promise<ResolvedMonthlyItem[]> {
     if (input.length === 0) {
       throw new BadRequestException('Đề xuất chi tháng phải chọn trường');
@@ -4661,6 +4805,12 @@ export class SuggestService {
       const schoolYear = raw.schoolYear ?? currentSchoolYear();
       if (!isValidSchoolYear(schoolYear)) {
         throw new BadRequestException(`Năm học không hợp lệ${label}`);
+      }
+      if (source === 'SCHOOL_TEACHER') {
+        resolved.push(
+          await this.resolveTeacherItem(manager, raw, school, schoolYear, label, seen),
+        );
+        continue;
       }
       if (!raw.subjectId || !raw.expensePeriodId) {
         throw new BadRequestException(
@@ -4706,10 +4856,51 @@ export class SuggestService {
     return resolved;
   }
 
+  /** Khoản lương một giáo viên: giáo viên thuộc trường, kỳ thuộc trường, không trùng. */
+  private async resolveTeacherItem(
+    manager: EntityManager,
+    raw: MonthlyItemInput,
+    school: School,
+    schoolYear: string,
+    label: string,
+    seen: Set<string>,
+  ): Promise<ResolvedMonthlyItem> {
+    if (!raw.schoolTeacherId || !raw.expensePeriodId) {
+      throw new BadRequestException(
+        `Đề xuất Chi GV trường phải chọn giáo viên và kỳ kế toán${label}`,
+      );
+    }
+    const schoolTeacher = await manager.findOne(SchoolTeacher, {
+      where: { id: raw.schoolTeacherId },
+    });
+    if (!schoolTeacher || schoolTeacher.schoolId !== school.id) {
+      throw new BadRequestException(
+        `Giáo viên không thuộc danh sách giáo viên của trường${label}`,
+      );
+    }
+    const expensePeriod = await manager.findOne(ExpensePeriod, {
+      where: { id: raw.expensePeriodId },
+      relations: ['school'],
+    });
+    if (!expensePeriod) {
+      throw new BadRequestException(`Kỳ kế toán không tồn tại${label}`);
+    }
+    if (expensePeriod.school?.id !== school.id) {
+      throw new BadRequestException(`Kỳ kế toán không thuộc trường đã chọn${label}`);
+    }
+    const key = `t${schoolTeacher.id}:${expensePeriod.id}`;
+    if (seen.has(key)) {
+      throw new BadRequestException(`Chọn trùng giáo viên và kỳ kế toán${label}`);
+    }
+    seen.add(key);
+    return { school, schoolYear, subject: null, schoolTeacher, expensePeriod };
+  }
+
   private async saveMonthlyItems(
     manager: EntityManager,
     suggestId: number,
     items: ResolvedMonthlyItem[],
+    requestedAmounts: number[] = [],
   ) {
     if (items.length === 0) return;
     await manager.save(
@@ -4719,11 +4910,163 @@ export class SuggestService {
           suggestId,
           schoolId: item.school.id,
           schoolYear: item.schoolYear,
-          subjectId: item.subject.id,
+          subjectId: item.subject?.id ?? null,
+          schoolTeacherId: item.schoolTeacher?.id ?? null,
           expensePeriodId: item.expensePeriod.id,
+          requestedAmount: requestedAmounts[position] ?? null,
           position,
         }),
       ),
+    );
+  }
+
+  /** "Đề xuất Chi Trường" / "Đề xuất Chi GV trường" / "Đề xuất Chi Ngoài (Chi chính sách tháng)". */
+  private monthlyKindLabel(s: { isMonthlyExpense?: boolean | null; cashflowSource?: string | null }) {
+    return CASHFLOW_SOURCE_LABELS[cashflowSourceOf(s) ?? 'MANAGEMENT'];
+  }
+
+  /** Khoá khoản của dòng đã lưu. */
+  private cashflowRefOfRow(row: SuggestMonthlyItem): CashflowItemRef {
+    return {
+      schoolId: row.schoolId ?? null,
+      expensePeriodId: row.expensePeriodId ?? null,
+      subjectId: row.subjectId ?? null,
+      schoolTeacherId: row.schoolTeacherId ?? null,
+    };
+  }
+
+  /**
+   * Khoản của QL thu chi (Phải chi / Đã chi / Còn lại) theo khoá
+   * `cashflowItemKey`. Chi Ngoài dựng lại bảng như màn QL thu chi.
+   */
+  private async cashflowGroupsFor(
+    manager: EntityManager,
+    source: CashflowSource,
+    refs: CashflowItemRef[],
+  ): Promise<Map<string, CashflowGroup>> {
+    const schoolIds = [
+      ...new Set(refs.map((ref) => ref.schoolId).filter((id): id is number => !!id)),
+    ];
+    const periodIds = [
+      ...new Set(refs.map((ref) => ref.expensePeriodId).filter((id): id is number => !!id)),
+    ];
+    let groups: CashflowGroup[] = [];
+    if (!schoolIds.length || !periodIds.length) return new Map();
+    if (source === 'SCHOOL_EXPENSE') {
+      groups = await loadSchoolExpenseGroups(manager, { schoolIds, periodIds });
+    } else if (source === 'SCHOOL_TEACHER') {
+      groups = (await loadSchoolTeacherGroups(manager, { schoolIds, periodIds })).groups;
+    } else {
+      const periods = await this.loadPeriodInfo(manager, periodIds);
+      const pairs = new Set(refs.map((ref) => `${ref.schoolId}:${ref.expensePeriodId}`));
+      for (const pair of pairs) {
+        const [schoolId, periodId] = pair.split(':').map(Number);
+        if (!schoolId || !periodId) continue;
+        const sections = await this.loadSchoolManagementSections(
+          schoolId,
+          periodId,
+          { schoolYear: null, subjectId: null },
+          manager,
+        );
+        groups.push(...managementGroupsFromSections(sections, periods));
+      }
+    }
+    return new Map(groups.map((group) => [group.key, group]));
+  }
+
+  private async loadPeriodInfo(manager: EntityManager, periodIds: number[]) {
+    const rows = periodIds.length
+      ? await manager.query<
+          { id: number; month: number | null; year: number | null; name: string | null }[]
+        >(`SELECT id, month, year, name FROM expense_periods WHERE id = ANY($1)`, [periodIds])
+      : [];
+    return new Map(
+      rows.map((row) => [
+        Number(row.id),
+        {
+          month: row.month === null ? null : Number(row.month),
+          year: row.year === null ? null : Number(row.year),
+          name: row.name,
+        },
+      ]),
+    );
+  }
+
+  /**
+   * Trước khi lưu khoản của đề xuất chi tháng: khoản phải thuộc trường mình
+   * phụ trách (Chi Trường / GV trường — có số tiền), không nằm trong đề xuất
+   * khác chưa xong, và còn tiền phải chi. Trả Còn phải chi từng khoản.
+   * Khoá theo khoản đến hết transaction để hai người không cùng đề xuất.
+   */
+  private async prepareCashflowItems(
+    manager: EntityManager,
+    source: CashflowSource,
+    items: ResolvedMonthlyItem[],
+    actor: AuthUser,
+    excludeSuggestId: number | null,
+  ): Promise<number[]> {
+    const refs: CashflowItemRef[] = items.map((item) => ({
+      schoolId: item.school.id,
+      expensePeriodId: item.expensePeriod.id,
+      subjectId: item.subject?.id ?? null,
+      schoolTeacherId: item.schoolTeacher?.id ?? null,
+    }));
+    const table = CASHFLOW_TABLE_LABELS[source];
+    if (source !== 'MANAGEMENT') {
+      const allowed = new Set(await actorSchoolIds(manager, actor.id));
+      const outside = items.find((item) => !allowed.has(item.school.id));
+      if (outside) {
+        throw new ForbiddenException(
+          `Trường ${outside.school.name ?? `#${outside.school.id}`} không thuộc trường bạn phụ trách`,
+        );
+      }
+    }
+    const keys = refs.map((ref) => cashflowItemKey(source, ref));
+    await lockCashflowKeys(manager, source, keys);
+
+    const open = await loadOpenCashflowRequests(
+      manager,
+      source,
+      [...new Set(items.map((item) => item.school.id))],
+      excludeSuggestId,
+    );
+    const groups = await this.cashflowGroupsFor(manager, source, refs);
+    return items.map((item, index) => {
+      const label = monthlyItemLabel({
+        schoolId: item.school.id,
+        school: item.school,
+        subject: item.subject,
+        schoolTeacherId: item.schoolTeacher?.id ?? null,
+        schoolTeacher: item.schoolTeacher,
+        expensePeriod: item.expensePeriod,
+      });
+      const holder = open.find((request) => request.key === keys[index]);
+      if (holder) {
+        throw new BadRequestException(
+          `${label} đang nằm trong đề xuất ${holder.code ?? `#${holder.suggestId}`} chưa xong — ` +
+            'chờ đề xuất đó chi xong hoặc bị từ chối rồi mới đề xuất lại',
+        );
+      }
+      const remaining = groups.get(keys[index])?.remainingAmount ?? 0;
+      if (!(remaining > 0)) {
+        throw new BadRequestException(
+          `${label}: bảng ${table} không còn tiền phải chi (đã chi đủ hoặc chưa có số liệu)`,
+        );
+      }
+      return remaining;
+    });
+  }
+
+  /** Còn phải chi hiện tại của từng dòng đề xuất (bảng Chi Trường / Giáo viên trường). */
+  private async cashflowItemAmounts(
+    manager: EntityManager,
+    source: CashflowSource,
+    rows: SuggestMonthlyItem[],
+  ): Promise<number[]> {
+    const refs = rows.map((row) => this.cashflowRefOfRow(row));
+    const groups = await this.cashflowGroupsFor(manager, source, refs);
+    return refs.map((ref) =>
+      Math.max(0, groups.get(cashflowItemKey(source, ref))?.remainingAmount ?? 0),
     );
   }
 
@@ -4756,6 +5099,11 @@ export class SuggestService {
       where: { id, type: SuggestType.EXPENSE_REQUEST },
     });
     if (!s) throw new NotFoundException('Đề xuất chi không tồn tại');
+    // Chi Trường / Giáo viên trường không có bảng Chi Ngoài: xem /cashflow-items.
+    const source = cashflowSourceOf(s);
+    if (source && source !== 'MANAGEMENT') {
+      return { sections: [], remainingTotal: 0, items: [] };
+    }
     const sections = await this.loadManagementExpenseSections(s);
     const rows = s.isMonthlyExpense
       ? await this.dataSource.getRepository(SuggestMonthlyItem).find({
@@ -4773,6 +5121,188 @@ export class SuggestService {
     };
   }
 
+  /**
+   * Màn tạo đề xuất: khoản của bảng nguồn ở các trường mình phụ trách, kèm
+   * Phải chi / Đã chi / Còn lại và trạng thái (Chưa chi, Đang đề xuất, Đã
+   * duyệt chờ chi, Đã chi một phần, Đã chi đủ). Sửa đề xuất của chính mình thì
+   * gửi `excludeSuggestId` để khoản của đề xuất đó không hiện là đang bị giữ.
+   */
+  async listCashflowItems(
+    user: AuthUser,
+    query: {
+      source: CashflowSource;
+      schoolId?: number;
+      year?: number;
+      month?: number;
+      excludeSuggestId?: number;
+    },
+  ) {
+    const actor = this.ensureUser(user);
+    const source = query.source;
+    if (!isCashflowSource(source)) {
+      throw new BadRequestException('Loại đề xuất chi tháng không hợp lệ');
+    }
+    const manager = this.dataSource.manager;
+    let schoolIds = await actorSchoolIds(manager, actor.id);
+    if (query.schoolId) {
+      if (!schoolIds.includes(query.schoolId)) {
+        throw new ForbiddenException('Trường không thuộc trường bạn phụ trách');
+      }
+      schoolIds = [query.schoolId];
+    }
+    let excludeSuggestId: number | null = null;
+    if (query.excludeSuggestId) {
+      const own = await this.repo.findOne({
+        where: { id: query.excludeSuggestId, createdBy: actor.id },
+        select: { id: true },
+      });
+      excludeSuggestId = own?.id ?? null;
+    }
+
+    const filter = { schoolIds, year: query.year, month: query.month };
+    let groups: CashflowGroup[] = [];
+    let unassigned: Awaited<ReturnType<typeof loadSchoolTeacherGroups>>['unassigned'] = [];
+    if (source === 'SCHOOL_EXPENSE') {
+      groups = await loadSchoolExpenseGroups(manager, filter);
+    } else if (source === 'SCHOOL_TEACHER') {
+      ({ groups, unassigned } = await loadSchoolTeacherGroups(manager, filter));
+    } else if (schoolIds.length) {
+      // Chi Ngoài dựng lại bảng như màn QL thu chi, theo từng trường có kỳ khớp lọc.
+      const params: unknown[] = [schoolIds];
+      let where = 'school_id = ANY($1)';
+      if (query.year) {
+        params.push(query.year);
+        where += ` AND year = $${params.length}`;
+      }
+      if (query.month) {
+        params.push(query.month);
+        where += ` AND month = $${params.length}`;
+      }
+      const periodRows = await manager.query<
+        { id: number; school_id: number; month: number | null; year: number | null; name: string | null }[]
+      >(`SELECT id, school_id, month, year, name FROM expense_periods WHERE ${where}`, params);
+      const periods = new Map(
+        periodRows.map((row) => [
+          Number(row.id),
+          {
+            month: row.month === null ? null : Number(row.month),
+            year: row.year === null ? null : Number(row.year),
+            name: row.name,
+          },
+        ]),
+      );
+      for (const schoolId of new Set(periodRows.map((row) => Number(row.school_id)))) {
+        const sections = await this.loadSchoolManagementSections(
+          schoolId,
+          null,
+          { schoolYear: null, subjectId: null },
+          manager,
+        );
+        groups.push(
+          ...managementGroupsFromSections(
+            sections.filter((section) => section.periodId && periods.has(section.periodId)),
+            periods,
+          ),
+        );
+      }
+    }
+
+    const open = await loadOpenCashflowRequests(manager, source, schoolIds, excludeSuggestId);
+    const openByKey = new Map(open.map((request) => [request.key, request]));
+    const items = groups
+      .map((group) => {
+        const holder = openByKey.get(group.key) ?? null;
+        return {
+          ...group,
+          label: cashflowGroupLabel(group),
+          status: cashflowItemStatus(group, holder),
+          openRequest: holder
+            ? { id: holder.suggestId, code: holder.code, status: holder.status }
+            : null,
+        };
+      })
+      .sort(
+        (a, b) =>
+          (b.periodYear ?? 0) - (a.periodYear ?? 0) ||
+          (b.periodMonth ?? 0) - (a.periodMonth ?? 0) ||
+          (a.schoolName ?? '').localeCompare(b.schoolName ?? '', 'vi') ||
+          (a.subjectName ?? a.teacherName ?? '').localeCompare(
+            b.subjectName ?? b.teacherName ?? '',
+            'vi',
+          ),
+      );
+    return { source, table: CASHFLOW_TABLE_LABELS[source], items, unassigned };
+  }
+
+  /** Lương từng giáo viên trường: chủ đề xuất và nhóm được xem lương ở QL thu chi. */
+  private canSeeTeacherPay(actor: AuthUser | undefined, s: { createdBy?: number | null }) {
+    if (!actor) return false;
+    if (s.createdBy === actor.id) return true;
+    return (actor.roles ?? []).some((role) =>
+      (CASHFLOW_TEACHER_PAY_ROLES as readonly string[]).includes(role),
+    );
+  }
+
+  /**
+   * Khoản của một đề xuất chi tháng với số hiện tại ở QL thu chi (Phải chi /
+   * Đã chi / Còn lại) và phần đề xuất này đã ghi vào. `amount` là số sẽ vào
+   * lệnh chi nếu Giám đốc duyệt bây giờ.
+   */
+  async getExpenseCashflowItems(id: number, user: AuthUser) {
+    const actor = this.ensureUser(user);
+    // Cùng quyền xem chi tiết đề xuất.
+    const s = await this.findOneExpense(id, actor);
+    const source = cashflowSourceOf(s);
+    if (!source) return { source: null, table: null, items: [], remainingTotal: 0 };
+    if (source === 'SCHOOL_TEACHER' && !this.canSeeTeacherPay(actor, s)) {
+      throw new ForbiddenException('Bạn không xem được lương giáo viên trường');
+    }
+    const manager = this.dataSource.manager;
+    const rows = await this.loadMonthlyRows(manager, id);
+    const refs = rows.map((row) => this.cashflowRefOfRow(row));
+    const groups = await this.cashflowGroupsFor(manager, source, refs);
+    const { payments } = SUGGEST_PAYMENT_TABLES[source];
+    const paid = await manager.query<{ item_id: number; total: string }[]>(
+      `SELECT suggest_monthly_item_id AS item_id, SUM(amount)::text AS total
+       FROM ${payments} WHERE suggest_id = $1 GROUP BY suggest_monthly_item_id`,
+      [id],
+    );
+    const paidByItem = new Map(paid.map((row) => [Number(row.item_id), Number(row.total)]));
+    const items = rows.map((row, index) => {
+      const group = groups.get(cashflowItemKey(source, refs[index]));
+      const remaining = group?.remainingAmount ?? 0;
+      return {
+        id: row.id,
+        label: monthlyItemLabel(row),
+        schoolId: row.schoolId,
+        expensePeriodId: row.expensePeriodId,
+        subjectId: row.subjectId,
+        schoolTeacherId: row.schoolTeacherId,
+        requestedAmount: row.requestedAmount,
+        approvedAmount: row.approvedAmount,
+        excluded: row.excluded,
+        spent: row.spent,
+        totalAmount: group?.totalAmount ?? 0,
+        paidAmount: group?.paidAmount ?? 0,
+        remainingAmount: remaining,
+        // Chi Ngoài giữ đúng cách tính lệnh chi cũ (tổng Còn chi của bảng).
+        amount: source === 'MANAGEMENT' ? remaining : Math.max(0, remaining),
+        paidBySuggest: paidByItem.get(row.id) ?? 0,
+        status: cashflowItemStatus(
+          { paidAmount: group?.paidAmount ?? 0, remainingAmount: remaining },
+          null,
+        ),
+      };
+    });
+    const remainingTotal =
+      Math.round(
+        items
+          .filter((item) => !item.excluded)
+          .reduce((sum, item) => sum + item.amount, 0) * 100,
+      ) / 100;
+    return { source, table: CASHFLOW_TABLE_LABELS[source], items, remainingTotal };
+  }
+
   async findOneExpense(id: number, actor?: AuthUser) {
     const s = await this.repo.findOne({
       where: { id, type: SuggestType.EXPENSE_REQUEST },
@@ -4787,6 +5317,7 @@ export class SuggestService {
         monthlyItems: {
           school: true,
           subject: { catalog: true },
+          schoolTeacher: true,
           expensePeriod: true,
         },
         assignedTechnician: true,
@@ -4854,16 +5385,39 @@ export class SuggestService {
     const canReadCashflow = actor?.roles?.some((role) =>
       (CASHFLOW_READ_ROLES as readonly string[]).includes(role),
     );
+    // Đề xuất Chi GV trường: lương từng giáo viên chỉ chủ đề xuất và nhóm xem
+    // lương ở QL thu chi thấy (Sales Admin thì không, như màn QL thu chi).
+    // Lời gọi nội bộ (không có người xem, vd. trả kết quả sau khi chủ đơn tạo/sửa) không ẩn.
+    const hideTeacherPay =
+      !!actor &&
+      cashflowSourceOf(s) === 'SCHOOL_TEACHER' &&
+      !this.canSeeTeacherPay(actor, s);
     const enrichedLogs = logs.map((l) => {
-      const { managementExpense: _hidden, ...publicData } = (l.data ??
-        {}) as Record<string, unknown>;
+      let data = (l.data ?? {}) as Record<string, unknown>;
+      if (!canReadCashflow) {
+        const { managementExpense: _hidden, ...rest } = data;
+        data = rest;
+      }
+      if (hideTeacherPay) {
+        // Số tiền từng giáo viên lúc duyệt / chi một phần / ghi vào bảng.
+        const { items: _items, cashflowPayment: _payment, partialSpend: _partial, ...rest } =
+          data;
+        data = rest;
+      }
       return {
         ...l,
-        data: canReadCashflow ? l.data : publicData,
+        data: l.data ? data : l.data,
         actorName: l.userId ? actorNameById.get(l.userId) : undefined,
       };
     });
 
+    if (hideTeacherPay) {
+      s.monthlyItems = (s.monthlyItems ?? []).map((item) => ({
+        ...item,
+        approvedAmount: null,
+        requestedAmount: null,
+      }));
+    }
     return { ...s, logs: enrichedLogs };
   }
 

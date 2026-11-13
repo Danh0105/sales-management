@@ -16,6 +16,7 @@ import { SuggestStockInOrder } from './suggest-stock-in-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 import { SuggestAssignment } from './suggest-assignment.entity';
 import { SuggestMonthlyItem } from './suggest-monthly-item.entity';
+import type { CashflowSource } from '../cashflow-sources';
 
 /** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
 export interface RequestedEquipmentItem {
@@ -179,6 +180,15 @@ export class Suggest {
     /** Phân biệt đề xuất chi tháng với đề xuất chi phát sinh thông thường. */
     @Column({ name: 'is_monthly_expense', type: 'boolean', default: false })
     isMonthlyExpense?: boolean;
+
+    /**
+     * Bảng nguồn của đề xuất chi tháng trong QL thu chi: MANAGEMENT (Chi Ngoài —
+     * "Đề xuất Chi Ngoài (Chi chính sách tháng)"), SCHOOL_EXPENSE (Chi Trường),
+     * SCHOOL_TEACHER (Giáo viên trường). Đề xuất chi tháng tạo trước 13/11/2026
+     * để trống = Chi Ngoài. Đề xuất chi Năm luôn trống.
+     */
+    @Column({ type: 'varchar', name: 'cashflow_source', length: 20, nullable: true })
+    cashflowSource?: CashflowSource | null;
 
     /** Môn học áp dụng cho đề xuất chi tháng. */
     @Column({ type: 'int', name: 'subject_id', nullable: true })

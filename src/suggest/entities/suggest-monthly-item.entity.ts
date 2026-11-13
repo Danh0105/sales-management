@@ -11,6 +11,7 @@ import { ExpensePeriod } from '../../expense-periods/expense-period.entity';
 import { numericTransformer } from '../../utils/numeric-transformer';
 import { School } from '../../school/schools.entity';
 import { Subject } from '../../subject/subject.entity';
+import { SchoolTeacher } from '../../school-teacher-expense/school-teacher.entity';
 import { Suggest } from './suggest.entity';
 
 /**
@@ -56,6 +57,28 @@ export class SuggestMonthlyItem {
     @ManyToOne(() => ExpensePeriod, { nullable: true, onDelete: 'SET NULL' })
     @JoinColumn({ name: 'expense_period_id' })
     expensePeriod?: ExpensePeriod | null;
+
+    /**
+     * Đề xuất Chi GV trường: khoản = lương một giáo viên của trường trong kỳ
+     * (mọi môn). Các loại khác để trống (khoản = một môn của bảng thu chi).
+     */
+    @Column({ type: 'int', name: 'school_teacher_id', nullable: true })
+    schoolTeacherId!: number | null;
+
+    @ManyToOne(() => SchoolTeacher, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'school_teacher_id' })
+    schoolTeacher?: SchoolTeacher | null;
+
+    /** Còn phải chi của khoản lúc tạo/sửa đề xuất (để đối chiếu; lệnh chi tính lại lúc duyệt). */
+    @Column({
+        type: 'numeric',
+        name: 'requested_amount',
+        precision: 18,
+        scale: 2,
+        nullable: true,
+        transformer: numericTransformer,
+    })
+    requestedAmount!: number | null;
 
     /** Thứ tự người tạo đã chọn. */
     @Column({ type: 'int', default: 0 })

@@ -42,6 +42,7 @@ import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto'
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
 import { ConfirmPartiallySpentDto } from './dto/expense/confirm-partially-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
+import { CashflowItemsQueryDto } from './dto/expense/cashflow-items-query.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
@@ -521,6 +522,23 @@ export class ExpenseRequestController {
         @Req() req: any,
     ) {
         return this.service.findAllExpenseGroupedByEmployee(filter, req.user);
+    }
+
+    /**
+     * Màn tạo đề xuất Chi Ngoài / Chi Trường / Chi GV trường: khoản còn phải chi
+     * ở các trường mình phụ trách (kèm khoản đã chi đủ / đang đề xuất để hiện
+     * trạng thái). Khai báo trước `:id`.
+     */
+    @Get('cashflow-items')
+    @Roles(...EXPENSE_REQUESTER_ROLES)
+    cashflowItems(@Query() query: CashflowItemsQueryDto, @Req() req: any) {
+        return this.service.listCashflowItems(req.user, query);
+    }
+
+    /** Khoản của một đề xuất chi tháng với số hiện tại ở QL thu chi — cùng quyền xem đề xuất. */
+    @Get(':id/cashflow-items')
+    expenseCashflowItems(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+        return this.service.getExpenseCashflowItems(id, req.user);
     }
 
     /** Bảng Chi Ngoài chỉ đọc cho màn duyệt — cùng quyền đọc với Quản lý thu chi. */

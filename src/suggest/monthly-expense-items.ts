@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import type { ExpensePeriod } from '../expense-periods/expense-period.entity';
 import type { School } from '../school/schools.entity';
 import type { Subject } from '../subject/subject.entity';
+import type { SchoolTeacher } from '../school-teacher-expense/school-teacher.entity';
 import type { ManagementViewSection } from './expense-management-view';
 
 /** Một trường của đề xuất chi tháng như người dùng gửi lên (chưa kiểm). */
@@ -11,13 +12,19 @@ export interface MonthlyItemInput {
   schoolYear?: string | null;
   subjectId?: number | null;
   expensePeriodId?: number | null;
+  /** Đề xuất Chi GV trường: giáo viên của trường. */
+  schoolTeacherId?: number | null;
 }
 
-/** Một trường của đề xuất chi tháng đã kiểm xong. */
+/**
+ * Một khoản của đề xuất chi tháng đã kiểm xong. Chi Ngoài / Chi Trường theo
+ * môn (`subject`); Chi GV trường theo giáo viên (`schoolTeacher`, không có môn).
+ */
 export interface ResolvedMonthlyItem {
   school: School;
   schoolYear: string;
-  subject: Subject;
+  subject: Subject | null;
+  schoolTeacher?: SchoolTeacher | null;
   expensePeriod: ExpensePeriod;
 }
 
@@ -176,20 +183,28 @@ export function partialSpendSummary(
   return { spentAmount, returnAmount };
 }
 
-/** Nhãn một dòng trường cho lịch sử: "TH A · Tin học · Tháng 9/2026". */
+/**
+ * Nhãn một dòng trường cho lịch sử: "TH A · Tin học · Tháng 9/2026", khoản
+ * lương giáo viên: "TH A · GV Nguyễn Văn B · Tháng 11/2026".
+ */
 export function monthlyItemLabel(item: {
   schoolId?: number | null;
   school?: { name?: string | null } | null;
   subject?: { name?: string | null; catalog?: { name?: string | null } | null } | null;
+  schoolTeacherId?: number | null;
+  schoolTeacher?: { name?: string | null } | null;
   expensePeriod?: { name?: string | null; month?: number; year?: number } | null;
 }): string {
   const period = item.expensePeriod
     ? item.expensePeriod.name ||
       `Tháng ${item.expensePeriod.month}/${item.expensePeriod.year}`
     : null;
+  const teacher = item.schoolTeacherId
+    ? `GV ${item.schoolTeacher?.name || `#${item.schoolTeacherId}`}`
+    : null;
   return [
     item.school?.name || `Trường #${item.schoolId ?? '?'}`,
-    item.subject?.catalog?.name || item.subject?.name,
+    teacher ?? (item.subject?.catalog?.name || item.subject?.name),
     period,
   ]
     .filter(Boolean)

@@ -10,14 +10,18 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsIn,
   IsInt,
   IsOptional,
   IsPositive,
   IsString,
   Matches,
   MaxLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
+
+import { CASHFLOW_SOURCES, type CashflowSource } from '../../cashflow-sources';
 
 /** Endpoint gửi multipart/form-data (kèm file) nên `items` tới dưới dạng chuỗi JSON. */
 export const parseJsonArray = ({ value }: { value: unknown }) => {
@@ -89,15 +93,24 @@ export class MonthlyExpenseItemDto {
   @Matches(/^\d{4}-\d{4}$/, { message: 'Năm học không hợp lệ' })
   schoolYear?: string;
 
+  /** Bắt buộc với Chi Ngoài / Chi Trường (khoản theo môn); Chi GV trường (có giáo viên) để trống. */
   @Type(() => Number)
+  @ValidateIf((item: MonthlyExpenseItemDto) => !item.schoolTeacherId)
   @IsInt()
   @IsPositive()
-  subjectId!: number;
+  subjectId?: number;
 
   @Type(() => Number)
   @IsInt()
   @IsPositive()
   expensePeriodId!: number;
+
+  /** Chỉ Đề xuất Chi GV trường: giáo viên của trường (khoản = lương giáo viên trong kỳ). */
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  schoolTeacherId?: number;
 }
 
 export const MAX_MONTHLY_EXPENSE_ITEMS = 50;
@@ -133,6 +146,16 @@ export class CreateExpenseRequestDto {
   @Transform(parseBoolean)
   @IsBoolean()
   isMonthlyExpense?: boolean;
+
+  /**
+   * Bảng nguồn của đề xuất chi tháng: MANAGEMENT (Chi Ngoài — mặc định, client
+   * cũ không gửi), SCHOOL_EXPENSE (Chi Trường), SCHOOL_TEACHER (Giáo viên trường).
+   */
+  @IsOptional()
+  @IsIn(CASHFLOW_SOURCES as unknown as string[], {
+    message: 'Loại đề xuất chi tháng không hợp lệ',
+  })
+  cashflowSource?: CashflowSource;
 
   @Type(() => Number)
   @IsOptional()

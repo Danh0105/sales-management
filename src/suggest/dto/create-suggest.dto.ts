@@ -1,10 +1,11 @@
 // dto/create-suggest.dto.ts
-import { IsArray, IsBoolean, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
+import { CASHFLOW_SOURCES, type CashflowSource } from '../cashflow-sources';
 import { MonthlyExpenseItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
@@ -92,6 +93,13 @@ export class CreateSuggestDto {
     @Transform(parseBoolean)
     @IsBoolean()
     isMonthlyExpense?: boolean;
+
+    /** Bảng nguồn của đề xuất chi tháng — xem `CreateExpenseRequestDto.cashflowSource`. */
+    @IsOptional()
+    @IsIn(CASHFLOW_SOURCES as unknown as string[], {
+        message: 'Loại đề xuất chi tháng không hợp lệ',
+    })
+    cashflowSource?: CashflowSource;
 
     @IsOptional()
     @Type(() => Number)

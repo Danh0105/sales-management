@@ -44,7 +44,7 @@ export class SchoolExpenseItemsController {
   @Get(':id')
   @Roles(...CASHFLOW_READ_ROLES)
   findOne(@Param('id') id: string) {
-    return this.schoolExpenseItemsService.findOne(Number(id));
+    return this.schoolExpenseItemsService.findOneView(Number(id));
   }
 
   @Patch(':id')
