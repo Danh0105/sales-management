@@ -5209,6 +5209,24 @@ export class SuggestService {
 
     const open = await loadOpenCashflowRequests(manager, source, schoolIds, excludeSuggestId);
     const openByKey = new Map(open.map((request) => [request.key, request]));
+    // Kỳ kế toán kế toán đã tạo ở các trường này — bộ lọc "Kỳ kế toán" của màn tạo đề xuất.
+    const periods = schoolIds.length
+      ? (
+          await manager.query<
+            { id: number; school_id: number; month: number; year: number; name: string | null }[]
+          >(
+            `SELECT id, school_id, month, year, name FROM expense_periods
+             WHERE school_id = ANY($1) ORDER BY year DESC, month DESC, id`,
+            [schoolIds],
+          )
+        ).map((row) => ({
+          id: Number(row.id),
+          schoolId: Number(row.school_id),
+          month: Number(row.month),
+          year: Number(row.year),
+          name: row.name,
+        }))
+      : [];
     const items = groups
       .map((group) => {
         const holder = openByKey.get(group.key) ?? null;
@@ -5231,7 +5249,7 @@ export class SuggestService {
             'vi',
           ),
       );
-    return { source, table: CASHFLOW_TABLE_LABELS[source], items, unassigned };
+    return { source, table: CASHFLOW_TABLE_LABELS[source], items, unassigned, periods };
   }
 
   /** Lương từng giáo viên trường: chủ đề xuất và nhóm được xem lương ở QL thu chi. */
