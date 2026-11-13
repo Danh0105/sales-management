@@ -363,9 +363,13 @@ export function buildSchoolExpenseItemData(
   item: any,
   index = 0,
   sharedItem = item,
+  /** Kỳ từ 11/2026: tiền Giáo viên trường chuyển sang bảng riêng, Chi Trường = Thuế + CSVC. */
+  options: { teacherSplit?: boolean } = {},
 ) {
   const shared = normalizeSharedFields(sharedItem, index);
-  const giaovien = toNumber(item?.giaovien ?? item?.teacherUnitPrice, 0);
+  const giaovien = options.teacherSplit
+    ? 0
+    : toNumber(item?.giaovien ?? item?.teacherUnitPrice, 0);
   const thue = toNumber(item?.thue ?? item?.taxUnitPrice, 0);
   const csvc = toNumber(item?.csvc ?? item?.csvcUnitPrice, 0);
   const paidAmount = toNumber(item?.paidAmount, 0);

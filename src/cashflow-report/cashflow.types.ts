@@ -19,6 +19,8 @@ export type LedgerSourceType =
   | 'INVOICE'
   | 'SCHOOL_EXPENSE'
   | 'MANAGEMENT_EXPENSE'
+  /** Lương Giáo viên trường (bảng dưới Chi Ngoài, từ kỳ 11/2026). */
+  | 'SCHOOL_TEACHER'
   | 'EXPENSE_REQUEST'
   | 'FINANCIAL_REQUEST'
   | 'OTHER_CASHFLOW'

@@ -83,13 +83,25 @@ export class AccountingSummaryService {
         ${subjectFilter}
         GROUP BY "school_expense_id"
       ),
+      -- Chi Trường + Giáo viên trường (tách khỏi Chi Trường từ kỳ 11/2026): lương
+      -- giáo viên đủ Ngày chi + Nguồn chi tính là đã trả cả Thành tiền.
       school_cost AS (
         SELECT
           "school_expense_id",
-          COALESCE(SUM("schoolExpenseAmount"), 0) AS "schoolExpense",
-          COALESCE(SUM("paidAmount"), 0) AS "schoolExpensePaid",
-          COALESCE(SUM(remaining), 0) AS "schoolExpensePayable"
-        FROM school_expense_items
+          COALESCE(SUM(expected), 0) AS "schoolExpense",
+          COALESCE(SUM(paid), 0) AS "schoolExpensePaid",
+          COALESCE(SUM(payable), 0) AS "schoolExpensePayable"
+        FROM (
+          SELECT "school_expense_id", "subject_id",
+            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable
+          FROM school_expense_items
+          UNION ALL
+          SELECT school_expense_id AS "school_expense_id", subject_id AS "subject_id",
+            amount AS expected,
+            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN amount ELSE 0 END AS paid,
+            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN 0 ELSE amount END AS payable
+          FROM school_teacher_expense_items
+        ) school_rows
         ${subjectFilter}
         GROUP BY "school_expense_id"
       ),

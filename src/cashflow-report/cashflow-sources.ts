@@ -14,6 +14,8 @@ import {
  * - Chi Trường (school_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi".
  * - Chi Ngoài (management_expense_items): "Đã chi" + "Ngày chi" + "Nguồn chi",
  *   trừ phần Đã chi do đề xuất chi tháng ghi vào (đã tính ở bút toán đề xuất).
+ * - Giáo viên trường (school_teacher_expense_items): đủ "Ngày chi" + "Nguồn chi"
+ *   là đã trả "Còn lại phải chi" (Thành tiền − Thuế TNCN) cho giáo viên.
  * - Đề nghị chi (suggest_history): mỗi lần thủ quỹ xác nhận xuất tiền là một
  *   bút toán chi, mỗi lần nhận lại quỹ là một bút toán thu cùng tài khoản.
  * - Đề nghị tài chính nội bộ: phiếu chi đã ghi nhận là bút toán chi, phiếu
@@ -155,6 +157,17 @@ SELECT ${ROW_CONTEXT_SELECT},
   t.payer
 FROM management_expense_items t ${ROW_CONTEXT_JOINS}
 WHERE t."paidAmount" > 0 OR t."cashAccount" IS NOT NULL`;
+
+/** Dòng Giáo viên trường đã nhập Ngày chi hoặc Nguồn chi (thiếu một trong hai → lỗi). */
+export const SCHOOL_TEACHER_ROWS_SQL = `
+SELECT ${ROW_CONTEXT_SELECT},
+  t.id AS item_id,
+  t.row_index AS row_index,
+  t.net_amount::text AS paid_amount,
+  to_char(t.expense_date, 'YYYY-MM-DD') AS expense_date,
+  t.cash_account AS cash_account
+FROM school_teacher_expense_items t ${ROW_CONTEXT_JOINS}
+WHERE t.net_amount > 0 AND (t.expense_date IS NOT NULL OR t.cash_account IS NOT NULL)`;
 
 export const SUGGEST_EVENTS_SQL = `
 SELECT h.id AS history_id,
@@ -357,20 +370,26 @@ export function mapInvoiceRows(rows: InvoiceRow[]): CollectedLedger {
   return { lines, issues };
 }
 
+const EXPENSE_ROW_TYPES = {
+  SCHOOL_EXPENSE: { label: 'Chi trường', tableName: 'Chi Trường', prefix: 'CT' },
+  MANAGEMENT_EXPENSE: { label: 'Chi ngoài', tableName: 'Chi Ngoài', prefix: 'CN' },
+  SCHOOL_TEACHER: { label: 'Lương GV trường', tableName: 'Giáo viên trường', prefix: 'GV' },
+} as const;
+
 export function mapExpenseRows(
   rows: ExpenseRow[],
-  type: 'SCHOOL_EXPENSE' | 'MANAGEMENT_EXPENSE',
+  type: keyof typeof EXPENSE_ROW_TYPES,
 ): CollectedLedger {
   const lines: LedgerLine[] = [];
   const issues: LedgerIssue[] = [];
-  const isSchool = type === 'SCHOOL_EXPENSE';
-  const label = isSchool ? 'Chi trường' : 'Chi ngoài';
-  const tableName = isSchool ? 'Chi Trường' : 'Chi Ngoài';
+  const { label, tableName, prefix } = EXPENSE_ROW_TYPES[type];
+  // Giáo viên trường không có ô Đã chi: đủ Ngày chi + Nguồn chi mới là đã trả.
+  const paidWord = type === 'SCHOOL_TEACHER' ? 'Ngày chi' : 'Đã chi';
 
   for (const row of rows) {
     const amount = toCents(row.paid_amount);
     const key = `${type}:${row.school_expense_id}:${row.subject_id}:${row.row_index}`;
-    const documentNo = rowDocumentNo(isSchool ? 'CT' : 'CN', row);
+    const documentNo = rowDocumentNo(prefix, row);
     const source = rowSource(type, row);
     const payer = row.payer ? ` — Người chi: ${row.payer}` : '';
     const description = clean(
@@ -397,7 +416,7 @@ export function mapExpenseRows(
       issues.push(
         issue(
           'MISSING_ACCOUNT',
-          `${tableName} có Đã chi nhưng chưa chọn Nguồn chi`,
+          `${tableName} có ${paidWord} nhưng chưa chọn Nguồn chi`,
           base,
         ),
       );
@@ -407,7 +426,7 @@ export function mapExpenseRows(
       issues.push(
         issue(
           'MISSING_DATE',
-          `${tableName} có Đã chi nhưng chưa nhập Ngày chi`,
+          `${tableName} có ${type === 'SCHOOL_TEACHER' ? 'Nguồn chi' : 'Đã chi'} nhưng chưa nhập Ngày chi`,
           base,
         ),
       );

@@ -15,6 +15,7 @@ import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.en
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
 import { loadSuggestPayments } from '../management-expense-item/suggest-payments';
+import { SchoolTeacherExpenseItem } from '../school-teacher-expense/school-teacher-expense-item.entity';
 
 @Injectable()
 export class ExpensePeriodsService {
@@ -402,6 +403,28 @@ export class ExpensePeriodsService {
                             }),
                         );
                     }
+                }
+
+                // Giáo viên trường: chép số liệu, bỏ Ngày chi / Nguồn chi (lương kỳ
+                // gốc đã trả — chép theo thì sổ thu chi tính hai lần) và dấu duyệt.
+                const teacherRows = await manager.find(SchoolTeacherExpenseItem, {
+                    where: { schoolExpenseId: _oldId },
+                });
+                for (const row of teacherRows) {
+                    const {
+                        id: _teacherId,
+                        schoolExpense: _tse,
+                        subject: _tsub,
+                        createdAt: _created,
+                        updatedAt: _updated,
+                        ...teacherRest
+                    } = row;
+                    await manager.insert(SchoolTeacherExpenseItem, {
+                        ...teacherRest,
+                        schoolExpenseId: newSchoolExpense.id,
+                        expenseDate: null,
+                        cashAccount: null,
+                    });
                 }
             }
 

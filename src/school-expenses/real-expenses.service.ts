@@ -51,6 +51,18 @@ import {
   isManagementConfirmed,
   loadManagementConfirmations,
 } from './management-confirmations';
+import { SchoolTeacherExpenseItem } from '../school-teacher-expense/school-teacher-expense-item.entity';
+import { SchoolTeacherPayrollApproval } from '../school-teacher-expense/school-teacher-payroll-approval.entity';
+import { SchoolTeacher } from '../school-teacher-expense/school-teacher.entity';
+import {
+  allocateSchoolTeacherTax,
+  buildSchoolTeacherItemData,
+  buildSchoolTeacherPaymentData,
+  SCHOOL_TEACHER_SPLIT_FROM,
+  schoolTeacherMoneySignature,
+  schoolTeacherPaid,
+  schoolTeacherSplitApplies,
+} from '../school-teacher-expense/school-teacher';
 import {
   assertLinkedRowsKept,
   keepLinkedPaymentFields,
@@ -398,12 +410,25 @@ export class RealExpensesService {
       },
       relations: {
         school: true,
+        period: true,
       },
     });
 
     if (!schoolExpense) {
       throw new NotFoundException('SchoolExpense not found');
     }
+
+    // Từ kỳ 11/2026: Giáo viên trường tách khỏi Chi Trường sang bảng riêng —
+    // khi client gửi kèm bảng Giáo viên trường, hoặc môn đã có bảng đó. Màn hình
+    // bản cũ (chưa có bảng) lưu môn chưa có bảng thì Chi Trường giữ cách tính cũ
+    // để không mất tiền giáo viên; môn đã có bảng thì không tính hai lần.
+    const sendsSchoolTeacher = Array.isArray(body.schoolTeacherItems);
+    const teacherSplit =
+      schoolTeacherSplitApplies(schoolExpense.period) &&
+      (sendsSchoolTeacher ||
+        (await this.dataSource.getRepository(SchoolTeacherExpenseItem).count({
+          where: { schoolExpenseId, subjectId: body.subjectId },
+        })) > 0);
 
     // Kỳ đã "Kết thúc": khoá hết, trừ Ngày chi + Nguồn chi (xem
     // saveFinalizedDateSource) — sales admin vẫn bị chặn hẳn.
@@ -453,6 +478,7 @@ export class RealExpensesService {
         user,
         oldSchoolExpense,
         oldManagement,
+        teacherSplit && sendsSchoolTeacher,
       );
       return await this.getItems(schoolExpenseId, body.subjectId);
     }
@@ -629,7 +655,9 @@ export class RealExpensesService {
         const entity = queryRunner.manager.create(SchoolExpenseItem, {
           schoolExpense,
           subject,
-          ...buildSchoolExpenseItemData(item, index, sharedItems[index]),
+          ...buildSchoolExpenseItemData(item, index, sharedItems[index], {
+            teacherSplit,
+          }),
         });
 
         await queryRunner.manager.save(entity);
@@ -758,6 +786,18 @@ export class RealExpensesService {
         newManagementSnapshot.push(data);
       }
 
+      // Bảng Giáo viên trường (kỳ từ 11/2026) lưu cùng transaction.
+      const schoolTeacher = teacherSplit && sendsSchoolTeacher
+        ? await this.replaceSchoolTeacherRows(
+            queryRunner.manager,
+            schoolExpenseId,
+            body.subjectId,
+            schoolExpense.school?.id,
+            body.schoolTeacherItems,
+            revenueItems,
+          )
+        : null;
+
       await queryRunner.manager.save(SchoolExpenseHistory, {
         schoolExpenseId,
         updatedById: user?.id,
@@ -768,6 +808,7 @@ export class RealExpensesService {
           revenueItems: oldRevenue,
           schoolExpenseItems: oldSchoolExpense,
           managementExpenseItems: oldManagement,
+          ...(schoolTeacher ? { schoolTeacherItems: schoolTeacher.old } : {}),
         },
         newData: {
           subjectId: body.subjectId,
@@ -775,6 +816,14 @@ export class RealExpensesService {
           schoolExpenseItems,
           // Kèm Chi khác đã tính (đơn giá + thành tiền) để suy ra lịch sử thay đổi.
           managementExpenseItems: newManagementSnapshot,
+          ...(schoolTeacher
+            ? {
+                schoolTeacherItems: schoolTeacher.rows,
+                schoolTeacherApprovalCleared: schoolTeacher.approvalCleared,
+                schoolTeacherOtherSubjectsApprovalCleared:
+                  schoolTeacher.otherSubjectsApprovalCleared,
+              }
+            : {}),
         },
       });
 
@@ -880,6 +929,7 @@ export class RealExpensesService {
     user: AuthUser | undefined,
     oldSchoolExpense: SchoolExpenseItem[],
     oldManagement: ManagementExpenseItem[],
+    teacherSplit = false,
   ) {
     const queryRunner = this.dataSource.createQueryRunner();
 
@@ -910,6 +960,24 @@ export class RealExpensesService {
         body.managementExpenseItems,
         (item, old) => (linked.has(old.id) ? null : buildPaymentDateSourceData(item)),
       );
+      // Giáo viên trường: kỳ đã kết thúc chỉ còn Ngày chi + Nguồn chi.
+      const oldSchoolTeacher = teacherSplit
+        ? await queryRunner.manager.find(SchoolTeacherExpenseItem, {
+            where: { schoolExpenseId, subjectId: body.subjectId },
+          })
+        : [];
+      const schoolTeacherItems = teacherSplit
+        ? await updateRowsById(
+            queryRunner.manager,
+            SchoolTeacherExpenseItem,
+            oldSchoolTeacher,
+            body.schoolTeacherItems,
+            (item) => {
+              const { expenseDate, cashAccount } = buildSchoolTeacherPaymentData(item);
+              return { expenseDate, cashAccount };
+            },
+          )
+        : null;
 
       await queryRunner.manager.save(SchoolExpenseHistory, {
         schoolExpenseId,
@@ -920,11 +988,13 @@ export class RealExpensesService {
         oldData: {
           schoolExpenseItems: oldSchoolExpense,
           managementExpenseItems: oldManagement,
+          ...(schoolTeacherItems ? { schoolTeacherItems: oldSchoolTeacher } : {}),
         },
         newData: {
           subjectId: body.subjectId,
           schoolExpenseItems,
           managementExpenseItems,
+          ...(schoolTeacherItems ? { schoolTeacherItems } : {}),
         },
       });
 
@@ -935,6 +1005,230 @@ export class RealExpensesService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  /**
+   * Bảng Giáo viên trường của một môn: xoá rồi ghi lại (dòng không có liên kết
+   * nào cần giữ theo id). Dòng đi kèm Doanh Thu (vị trí < số dòng Doanh Thu)
+   * lấy số lượng của Doanh Thu; dòng thêm riêng trống thì bỏ. Thuế TNCN tính lại
+   * cho cả bảng thu chi (giáo viên dạy nhiều môn cộng chung ngưỡng 5 triệu).
+   * Môn nào đổi số tiền (kể cả do thuế đổi theo) thì bỏ dấu "Duyệt lương".
+   */
+  private async replaceSchoolTeacherRows(
+    manager: EntityManager,
+    schoolExpenseId: number,
+    subjectId: number,
+    schoolId: number | undefined,
+    items: any[],
+    revenueItems: any[],
+  ) {
+    const repo = manager.getRepository(SchoolTeacherExpenseItem);
+    const sheetBefore = await repo.find({
+      where: { schoolExpenseId },
+      order: { rowIndex: 'ASC', id: 'ASC' },
+    });
+    const old = sheetBefore.filter((row) => row.subjectId === subjectId);
+
+    const revenueCount = revenueItems.length;
+    const rows: ReturnType<typeof buildSchoolTeacherItemData>[] = [];
+    let nextStandalone = revenueCount;
+    items.forEach((item, index) => {
+      const standalone = index >= revenueCount;
+      const row = buildSchoolTeacherItemData(
+        item,
+        standalone ? nextStandalone : index,
+        standalone ? item : { ...revenueItems[index], rowIndex: index },
+        standalone,
+      );
+      if (
+        standalone &&
+        !row.content &&
+        !row.schoolTeacherId &&
+        !(row.amount > 0) &&
+        !row.expenseDate &&
+        !row.cashAccount &&
+        !row.note
+      ) {
+        return;
+      }
+      if (standalone) nextStandalone += 1;
+      rows.push(row);
+    });
+
+    // Giáo viên phải thuộc danh sách giáo viên của chính trường này.
+    const teacherIds = [
+      ...new Set(rows.map((row) => row.schoolTeacherId).filter((id): id is number => !!id)),
+    ];
+    if (teacherIds.length) {
+      const found = await manager.getRepository(SchoolTeacher).find({
+        where: { id: In(teacherIds), ...(schoolId ? { schoolId } : {}) },
+      });
+      if (found.length !== teacherIds.length) {
+        throw new BadRequestException('Giáo viên đã chọn không thuộc danh sách giáo viên của trường');
+      }
+    }
+
+    await repo.delete({ schoolExpenseId, subjectId });
+    if (rows.length) {
+      await repo.insert(rows.map((row) => ({ ...row, schoolExpenseId, subjectId })));
+    }
+
+    // Thuế TNCN theo giáo viên trên cả bảng thu chi.
+    const sheetAfter = await repo.find({
+      where: { schoolExpenseId },
+      order: { rowIndex: 'ASC', id: 'ASC' },
+    });
+    const tax = allocateSchoolTeacherTax(
+      sheetAfter.map((row) => ({
+        key: row.id,
+        schoolTeacherId: row.schoolTeacherId,
+        amount: Number(row.amount || 0),
+      })),
+    );
+    for (const row of sheetAfter) {
+      const next = tax.get(row.id)!;
+      if (
+        Number(row.pitRate) !== next.pitRate ||
+        Number(row.pitAmount) !== next.pitAmount ||
+        Number(row.netAmount) !== next.netAmount
+      ) {
+        await repo.update({ id: row.id }, next);
+        Object.assign(row, next);
+      }
+    }
+
+    // Bỏ dấu duyệt của mọi môn có số tiền đổi (môn đang lưu + môn đổi thuế theo).
+    const subjectIds = [...new Set([...sheetBefore, ...sheetAfter].map((row) => row.subjectId))];
+    const clearedSubjects: number[] = [];
+    for (const id of subjectIds) {
+      const before = sheetBefore.filter((row) => row.subjectId === id);
+      const after = sheetAfter.filter((row) => row.subjectId === id);
+      if (schoolTeacherMoneySignature(before) !== schoolTeacherMoneySignature(after)) {
+        clearedSubjects.push(id);
+        await manager.delete(SchoolTeacherPayrollApproval, { schoolExpenseId, subjectId: id });
+      }
+    }
+    return {
+      old,
+      rows: sheetAfter.filter((row) => row.subjectId === subjectId),
+      approvalCleared: clearedSubjects.includes(subjectId),
+      otherSubjectsApprovalCleared: clearedSubjects.filter((id) => id !== subjectId),
+    };
+  }
+
+  /** Bảng Giáo viên trường + dấu "Duyệt lương" của một môn. */
+  async getSchoolTeacherItems(schoolExpenseId: number, subjectId: number) {
+    if (!subjectId) throw new BadRequestException('subjectId is required');
+    const schoolExpense = await this.schoolExpenseRepository.findOne({
+      where: { id: schoolExpenseId },
+      relations: { period: true, school: true },
+    });
+    if (!schoolExpense) throw new NotFoundException('SchoolExpense not found');
+
+    const [sheetRows, approval] = await Promise.all([
+      this.dataSource.getRepository(SchoolTeacherExpenseItem).find({
+        where: { schoolExpenseId },
+        order: { rowIndex: 'ASC', id: 'ASC' },
+      }),
+      this.dataSource
+        .getRepository(SchoolTeacherPayrollApproval)
+        .findOne({ where: { schoolExpenseId, subjectId } }),
+    ]);
+    const items = sheetRows.filter((row) => row.subjectId === subjectId);
+    // Thù lao của từng giáo viên ở các môn khác cùng bảng thu chi — để màn hình
+    // tính đúng ngưỡng thuế 5 triệu khi đang sửa một môn.
+    const otherSubjectGross: Record<number, number> = {};
+    for (const row of sheetRows) {
+      if (row.subjectId === subjectId || !row.schoolTeacherId) continue;
+      otherSubjectGross[row.schoolTeacherId] =
+        (otherSubjectGross[row.schoolTeacherId] ?? 0) + Number(row.amount || 0);
+    }
+    const usedTeacherIds = items
+      .map((row) => row.schoolTeacherId)
+      .filter((id): id is number => !!id);
+    const teachers = schoolExpense.school?.id
+      ? await this.dataSource.getRepository(SchoolTeacher).find({
+          where: [
+            { schoolId: schoolExpense.school.id, isActive: true },
+            ...(usedTeacherIds.length
+              ? [{ schoolId: schoolExpense.school.id, id: In(usedTeacherIds) }]
+              : []),
+          ],
+          order: { name: 'ASC', id: 'ASC' },
+        })
+      : [];
+    return {
+      applies: schoolTeacherSplitApplies(schoolExpense.period),
+      splitFrom: SCHOOL_TEACHER_SPLIT_FROM,
+      schoolId: schoolExpense.school?.id ?? null,
+      teachers,
+      otherSubjectGross,
+      items: items.map((item) => ({ ...item, paid: schoolTeacherPaid(item) })),
+      approval: approval
+        ? {
+            approvedBy: approval.approvedBy,
+            approvedByName: approval.approvedByName,
+            approvedAt: approval.approvedAt,
+          }
+        : null,
+    };
+  }
+
+  /** "Duyệt lương" bảng Giáo viên trường của một môn: chỉ ghi người + thời điểm. */
+  async approveSchoolTeacher(
+    schoolExpenseId: number,
+    subjectId: number,
+    user: AuthUser,
+  ) {
+    if (!subjectId) throw new BadRequestException('subjectId is required');
+    await this.dataSource.transaction(async (manager) => {
+      const [sheet] = await manager.query<{ month: number; year: number }[]>(
+        `SELECT ep.month, ep.year FROM school_expenses se
+         JOIN expense_periods ep ON ep.id = se.period_id
+         WHERE se.id = $1 FOR UPDATE OF se`,
+        [schoolExpenseId],
+      );
+      if (!sheet) throw new NotFoundException('SchoolExpense not found');
+      if (!schoolTeacherSplitApplies(sheet)) {
+        throw new BadRequestException(
+          'Kỳ này chưa có bảng Giáo viên trường (áp dụng từ kỳ tháng 11/2026)',
+        );
+      }
+      const rows = await manager.find(SchoolTeacherExpenseItem, {
+        where: { schoolExpenseId, subjectId },
+      });
+      if (!rows.some((row) => Number(row.amount) > 0)) {
+        throw new BadRequestException(
+          'Bảng Giáo viên trường chưa có lương để duyệt — nhập và lưu trước',
+        );
+      }
+      const approvedByName = user?.name ?? null;
+      await manager.upsert(
+        SchoolTeacherPayrollApproval,
+        {
+          schoolExpenseId,
+          subjectId,
+          approvedBy: user?.id ?? null,
+          approvedByName,
+          approvedAt: new Date(),
+        },
+        ['schoolExpenseId', 'subjectId'],
+      );
+      await manager.save(SchoolExpenseHistory, {
+        schoolExpenseId,
+        updatedById: user?.id,
+        updatedByName: approvedByName ?? undefined,
+        action: 'APPROVE_SCHOOL_TEACHER_PAYROLL',
+        entityType: 'school_expense',
+        oldData: null,
+        newData: {
+          subjectId,
+          total: rows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+          netTotal: rows.reduce((sum, row) => sum + Number(row.netAmount || 0), 0),
+        },
+      });
+    });
+    return this.getSchoolTeacherItems(schoolExpenseId, subjectId);
   }
 
   async getItems(schoolExpenseId: number, subjectId: number) {
@@ -1139,19 +1433,27 @@ export class RealExpensesService {
       0,
     );
 
+    // Giáo viên trường (kỳ từ 11/2026) tách khỏi Chi Trường nhưng vẫn là chi của
+    // trường: cộng vào các tổng Chi Trường để tổng chi / lợi nhuận không đổi.
+    // Đã trả (đủ Ngày chi + Nguồn chi) tính cả Thành tiền — thuế TNCN đã khấu trừ.
+    const schoolTeacherTotals = await this.schoolTeacherTotals(
+      schoolExpenseId,
+      subjectId,
+    );
+
     const totalSchoolExpense = schoolExpenseItems.reduce(
       (sum, item) => sum + Number(item.schoolExpenseAmount || 0),
-      0,
+      schoolTeacherTotals.totals.amount,
     );
 
     const totalSchoolExpensePaid = schoolExpenseItems.reduce(
       (sum, item) => sum + Number(item.paidAmount || 0),
-      0,
+      schoolTeacherTotals.totals.paid,
     );
 
     const totalSchoolExpenseRemaining = schoolExpenseItems.reduce(
       (sum, item) => sum + Number(item.remaining || 0),
-      0,
+      schoolTeacherTotals.totals.remaining,
     );
 
     const totalManagementExpense = managementExpenseItems.reduce(
@@ -1286,6 +1588,11 @@ export class RealExpensesService {
         revenueItems: revenueItems.map(mapRevenue),
         schoolExpenseItems: schoolExpenseItems.map(mapSchoolExpense),
         managementExpenseItems: managementExpenseItems.map(mapManagementExpense),
+        // Tổng bảng Giáo viên trường (đã cộng vào các tổng Chi Trường ở trên).
+        schoolTeacherTotals: schoolTeacherTotals.totals,
+        // Số tiền theo từng dòng (không có chi tiết lương) để bảng Tổng hợp cộng
+        // vào Chi Trường cùng dòng.
+        schoolTeacherItems: schoolTeacherTotals.items,
       },
     };
   }
@@ -1299,6 +1606,37 @@ export class RealExpensesService {
     if (!subject || subject.schoolId !== schoolExpense.school?.id) {
       throw new BadRequestException('Môn không thuộc trường của bảng thu chi');
     }
+  }
+
+  /** Tổng bảng Giáo viên trường của một bảng thu chi (một môn hoặc mọi môn). */
+  private async schoolTeacherTotals(schoolExpenseId: number, subjectId?: number) {
+    const rows = await this.dataSource
+      .getRepository(SchoolTeacherExpenseItem)
+      .find({
+        where: subjectId ? { schoolExpenseId, subjectId } : { schoolExpenseId },
+      });
+    const sum = (pick: (row: SchoolTeacherExpenseItem) => number) =>
+      rows.reduce((total, row) => total + pick(row), 0);
+    const paidOf = (row: SchoolTeacherExpenseItem) =>
+      schoolTeacherPaid(row) ? Number(row.amount || 0) : 0;
+    const amount = sum((row) => Number(row.amount || 0));
+    const paid = sum(paidOf);
+    return {
+      totals: {
+        amount,
+        pitAmount: sum((row) => Number(row.pitAmount || 0)),
+        netAmount: sum((row) => Number(row.netAmount || 0)),
+        paid,
+        remaining: amount - paid,
+      },
+      items: rows.map((row) => ({
+        subjectId: row.subjectId,
+        rowIndex: row.rowIndex,
+        amount: Number(row.amount || 0),
+        paidAmount: paidOf(row),
+        remaining: Number(row.amount || 0) - paidOf(row),
+      })),
+    };
   }
 
   /**

@@ -15,11 +15,13 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import { SCHOOL_TEACHER_APPROVE_ROLES } from '../school-teacher-expense/school-teacher';
 import {
   CASHFLOW_READ_ROLES,
   CASHFLOW_SALES_ADMIN_ROLES,
   CASHFLOW_CREATE_ROLES,
   CASHFLOW_WRITE_ROLES,
+  CASHFLOW_TEACHER_PAY_ROLES,
 } from './cashflow-roles';
 
 type RequestWithUser = Request & { user: AuthUser };
@@ -112,6 +114,37 @@ export class RealExpensesController {
     return this.realExpensesService.saveAll(
       Number(id),
       body,
+      req.user,
+    );
+  }
+
+  /**
+   * Bảng Giáo viên trường (lương trả thẳng cho giáo viên của trường, từ kỳ
+   * 11/2026) + dấu "Duyệt lương". Lương từng giáo viên — không gồm Sales Admin.
+   */
+  @Get(':id/school-teacher-items')
+  @Roles(...CASHFLOW_TEACHER_PAY_ROLES)
+  getSchoolTeacherItems(
+    @Param('id') id: string,
+    @Query('subjectId') subjectId: string,
+  ) {
+    return this.realExpensesService.getSchoolTeacherItems(
+      Number(id),
+      Number(subjectId),
+    );
+  }
+
+  /** "Duyệt lương" bảng Giáo viên trường của một môn — chỉ ghi người + thời điểm. */
+  @Post(':id/school-teacher-items/approve')
+  @Roles(...SCHOOL_TEACHER_APPROVE_ROLES)
+  approveSchoolTeacher(
+    @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.realExpensesService.approveSchoolTeacher(
+      Number(id),
+      Number(subjectId),
       req.user,
     );
   }

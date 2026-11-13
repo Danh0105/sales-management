@@ -32,6 +32,7 @@ import {
   INVOICE_ROWS_SQL,
   InvoiceRow,
   MANAGEMENT_EXPENSE_ROWS_SQL,
+  SCHOOL_TEACHER_ROWS_SQL,
   mapExpenseRows,
   mapFinancialMovements,
   mapInvoiceRows,
@@ -76,6 +77,7 @@ const ACCOUNT_USAGE_SQL = `
 SELECT EXISTS (SELECT 1 FROM revenue_items WHERE "invoiceCashAccount" = $1)
   OR EXISTS (SELECT 1 FROM school_expense_items WHERE "cashAccount" = $1)
   OR EXISTS (SELECT 1 FROM management_expense_items WHERE "cashAccount" = $1)
+  OR EXISTS (SELECT 1 FROM school_teacher_expense_items WHERE cash_account = $1)
   OR EXISTS (SELECT 1 FROM suggest_payment_order WHERE "cashAccount" = $1)
   OR EXISTS (SELECT 1 FROM suggest_history WHERE data->>'cashAccount' = $1)
   OR EXISTS (SELECT 1 FROM financial_payments WHERE cash_account_code = $1)
@@ -142,12 +144,13 @@ export class CashflowReportService {
     }));
   }
 
-  /** Gom bút toán từ 7 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
+  /** Gom bút toán từ 8 nguồn (song song, mỗi nguồn 1 truy vấn — không N+1). */
   async collect(accounts: CashAccountInfo[]): Promise<CollectedLedger> {
     const [
       invoiceRows,
       schoolRows,
       managementRows,
+      schoolTeacherRows,
       suggestEvents,
       financialMovements,
       otherCashflowEntries,
@@ -156,6 +159,7 @@ export class CashflowReportService {
       this.dataSource.query<InvoiceRow[]>(INVOICE_ROWS_SQL),
       this.dataSource.query<ExpenseRow[]>(SCHOOL_EXPENSE_ROWS_SQL),
       this.dataSource.query<ExpenseRow[]>(MANAGEMENT_EXPENSE_ROWS_SQL),
+      this.dataSource.query<ExpenseRow[]>(SCHOOL_TEACHER_ROWS_SQL),
       this.dataSource.query<SuggestEventRow[]>(SUGGEST_EVENTS_SQL),
       this.dataSource.query<FinancialMovementRow[]>(FINANCIAL_MOVEMENTS_SQL),
       this.dataSource.query<OtherCashflowEntryRow[]>(
@@ -168,6 +172,7 @@ export class CashflowReportService {
       mapInvoiceRows(invoiceRows),
       mapExpenseRows(schoolRows, 'SCHOOL_EXPENSE'),
       mapExpenseRows(managementRows, 'MANAGEMENT_EXPENSE'),
+      mapExpenseRows(schoolTeacherRows, 'SCHOOL_TEACHER'),
       mapSuggestEvents(suggestEvents),
       mapFinancialMovements(financialMovements),
       mapOtherCashflowEntries(otherCashflowEntries),

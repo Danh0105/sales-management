@@ -34,6 +34,7 @@ export const DELETABLE_SOURCES = [
   'INVOICE',
   'SCHOOL_EXPENSE',
   'MANAGEMENT_EXPENSE',
+  'SCHOOL_TEACHER',
   'MANUAL_ENTRY',
 ] as const;
 export type DeletableSource = (typeof DELETABLE_SOURCES)[number];
@@ -72,6 +73,7 @@ const SOURCE_ID_FIELD: Record<DeletableSource, keyof LedgerSourceRef> = {
   INVOICE: 'itemId',
   SCHOOL_EXPENSE: 'itemId',
   MANAGEMENT_EXPENSE: 'itemId',
+  SCHOOL_TEACHER: 'itemId',
   MANUAL_ENTRY: 'manualEntryId',
 };
 
@@ -172,6 +174,9 @@ export class SourceDeletionService {
         break;
       case 'MANUAL_ENTRY':
         prepared = await this.prepareManualEntry(manager, id, lock);
+        break;
+      case 'SCHOOL_TEACHER':
+        prepared = await this.prepareSchoolTeacherRow(manager, id, lock);
         break;
       default:
         prepared = await this.prepareSheetRow(manager, type, id, lock);
@@ -707,6 +712,80 @@ export class SourceDeletionService {
                    "expenseDate" = NULL, "cashAccount" = NULL WHERE t.id = $1`
               : `UPDATE ${table} SET "remaining" = "remaining" + "paidAmount", "paidAmount" = 0,
                  "expenseDate" = NULL, "cashAccount" = NULL WHERE id = $1`,
+          [id],
+        );
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Giáo viên trường — gỡ Ngày chi + Nguồn chi (số tiền lương giữ nguyên)
+  // ---------------------------------------------------------------------------
+
+  private async prepareSchoolTeacherRow(
+    manager: EntityManager,
+    id: number,
+    lock: boolean,
+  ): Promise<Prepared> {
+    const [row] = await manager.query<
+      {
+        school_expense_id: number;
+        subject_id: number;
+        row_index: number;
+        school_name: string | null;
+        subject_name: string | null;
+        month: number | null;
+        year: number | null;
+        cash_date: string | null;
+        cash_account: string | null;
+        net_amount: string;
+      }[]
+    >(
+      `SELECT t.school_expense_id, t.subject_id, t.row_index,
+         s.name AS school_name, sub.name AS subject_name, ep.month, ep.year,
+         to_char(t.expense_date, 'YYYY-MM-DD') AS cash_date, t.cash_account,
+         t.net_amount::text AS net_amount
+       FROM school_teacher_expense_items t
+       JOIN school_expenses se ON se.id = t.school_expense_id
+       LEFT JOIN schools s ON s.id = se.school_id
+       LEFT JOIN subjects sub ON sub.id = t.subject_id
+       LEFT JOIN expense_periods ep ON ep.id = se.period_id
+       WHERE t.id = $1 ${lock ? 'FOR UPDATE OF t' : ''}`,
+      [id],
+    );
+    if (!row) throw new NotFoundException('Không tìm thấy dòng Giáo viên trường');
+
+    const documentNo = `GV-${row.school_expense_id}-${row.subject_id}-${row.row_index + 1}`;
+    const where = [
+      row.school_name,
+      row.subject_name,
+      row.month && row.year ? `tháng ${row.month}/${row.year}` : null,
+    ]
+      .filter(Boolean)
+      .join(' — ');
+    return {
+      plan: {
+        type: 'SCHOOL_TEACHER',
+        id,
+        mode: 'UNPOST',
+        title: `Gỡ dòng Giáo viên trường ${documentNo} khỏi sổ`,
+        items: [
+          `Giáo viên trường ${documentNo}${where ? ` — ${where}` : ''}`,
+          `Bỏ khoản chi ${money(row.net_amount)} · tài khoản ${row.cash_account ?? '—'} · ngày ${vnDate(row.cash_date)}`,
+        ],
+        warnings: [
+          'Xoá Ngày chi và Nguồn chi của dòng (thành chưa trả); Thành tiền, Thuế TNCN, dấu Duyệt lương giữ nguyên.',
+          'Muốn ghi lại vào sổ thì nhập lại ở màn QL thu chi.',
+        ],
+        blockers:
+          row.cash_date !== null || row.cash_account !== null
+            ? []
+            : ['Dòng này không còn khoản chi nào trên sổ.'],
+      },
+      files: [],
+      apply: async (m) => {
+        await m.query(
+          `UPDATE school_teacher_expense_items SET expense_date = NULL, cash_account = NULL, updated_at = now() WHERE id = $1`,
           [id],
         );
       },
