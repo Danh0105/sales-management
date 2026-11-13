@@ -4110,15 +4110,45 @@ export class SuggestService {
 
   // ================= QUERY =================
 
+  /**
+   * Điều kiện SQL (alias 's'): nhân viên `:param` được Giám đốc chỉ định trên
+   * đề xuất — người bàn giao, người hỗ trợ, người xử lý nhập kho hoặc người
+   * nghiệm thu. Gồm cả dòng giao việc đã từ chối/đã được thay để người đó còn
+   * xem lại được đề xuất mình từng tham gia.
+   */
+  private expenseAssignedToSql(param: string): string {
+    return `(
+      s.assignedTechnicianId = :${param}
+      OR s.stockInHandlerId = :${param}
+      OR s.acceptorId = :${param}
+      OR EXISTS (
+        SELECT 1 FROM suggest_assignment sa
+        WHERE sa."suggestId" = s.id AND sa."employeeId" = :${param}
+      )
+    )`;
+  }
+
+  /** Bản trong bộ nhớ của `expenseAssignedToSql` cho một đề xuất đã nạp `assignments`. */
+  private isExpenseAssignedTo(s: Suggest, employeeId: number): boolean {
+    return (
+      s.assignedTechnicianId === employeeId ||
+      s.stockInHandlerId === employeeId ||
+      s.acceptorId === employeeId ||
+      (s.assignments ?? []).some((a) => a.employeeId === employeeId)
+    );
+  }
+
   /** Áp các bộ lọc chung của đề xuất chi lên query builder (alias 's'). */
   private applyExpenseFilters(
     qb: SelectQueryBuilder<Suggest>,
     filter: FilterExpenseDto,
+    actor?: AuthUser,
   ) {
     const {
       status,
       requestKind,
       createdBy,
+      includeAssigned,
       schoolId,
       isMonthlyExpense,
       subjectId,
@@ -4132,7 +4162,18 @@ export class SuggestService {
     if (status) qb.andWhere('s.status = :status', { status });
     if (requestKind)
       qb.andWhere('s.requestKind = :requestKind', { requestKind });
-    if (createdBy) qb.andWhere('s.createdBy = :createdBy', { createdBy });
+    if (createdBy) {
+      // "Đề xuất của tôi" kèm cả đề xuất mình được Giám đốc chỉ định — chỉ khi
+      // người xem lọc theo chính mình, không mở rộng khi xem đơn người khác.
+      if (includeAssigned && actor?.id === createdBy) {
+        qb.andWhere(
+          `(s.createdBy = :createdBy OR ${this.expenseAssignedToSql('createdBy')})`,
+          { createdBy },
+        );
+      } else {
+        qb.andWhere('s.createdBy = :createdBy', { createdBy });
+      }
+    }
     // Đề xuất chi tháng nhiều trường: khớp cả các trường sau trường đầu.
     const matchesMonthlyItem = (column: string, param: string) =>
       `EXISTS (
@@ -4204,38 +4245,39 @@ export class SuggestService {
   }
 
   /**
-   * Phòng kỹ thuật chỉ xem đề xuất thiết bị/sửa chữa. Nếu Giám đốc đã chỉ
-   * định người phụ trách thì chỉ kỹ thuật viên đó nhìn thấy đề xuất.
+   * Chủ đơn thuần chỉ xem đề xuất của mình. Phòng kỹ thuật chỉ xem đề xuất
+   * thiết bị/sửa chữa; nếu Giám đốc đã chỉ định người phụ trách thì chỉ kỹ
+   * thuật viên đó nhìn thấy đề xuất. Ai được Giám đốc chỉ định trên đề xuất
+   * (bàn giao, hỗ trợ, xử lý nhập kho, nghiệm thu) luôn xem được đề xuất đó.
    */
   private applyExpenseAccessScope(
     qb: SelectQueryBuilder<Suggest>,
     actor?: AuthUser,
   ) {
     if (this.isRequesterOnly(actor)) {
-      return qb.andWhere('s.createdBy = :requesterId', {
-        requesterId: actor!.id,
-      });
+      return qb.andWhere(
+        `(s.createdBy = :requesterId OR ${this.expenseAssignedToSql('requesterId')})`,
+        { requesterId: actor!.id },
+      );
     }
     if (!this.isTechnicalOnly(actor)) return qb;
 
-    return qb
-      .andWhere('s.requestKind IN (:...technicalKinds)', {
+    return qb.andWhere(
+      `(
+        (
+          s.requestKind IN (:...technicalKinds)
+          AND s.assignedTechnicianId IS NULL
+        )
+        OR ${this.expenseAssignedToSql('technicalActorId')}
+      )`,
+      {
         technicalKinds: [
           ExpenseRequestKind.EQUIPMENT,
           ExpenseRequestKind.REPAIR,
         ],
-      })
-      .andWhere(
-        `(
-          s.assignedTechnicianId IS NULL
-          OR s.assignedTechnicianId = :technicalActorId
-          OR EXISTS (
-            SELECT 1 FROM suggest_assignment sa
-            WHERE sa."suggestId" = s.id AND sa."employeeId" = :technicalActorId
-          )
-        )`,
-        { technicalActorId: actor!.id },
-      );
+        technicalActorId: actor!.id,
+      },
+    );
   }
 
   async findAllExpense(rawFilter: FilterExpenseDto, actor?: AuthUser) {
@@ -4255,7 +4297,7 @@ export class SuggestService {
       .leftJoinAndSelect('monthlyItem.school', 'monthlyItemSchool')
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST });
 
-    this.applyExpenseFilters(qb, filter);
+    this.applyExpenseFilters(qb, filter, actor);
     this.applyExpenseAccessScope(qb, actor);
 
     const [data, total] = await qb
@@ -4295,7 +4337,7 @@ export class SuggestService {
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST })
       .andWhere('s.createdBy IS NOT NULL');
 
-    this.applyExpenseFilters(groupQb, filter);
+    this.applyExpenseFilters(groupQb, filter, actor);
     this.applyExpenseAccessScope(groupQb, actor);
 
     const groupsRaw = await groupQb
@@ -4333,7 +4375,7 @@ export class SuggestService {
       .where('s.type = :type', { type: SuggestType.EXPENSE_REQUEST })
       .andWhere('s.createdBy IN (:...employeeIds)', { employeeIds });
 
-    this.applyExpenseFilters(itemsQb, filter);
+    this.applyExpenseFilters(itemsQb, filter, actor);
     this.applyExpenseAccessScope(itemsQb, actor);
 
     const items = await itemsQb.orderBy('s.createdAt', 'DESC').getMany();
@@ -4763,12 +4805,21 @@ export class SuggestService {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
 
-    if (this.isRequesterOnly(actor) && s.createdBy !== actor!.id) {
+    // Người được Giám đốc chỉ định trên đề xuất luôn xem được đề xuất đó, kể
+    // cả khi role của họ chỉ cho xem đơn của chính mình.
+    const assignedToActor = !!actor && this.isExpenseAssignedTo(s, actor.id);
+
+    if (
+      this.isRequesterOnly(actor) &&
+      s.createdBy !== actor!.id &&
+      !assignedToActor
+    ) {
       throw new ForbiddenException('Bạn chỉ được xem đề nghị của chính mình');
     }
 
     if (
       this.isTechnicalOnly(actor) &&
+      !assignedToActor &&
       ![ExpenseRequestKind.EQUIPMENT, ExpenseRequestKind.REPAIR].includes(
         s.requestKind as ExpenseRequestKind,
       )
@@ -4781,8 +4832,7 @@ export class SuggestService {
     if (
       this.isTechnicalOnly(actor) &&
       s.assignedTechnicianId != null &&
-      s.assignedTechnicianId !== actor!.id &&
-      !(s.assignments ?? []).some((a) => a.employeeId === actor!.id)
+      !assignedToActor
     ) {
       throw new ForbiddenException(
         'Đề xuất này đã được giao cho một nhân viên kỹ thuật khác',

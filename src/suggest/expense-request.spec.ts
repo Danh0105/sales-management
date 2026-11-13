@@ -446,10 +446,22 @@ describe('Expense request school mapping', () => {
       { id: 19, roles: [ExpenseRole.STAFF_TEACHER] } as any,
     );
 
-    expect(qb.andWhere).toHaveBeenCalledWith(
-      's.createdBy = :requesterId',
-      { requesterId: 19 },
+    // Đơn của mình + đơn mình được Giám đốc chỉ định, không gì khác.
+    const scope = qb.andWhere.mock.calls.find(
+      ([, params]: [string, any]) => params?.requesterId === 19,
     );
+    expect(scope).toBeDefined();
+    const [sql, params] = scope;
+    expect(params).toEqual({ requesterId: 19 });
+    expect(sql).toMatch(/^\(s\.createdBy = :requesterId OR \(/);
+    for (const condition of [
+      's.assignedTechnicianId = :requesterId',
+      's.stockInHandlerId = :requesterId',
+      's.acceptorId = :requesterId',
+      'sa."suggestId" = s.id AND sa."employeeId" = :requesterId',
+    ]) {
+      expect(sql).toContain(condition);
+    }
   });
 
   it('giáo viên công ty không xem được chi tiết đề nghị của người khác', async () => {
@@ -464,6 +476,158 @@ describe('Expense request school mapping', () => {
         roles: [ExpenseRole.STAFF_TEACHER],
       } as any),
     ).rejects.toThrow('chỉ được xem đề nghị của chính mình');
+  });
+
+  describe('người được Giám đốc chỉ định xem được đề xuất', () => {
+    const sales = { id: 19, roles: [ExpenseRole.SALES] } as any;
+    const detailService = (suggest: Record<string, unknown>) => {
+      const service = Object.create(SuggestService.prototype) as SuggestService;
+      (service as any).repo = {
+        findOne: jest
+          .fn()
+          .mockResolvedValue({ id: 8, createdBy: 77, ...suggest }),
+      };
+      (service as any).historyRepo = { find: jest.fn().mockResolvedValue([]) };
+      (service as any).employeeRepo = {
+        findBy: jest.fn().mockResolvedValue([]),
+      };
+      return service;
+    };
+
+    it.each([
+      ['người hỗ trợ', { assignments: [{ employeeId: 19, role: 'SUPPORT' }] }],
+      [
+        'người hỗ trợ đã từ chối',
+        {
+          assignments: [
+            { employeeId: 19, role: 'SUPPORT', status: 'DECLINED' },
+          ],
+        },
+      ],
+      ['người xử lý nhập kho', { stockInHandlerId: 19 }],
+      ['người nghiệm thu', { acceptorId: 19 }],
+    ])('kinh doanh là %s mở được chi tiết', async (_label, suggest) => {
+      const service = detailService(suggest);
+
+      await expect(service.findOneExpense(8, sales)).resolves.toMatchObject({
+        id: 8,
+        createdBy: 77,
+      });
+    });
+
+    it('kinh doanh không được chỉ định vẫn bị chặn dù đề xuất có người khác được giao', async () => {
+      const service = detailService({
+        stockInHandlerId: 20,
+        acceptorId: 21,
+        assignments: [{ employeeId: 22, role: 'SUPPORT' }],
+      });
+
+      await expect(service.findOneExpense(8, sales)).rejects.toThrow(
+        'chỉ được xem đề nghị của chính mình',
+      );
+    });
+
+    it('kỹ thuật được chỉ định nghiệm thu vẫn xem được dù đã có người bàn giao khác', async () => {
+      const service = detailService({
+        requestKind: 'EQUIPMENT',
+        assignedTechnicianId: 30,
+        acceptorId: 19,
+      });
+
+      await expect(
+        service.findOneExpense(8, {
+          id: 19,
+          roles: [ExpenseRole.TECHNICAL],
+        } as any),
+      ).resolves.toMatchObject({ id: 8 });
+    });
+
+    it('kỹ thuật không được chỉ định vẫn bị chặn khi đề xuất đã giao người khác', async () => {
+      const service = detailService({
+        requestKind: 'REPAIR',
+        assignedTechnicianId: 30,
+        assignments: [{ employeeId: 31, role: 'SUPPORT' }],
+      });
+
+      await expect(
+        service.findOneExpense(8, {
+          id: 19,
+          roles: [ExpenseRole.TECHNICAL],
+        } as any),
+      ).rejects.toThrow('đã được giao cho một nhân viên kỹ thuật khác');
+    });
+
+    const listQb = () => {
+      const qb: any = {};
+      for (const method of [
+        'leftJoinAndSelect',
+        'where',
+        'andWhere',
+        'orderBy',
+        'skip',
+        'take',
+      ]) {
+        qb[method] = jest.fn().mockReturnValue(qb);
+      }
+      qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+      const service = Object.create(SuggestService.prototype) as SuggestService;
+      (service as any).repo = {
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+      };
+      return { qb, service };
+    };
+
+    it('"Đề xuất của tôi" kèm includeAssigned trả thêm đề xuất mình được chỉ định', async () => {
+      const { qb, service } = listQb();
+
+      await service.findAllExpense(
+        { createdBy: 19, includeAssigned: true, page: 1, limit: 20 },
+        { id: 19, roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES] } as any,
+      );
+
+      const filter = qb.andWhere.mock.calls.find(
+        ([, params]: [string, any]) => params?.createdBy === 19,
+      );
+      expect(filter[0]).toMatch(/^\(s\.createdBy = :createdBy OR \(/);
+      expect(filter[0]).toContain('s.acceptorId = :createdBy');
+      expect(qb.andWhere).not.toHaveBeenCalledWith('s.createdBy = :createdBy', {
+        createdBy: 19,
+      });
+    });
+
+    it('includeAssigned không mở rộng khi lọc theo người tạo khác', async () => {
+      const { qb, service } = listQb();
+
+      await service.findAllExpense(
+        { createdBy: 77, includeAssigned: true, page: 1, limit: 20 },
+        { id: 19, roles: [ExpenseRole.DIRECTOR] } as any,
+      );
+
+      expect(qb.andWhere).toHaveBeenCalledWith('s.createdBy = :createdBy', {
+        createdBy: 77,
+      });
+    });
+
+    it('kỹ thuật thấy đề xuất chưa giao ai hoặc mình được chỉ định', async () => {
+      const { qb, service } = listQb();
+
+      await service.findAllExpense({ page: 1, limit: 20 }, {
+        id: 19,
+        roles: [ExpenseRole.TECHNICAL],
+      } as any);
+
+      const scope = qb.andWhere.mock.calls.find(
+        ([, params]: [string, any]) => params?.technicalActorId === 19,
+      );
+      expect(scope[1]).toEqual({
+        technicalKinds: ['EQUIPMENT', 'REPAIR'],
+        technicalActorId: 19,
+      });
+      expect(scope[0]).toMatch(
+        /s\.requestKind IN \(:\.\.\.technicalKinds\)\s+AND s\.assignedTechnicianId IS NULL/,
+      );
+      expect(scope[0]).toContain('s.stockInHandlerId = :technicalActorId');
+    });
   });
 });
 
