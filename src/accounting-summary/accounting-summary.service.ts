@@ -42,6 +42,16 @@ interface SubjectCashflowRow {
   invoiceTotal: number | string;
   invoiceIssued: number | string;
   invoiceNone: number | string;
+  studentCount: number | string;
+  totalPeriods: number | string;
+  schoolOnlyExpense: number | string;
+  schoolOnlyPaid: number | string;
+  outsideExpense: number | string;
+  outsidePaid: number | string;
+  schoolTeacherExpense: number | string;
+  companyTeacherExpense: number | string;
+  annualPolicyExpense: number | string;
+  otherExpense: number | string;
 }
 
 const money = (value: unknown): number => {
@@ -236,6 +246,8 @@ export class AccountingSummaryService {
         SELECT
           "school_expense_id",
           "subject_id",
+          COALESCE(SUM("studentCount"), 0) AS "studentCount",
+          COALESCE(SUM("totalPeriods"), 0) AS "totalPeriods",
           COALESCE(SUM("invoiceAmount"), 0) AS "expectedRevenue",
           COALESCE(SUM("paidAmount"), 0) AS "collectedRevenue",
           COALESCE(SUM("remainingAmount"), 0) AS receivable
@@ -248,29 +260,102 @@ export class AccountingSummaryService {
           "subject_id",
           COALESCE(SUM(expected), 0) AS "schoolExpense",
           COALESCE(SUM(paid), 0) AS "schoolExpensePaid",
-          COALESCE(SUM(payable), 0) AS "schoolExpensePayable"
+          COALESCE(SUM(payable), 0) AS "schoolExpensePayable",
+          COALESCE(SUM(school_only), 0) AS "schoolOnlyExpense",
+          COALESCE(SUM(school_only_paid), 0) AS "schoolOnlyPaid",
+          COALESCE(SUM(teacher), 0) AS "schoolTeacherExpense"
         FROM (
           SELECT "school_expense_id", "subject_id",
-            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable
+            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable,
+            GREATEST("schoolExpenseAmount" - "teacherAmount", 0) AS school_only,
+            LEAST(
+              GREATEST("paidAmount", 0),
+              GREATEST("schoolExpenseAmount" - "teacherAmount", 0)
+            ) AS school_only_paid,
+            GREATEST("teacherAmount", 0) AS teacher
           FROM school_expense_items
           UNION ALL
           SELECT school_expense_id AS "school_expense_id", subject_id AS "subject_id",
             amount AS expected,
             CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN amount ELSE 0 END AS paid,
-            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN 0 ELSE amount END AS payable
+            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN 0 ELSE amount END AS payable,
+            0 AS school_only,
+            0 AS school_only_paid,
+            GREATEST(amount, 0) AS teacher
           FROM school_teacher_expense_items
         ) school_rows
         GROUP BY "school_expense_id", "subject_id"
       ),
       management_cost AS (
         SELECT
-          "school_expense_id",
-          "subject_id",
-          COALESCE(SUM("totalOutside"), 0) AS "managementExpense",
-          COALESCE(SUM("paidAmount"), 0) AS "managementExpensePaid",
-          COALESCE(SUM(remaining), 0) AS "managementExpensePayable"
-        FROM management_expense_items
-        GROUP BY "school_expense_id", "subject_id"
+          m."school_expense_id",
+          m."subject_id",
+          COALESCE(SUM(m."totalOutside"), 0) AS "managementExpense",
+          COALESCE(SUM(m."paidAmount"), 0) AS "managementExpensePaid",
+          COALESCE(SUM(m.remaining), 0) AS "managementExpensePayable",
+          COALESCE(SUM(GREATEST(m."totalOutside" - COALESCE(o.other, 0), 0)), 0)
+            AS "outsideExpense",
+          COALESCE(SUM(
+            CASE
+              WHEN m."totalOutside" > 0 THEN
+                LEAST(GREATEST(m."paidAmount", 0), m."totalOutside")
+                * GREATEST(m."totalOutside" - COALESCE(o.other, 0), 0)
+                / m."totalOutside"
+              ELSE 0
+            END
+          ), 0) AS "outsidePaid",
+          COALESCE(SUM(COALESCE(o.other, 0)), 0) AS "otherExpense"
+        FROM management_expense_items m
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(GREATEST(oc.amount - oc."taxAmount", 0)), 0) AS other
+          FROM management_expense_other_costs oc
+          WHERE oc.management_expense_item_id = m.id
+        ) o ON true
+        GROUP BY m."school_expense_id", m."subject_id"
+      ),
+      approved_policy AS (
+        SELECT
+          p."subjectId" AS subject_id,
+          COALESCE((p.data->>'teacherCompany')::numeric, 0) AS teacher_company,
+          COALESCE(NULLIF(p.data->>'mode', ''), 'HS') AS billing_mode
+        FROM policy p
+        WHERE p.status = 'DIRECTOR_APPROVED'
+      ),
+      company_teacher AS (
+        SELECT
+          r."school_expense_id",
+          r."subject_id",
+          COALESCE(SUM(
+            CASE
+              WHEN ap.billing_mode = 'TIET' THEN COALESCE(r."totalPeriods", 0)
+              WHEN COALESCE(r."studentCount", 0) > 0 THEN r."studentCount"
+              ELSE COALESCE(r."totalPeriods", 0)
+            END
+            * COALESCE(r."monthsCount", 1)
+            * COALESCE(ap.teacher_company, 0)
+          ), 0) AS "companyTeacherExpense"
+        FROM revenue_items r
+        LEFT JOIN approved_policy ap ON ap.subject_id = r."subject_id"
+        GROUP BY r."school_expense_id", r."subject_id"
+      ),
+      annual_policy AS (
+        SELECT
+          se_policy.id AS "school_expense_id",
+          pym.subject_id,
+          COALESCE(SUM(pym.policy_after_tax_amount), 0) AS "annualPolicyExpense"
+        FROM school_expenses se_policy
+        INNER JOIN expense_periods ep_policy ON ep_policy.id = se_policy.period_id
+        INNER JOIN policy_years py
+          ON py.school_id = se_policy.school_id
+         AND py.school_year = CONCAT(
+           CASE WHEN ep_policy.month >= 8 THEN ep_policy.year ELSE ep_policy.year - 1 END,
+           '-',
+           CASE WHEN ep_policy.month >= 8 THEN ep_policy.year + 1 ELSE ep_policy.year END
+         )
+        INNER JOIN policy_year_monthly_rows pym
+          ON pym.policy_year_id = py.id
+         AND pym.month = CONCAT(ep_policy.year, '-', LPAD(ep_policy.month::text, 2, '0'))
+        GROUP BY se_policy.id, pym.subject_id
       ),
       invoice AS (
         SELECT
@@ -310,15 +395,25 @@ export class AccountingSummaryService {
         se.id AS "schoolExpenseId",
         subject_row.id AS "subjectId",
         subject_row.name AS "subjectName",
+        COALESCE(r."studentCount", 0) AS "studentCount",
+        COALESCE(r."totalPeriods", 0) AS "totalPeriods",
         COALESCE(r."expectedRevenue", 0) AS "expectedRevenue",
         COALESCE(r."collectedRevenue", 0) AS "collectedRevenue",
         COALESCE(r.receivable, 0) AS receivable,
         COALESCE(sc."schoolExpense", 0) AS "schoolExpense",
         COALESCE(sc."schoolExpensePaid", 0) AS "schoolExpensePaid",
         COALESCE(sc."schoolExpensePayable", 0) AS "schoolExpensePayable",
+        COALESCE(sc."schoolOnlyExpense", 0) AS "schoolOnlyExpense",
+        COALESCE(sc."schoolOnlyPaid", 0) AS "schoolOnlyPaid",
+        COALESCE(sc."schoolTeacherExpense", 0) AS "schoolTeacherExpense",
         COALESCE(mc."managementExpense", 0) AS "managementExpense",
         COALESCE(mc."managementExpensePaid", 0) AS "managementExpensePaid",
         COALESCE(mc."managementExpensePayable", 0) AS "managementExpensePayable",
+        COALESCE(mc."outsideExpense", 0) AS "outsideExpense",
+        COALESCE(mc."outsidePaid", 0) AS "outsidePaid",
+        COALESCE(mc."otherExpense", 0) AS "otherExpense",
+        COALESCE(ct."companyTeacherExpense", 0) AS "companyTeacherExpense",
+        COALESCE(ap."annualPolicyExpense", 0) AS "annualPolicyExpense",
         COALESCE(inv."invoiceTotal", 0) AS "invoiceTotal",
         COALESCE(inv."invoiceIssued", 0) AS "invoiceIssued",
         COALESCE(inv."invoiceNone", 0) AS "invoiceNone"
@@ -341,6 +436,10 @@ export class AccountingSummaryService {
         ON sc."school_expense_id" = se.id AND sc."subject_id" = subject_row.id
       LEFT JOIN management_cost mc
         ON mc."school_expense_id" = se.id AND mc."subject_id" = subject_row.id
+      LEFT JOIN company_teacher ct
+        ON ct."school_expense_id" = se.id AND ct."subject_id" = subject_row.id
+      LEFT JOIN annual_policy ap
+        ON ap."school_expense_id" = se.id AND ap.subject_id = subject_row.id
       LEFT JOIN invoice inv
         ON inv."school_expense_id" = se.id AND inv."subject_id" = subject_row.id
       ${subjectRowsWhere}
@@ -434,11 +533,40 @@ export class AccountingSummaryService {
           const subjectInvoiceTotal = money(subjectRow.invoiceTotal);
           const subjectInvoiceIssued = money(subjectRow.invoiceIssued);
           const subjectInvoiceNone = money(subjectRow.invoiceNone);
+          const subjectStudentCount = money(subjectRow.studentCount);
+          const subjectTotalPeriods = money(subjectRow.totalPeriods);
+          const subjectSchoolOnlyExpense = money(subjectRow.schoolOnlyExpense);
+          const subjectSchoolOnlyPaid = money(subjectRow.schoolOnlyPaid);
+          const subjectOutsideExpense = money(subjectRow.outsideExpense);
+          const subjectOutsidePaid = money(subjectRow.outsidePaid);
+          const subjectSchoolTeacherExpense = money(
+            subjectRow.schoolTeacherExpense,
+          );
+          const subjectCompanyTeacherExpense = money(
+            subjectRow.companyTeacherExpense,
+          );
+          const subjectAnnualPolicyExpense = money(
+            subjectRow.annualPolicyExpense,
+          );
+          const subjectOtherExpense = money(subjectRow.otherExpense);
+          const subjectProfit = money(
+            subjectExpectedRevenue -
+              subjectSchoolOnlyExpense -
+              subjectOutsideExpense -
+              subjectSchoolTeacherExpense -
+              subjectCompanyTeacherExpense -
+              subjectAnnualPolicyExpense -
+              subjectOtherExpense,
+          );
 
           return {
             subject: {
               id: Number(subjectRow.subjectId),
               name: subjectRow.subjectName,
+            },
+            quantity: {
+              students: subjectStudentCount,
+              periods: subjectTotalPeriods,
             },
             revenue: {
               expected: subjectExpectedRevenue,
@@ -476,6 +604,21 @@ export class AccountingSummaryService {
                 subjectInvoiceTotal - subjectInvoiceIssued - subjectInvoiceNone,
               ),
               noInvoice: subjectInvoiceNone,
+            },
+            breakdown: {
+              school: {
+                expected: subjectSchoolOnlyExpense,
+                paid: subjectSchoolOnlyPaid,
+              },
+              outside: {
+                expected: subjectOutsideExpense,
+                paid: subjectOutsidePaid,
+              },
+              schoolTeacher: subjectSchoolTeacherExpense,
+              companyTeacher: subjectCompanyTeacherExpense,
+              annualPolicy: subjectAnnualPolicyExpense,
+              other: subjectOtherExpense,
+              profit: subjectProfit,
             },
           };
         }),
