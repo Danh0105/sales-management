@@ -21,6 +21,9 @@ interface CashflowRow {
   managementExpensePaid: number | string;
   managementExpensePayable: number | string;
   cashPolicy: number | string;
+  invoiceTotal?: number | string;
+  invoiceIssued?: number | string;
+  invoiceNone?: number | string;
 }
 
 const money = (value: unknown): number => {
@@ -115,6 +118,45 @@ export class AccountingSummaryService {
         ${subjectFilter}
         GROUP BY "school_expense_id"
       ),
+      -- Bảng Hóa Đơn: Thành tiền = Tổng thanh toán công ty của dòng = Số lượng
+      -- × (Đơn giá − GV − Thuế − CSVC của dòng Chi Trường cùng vị trí; "Không có
+      -- trong HĐ" giữ nguyên Đơn giá) — cùng công thức bảng Hóa Đơn ở kido-app.
+      -- Đã xuất = dòng đã khoá "Xuất hóa đơn" hoặc có số HĐ; dòng "Không xuất
+      -- HĐ" tính riêng.
+      invoice AS (
+        SELECT
+          r."school_expense_id",
+          COALESCE(SUM(a.amount), 0) AS "invoiceTotal",
+          COALESCE(SUM(a.amount) FILTER (
+            WHERE COALESCE(r."invoiceType", '') <> 'none'
+              AND (r."invoiceLocked" OR NULLIF(btrim(r."invoiceNumber"), '') IS NOT NULL)
+          ), 0) AS "invoiceIssued",
+          COALESCE(SUM(a.amount) FILTER (
+            WHERE r."invoiceType" = 'none'
+          ), 0) AS "invoiceNone"
+        FROM revenue_items r
+        LEFT JOIN LATERAL (
+          SELECT sei.teacher_unit_price, sei.tax_unit_price, sei.csvc, sei.payment_type
+          FROM school_expense_items sei
+          WHERE sei.school_expense_id = r.school_expense_id
+            AND sei.subject_id = r.subject_id
+            AND sei."rowIndex" = r."rowIndex"
+          ORDER BY sei.id
+          LIMIT 1
+        ) s ON true
+        CROSS JOIN LATERAL (
+          SELECT
+            (CASE WHEN COALESCE(r."studentCount", 0) > 0 THEN r."studentCount"
+                  ELSE COALESCE(r."totalPeriods", 0) END)
+            * COALESCE(r."monthsCount", 1)
+            * (CASE WHEN s.payment_type = 'not_in_contract' THEN COALESCE(r."unitPrice", 0)
+                    ELSE COALESCE(r."unitPrice", 0)
+                      - (COALESCE(s.teacher_unit_price, 0) + COALESCE(s.tax_unit_price, 0) + COALESCE(s.csvc, 0))
+               END) AS amount
+        ) a
+        ${subjectFilter.replace('"subject_id"', 'r."subject_id"')}
+        GROUP BY r."school_expense_id"
+      ),
       cash_policy AS (
         SELECT
           "school_expense_id",
@@ -140,7 +182,10 @@ export class AccountingSummaryService {
         COALESCE(mc."managementExpense", 0) AS "managementExpense",
         COALESCE(mc."managementExpensePaid", 0) AS "managementExpensePaid",
         COALESCE(mc."managementExpensePayable", 0) AS "managementExpensePayable",
-        COALESCE(cp."cashPolicy", 0) AS "cashPolicy"
+        COALESCE(cp."cashPolicy", 0) AS "cashPolicy",
+        COALESCE(inv."invoiceTotal", 0) AS "invoiceTotal",
+        COALESCE(inv."invoiceIssued", 0) AS "invoiceIssued",
+        COALESCE(inv."invoiceNone", 0) AS "invoiceNone"
       FROM school_expenses se
       INNER JOIN schools s ON s.id = se.school_id
       INNER JOIN expense_periods ep ON ep.id = se.period_id
@@ -148,6 +193,7 @@ export class AccountingSummaryService {
       LEFT JOIN school_cost sc ON sc."school_expense_id" = se.id
       LEFT JOIN management_cost mc ON mc."school_expense_id" = se.id
       LEFT JOIN cash_policy cp ON cp."school_expense_id" = se.id
+      LEFT JOIN invoice inv ON inv."school_expense_id" = se.id
       ${where}
       ORDER BY ep.year DESC, ep.month DESC, s.name ASC, se.id ASC
       `,
@@ -165,6 +211,9 @@ export class AccountingSummaryService {
       const managementExpensePaid = money(row.managementExpensePaid);
       const managementExpensePayable = money(row.managementExpensePayable);
       const cashPolicy = money(row.cashPolicy);
+      const invoiceTotal = money(row.invoiceTotal);
+      const invoiceIssued = money(row.invoiceIssued);
+      const invoiceNone = money(row.invoiceNone);
       const expectedExpense = sumMoney([schoolExpense, managementExpense]);
       const paidExpense = sumMoney([schoolExpensePaid, managementExpensePaid]);
       const payable = sumMoney([
@@ -206,6 +255,13 @@ export class AccountingSummaryService {
           },
         },
         cashPolicy,
+        // Tổng hợp bảng Hóa Đơn: Tổng tiền HĐ = Đã xuất + Chưa xuất + Không xuất HĐ.
+        invoice: {
+          total: invoiceTotal,
+          issued: invoiceIssued,
+          notIssued: money(invoiceTotal - invoiceIssued - invoiceNone),
+          noInvoice: invoiceNone,
+        },
         projectedBalance: money(expectedRevenue - expectedExpense),
         projectedBalanceAfterPolicy: money(
           expectedRevenue - expectedExpense - cashPolicy,
@@ -227,6 +283,10 @@ export class AccountingSummaryService {
     const paidExpense = sumMoney(items.map((item) => item.expense.paid));
     const payable = sumMoney(items.map((item) => item.expense.payable));
     const cashPolicy = sumMoney(items.map((item) => item.cashPolicy));
+    const invoiceTotal = sumMoney(items.map((item) => item.invoice.total));
+    const invoiceIssued = sumMoney(items.map((item) => item.invoice.issued));
+    const invoiceNotIssued = sumMoney(items.map((item) => item.invoice.notIssued));
+    const invoiceNone = sumMoney(items.map((item) => item.invoice.noInvoice));
 
     return {
       filters: {
@@ -244,6 +304,10 @@ export class AccountingSummaryService {
         paidExpense,
         payable,
         cashPolicy,
+        invoiceTotal,
+        invoiceIssued,
+        invoiceNotIssued,
+        invoiceNone,
         projectedBalance: money(expectedRevenue - expectedExpense),
         projectedBalanceAfterPolicy: money(
           expectedRevenue - expectedExpense - cashPolicy,

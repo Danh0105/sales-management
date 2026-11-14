@@ -30,6 +30,9 @@ describe('AccountingSummaryService', () => {
         managementExpensePaid: '150.00',
         managementExpensePayable: '50.00',
         cashPolicy: '25.00',
+        invoiceTotal: '600.00',
+        invoiceIssued: '350.00',
+        invoiceNone: '50.00',
       },
       {
         schoolExpenseId: '11',
@@ -74,6 +77,10 @@ describe('AccountingSummaryService', () => {
       paidExpense: 650,
       payable: 150,
       cashPolicy: 30,
+      invoiceTotal: 600,
+      invoiceIssued: 350,
+      invoiceNotIssued: 200,
+      invoiceNone: 50,
       projectedBalance: 400,
       projectedBalanceAfterPolicy: 370,
       cashBalance: 150,
@@ -88,7 +95,15 @@ describe('AccountingSummaryService', () => {
       projectedBalance: 300,
       projectedBalanceAfterPolicy: 275,
       cashBalance: 150,
+      // Đã xuất 350 + chưa xuất 200 + không xuất HĐ 50 = tổng 600.
+      invoice: { total: 600, issued: 350, notIssued: 200, noInvoice: 50 },
     });
+    // Trường chưa có dòng hóa đơn: các số hóa đơn bằng 0.
+    expect(result.items[1].invoice).toEqual({ total: 0, issued: 0, notIssued: 0, noInvoice: 0 });
+    // Hóa đơn tính theo dòng Chi Trường cùng vị trí, lọc môn theo bảng Doanh Thu.
+    const sql = query.mock.calls[0][0] as string;
+    expect(sql).toContain('sei."rowIndex" = r."rowIndex"');
+    expect(sql).toContain('WHERE r."subject_id" = $5');
   });
 
   it('trả tổng bằng 0 khi chưa có kỳ thu chi', async () => {
@@ -106,6 +121,10 @@ describe('AccountingSummaryService', () => {
       paidExpense: 0,
       payable: 0,
       cashPolicy: 0,
+      invoiceTotal: 0,
+      invoiceIssued: 0,
+      invoiceNotIssued: 0,
+      invoiceNone: 0,
       projectedBalance: 0,
       projectedBalanceAfterPolicy: 0,
       cashBalance: 0,
