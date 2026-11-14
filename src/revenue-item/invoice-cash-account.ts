@@ -10,6 +10,7 @@ export const INVOICE_CASH_ACCOUNTS = [
   { code: '1112', name: 'Tiền TK Sếp Khôi' },
   { code: '1113', name: 'Tiền mặt - Anh Trung' },
   { code: '1114', name: 'Tiền mặt - Cầm' },
+  { code: '1115', name: 'Tiền mặt - Nhung' },
   // 112 - Tiền gửi ngân hàng
   { code: '1121', name: 'TK Techcombank - ICHI' },
   { code: '1125', name: 'TK MB Bank - ICHI' },
@@ -20,6 +21,7 @@ export const INVOICE_CASH_ACCOUNTS = [
   { code: '11210', name: 'TK Vietinbank - Kido' },
   { code: '11211', name: 'TK Techcombank - Anh Việt' },
   { code: '11212', name: 'TK MB Bank - ST' },
+  { code: '11213', name: 'TK MB Bank - GATE' },
 ] as const;
 
 export const INVOICE_CASH_ACCOUNT_CODES: string[] = INVOICE_CASH_ACCOUNTS.map(
