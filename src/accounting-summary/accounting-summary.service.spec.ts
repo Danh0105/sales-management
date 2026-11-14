@@ -34,6 +34,7 @@ describe('AccountingSummaryService', () => {
           invoiceTotal: '600.00',
           invoiceIssued: '350.00',
           invoiceNone: '50.00',
+          invoiceCollected: '450.00',
         },
         {
           schoolExpenseId: '11',
@@ -83,6 +84,7 @@ describe('AccountingSummaryService', () => {
           invoiceTotal: '400.00',
           invoiceIssued: '250.00',
           invoiceNone: '50.00',
+          invoiceCollected: '300.00',
         },
       ]);
 
@@ -111,6 +113,7 @@ describe('AccountingSummaryService', () => {
       invoiceIssued: 350,
       invoiceNotIssued: 200,
       invoiceNone: 50,
+      invoiceCollected: 450,
       projectedBalance: 400,
       projectedBalanceAfterPolicy: 370,
       cashBalance: 150,
@@ -126,7 +129,7 @@ describe('AccountingSummaryService', () => {
       projectedBalanceAfterPolicy: 275,
       cashBalance: 150,
       // Đã xuất 350 + chưa xuất 200 + không xuất HĐ 50 = tổng 600.
-      invoice: { total: 600, issued: 350, notIssued: 200, noInvoice: 50 },
+      invoice: { total: 600, issued: 350, notIssued: 200, noInvoice: 50, collected: 450 },
       subjects: [
         {
           subject: { id: 7, name: 'STEM' },
@@ -137,7 +140,7 @@ describe('AccountingSummaryService', () => {
             paid: 325,
             payable: 75,
           },
-          invoice: { total: 400, issued: 250, notIssued: 100, noInvoice: 50 },
+          invoice: { total: 400, issued: 250, notIssued: 100, noInvoice: 50, collected: 300 },
           breakdown: {
             school: { expected: 240, paid: 200 },
             outside: { expected: 80, paid: 60 },
@@ -156,9 +159,17 @@ describe('AccountingSummaryService', () => {
       issued: 0,
       notIssued: 0,
       noInvoice: 0,
+      collected: 0,
     });
     // Hóa đơn tính theo dòng Chi Trường cùng vị trí, lọc môn theo bảng Doanh Thu.
     const sql = query.mock.calls[0][0] as string;
+    // Đã thu = Số tiền thu/chi của dòng Hóa Đơn chọn "Thu", ở cả bảng lẫn từng môn.
+    for (const call of query.mock.calls) {
+      expect(call[0]).toContain(
+        `SUM(r."invoiceCashAmount") FILTER (
+            WHERE r."invoiceCashDirection" = 'IN'`,
+      );
+    }
     expect(sql).toContain('sei."rowIndex" = r."rowIndex"');
     expect(sql).toContain('WHERE r."subject_id" = $5');
   });
@@ -182,6 +193,7 @@ describe('AccountingSummaryService', () => {
       invoiceIssued: 0,
       invoiceNotIssued: 0,
       invoiceNone: 0,
+      invoiceCollected: 0,
       projectedBalance: 0,
       projectedBalanceAfterPolicy: 0,
       cashBalance: 0,

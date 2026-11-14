@@ -24,6 +24,7 @@ interface CashflowRow {
   invoiceTotal?: number | string;
   invoiceIssued?: number | string;
   invoiceNone?: number | string;
+  invoiceCollected?: number | string;
 }
 
 interface SubjectCashflowRow {
@@ -42,6 +43,7 @@ interface SubjectCashflowRow {
   invoiceTotal: number | string;
   invoiceIssued: number | string;
   invoiceNone: number | string;
+  invoiceCollected?: number | string;
   studentCount: number | string;
   totalPeriods: number | string;
   schoolOnlyExpense: number | string;
@@ -170,7 +172,11 @@ export class AccountingSummaryService {
           ), 0) AS "invoiceIssued",
           COALESCE(SUM(a.amount) FILTER (
             WHERE r."invoiceType" = 'none'
-          ), 0) AS "invoiceNone"
+          ), 0) AS "invoiceNone",
+          -- Đã thu = Số tiền thu/chi của các dòng Hóa Đơn chọn "Thu" (như sổ thu chi).
+          COALESCE(SUM(r."invoiceCashAmount") FILTER (
+            WHERE r."invoiceCashDirection" = 'IN'
+          ), 0) AS "invoiceCollected"
         FROM revenue_items r
         LEFT JOIN LATERAL (
           SELECT sei.teacher_unit_price, sei.tax_unit_price, sei.csvc, sei.payment_type
@@ -222,7 +228,8 @@ export class AccountingSummaryService {
         COALESCE(cp."cashPolicy", 0) AS "cashPolicy",
         COALESCE(inv."invoiceTotal", 0) AS "invoiceTotal",
         COALESCE(inv."invoiceIssued", 0) AS "invoiceIssued",
-        COALESCE(inv."invoiceNone", 0) AS "invoiceNone"
+        COALESCE(inv."invoiceNone", 0) AS "invoiceNone",
+        COALESCE(inv."invoiceCollected", 0) AS "invoiceCollected"
       FROM school_expenses se
       INNER JOIN schools s ON s.id = se.school_id
       INNER JOIN expense_periods ep ON ep.id = se.period_id
@@ -368,7 +375,11 @@ export class AccountingSummaryService {
           ), 0) AS "invoiceIssued",
           COALESCE(SUM(a.amount) FILTER (
             WHERE r."invoiceType" = 'none'
-          ), 0) AS "invoiceNone"
+          ), 0) AS "invoiceNone",
+          -- Đã thu = Số tiền thu/chi của các dòng Hóa Đơn chọn "Thu" (như sổ thu chi).
+          COALESCE(SUM(r."invoiceCashAmount") FILTER (
+            WHERE r."invoiceCashDirection" = 'IN'
+          ), 0) AS "invoiceCollected"
         FROM revenue_items r
         LEFT JOIN LATERAL (
           SELECT sei.teacher_unit_price, sei.tax_unit_price, sei.csvc, sei.payment_type
@@ -416,7 +427,8 @@ export class AccountingSummaryService {
         COALESCE(ap."annualPolicyExpense", 0) AS "annualPolicyExpense",
         COALESCE(inv."invoiceTotal", 0) AS "invoiceTotal",
         COALESCE(inv."invoiceIssued", 0) AS "invoiceIssued",
-        COALESCE(inv."invoiceNone", 0) AS "invoiceNone"
+        COALESCE(inv."invoiceNone", 0) AS "invoiceNone",
+        COALESCE(inv."invoiceCollected", 0) AS "invoiceCollected"
       FROM school_expenses se
       INNER JOIN schools s ON s.id = se.school_id
       INNER JOIN expense_periods ep ON ep.id = se.period_id
@@ -471,6 +483,7 @@ export class AccountingSummaryService {
       const invoiceTotal = money(row.invoiceTotal);
       const invoiceIssued = money(row.invoiceIssued);
       const invoiceNone = money(row.invoiceNone);
+      const invoiceCollected = money(row.invoiceCollected);
       const expectedExpense = sumMoney([schoolExpense, managementExpense]);
       const paidExpense = sumMoney([schoolExpensePaid, managementExpensePaid]);
       const payable = sumMoney([
@@ -533,6 +546,7 @@ export class AccountingSummaryService {
           const subjectInvoiceTotal = money(subjectRow.invoiceTotal);
           const subjectInvoiceIssued = money(subjectRow.invoiceIssued);
           const subjectInvoiceNone = money(subjectRow.invoiceNone);
+          const subjectInvoiceCollected = money(subjectRow.invoiceCollected);
           const subjectStudentCount = money(subjectRow.studentCount);
           const subjectTotalPeriods = money(subjectRow.totalPeriods);
           const subjectSchoolOnlyExpense = money(subjectRow.schoolOnlyExpense);
@@ -604,6 +618,7 @@ export class AccountingSummaryService {
                 subjectInvoiceTotal - subjectInvoiceIssued - subjectInvoiceNone,
               ),
               noInvoice: subjectInvoiceNone,
+              collected: subjectInvoiceCollected,
             },
             breakdown: {
               school: {
@@ -628,6 +643,8 @@ export class AccountingSummaryService {
           issued: invoiceIssued,
           notIssued: money(invoiceTotal - invoiceIssued - invoiceNone),
           noInvoice: invoiceNone,
+          // Đã thu theo Hóa Đơn: Số tiền thu/chi của dòng chọn "Thu".
+          collected: invoiceCollected,
         },
         projectedBalance: money(expectedRevenue - expectedExpense),
         projectedBalanceAfterPolicy: money(
@@ -656,6 +673,9 @@ export class AccountingSummaryService {
       items.map((item) => item.invoice.notIssued),
     );
     const invoiceNone = sumMoney(items.map((item) => item.invoice.noInvoice));
+    const invoiceCollected = sumMoney(
+      items.map((item) => item.invoice.collected),
+    );
 
     return {
       filters: {
@@ -677,6 +697,7 @@ export class AccountingSummaryService {
         invoiceIssued,
         invoiceNotIssued,
         invoiceNone,
+        invoiceCollected,
         projectedBalance: money(expectedRevenue - expectedExpense),
         projectedBalanceAfterPolicy: money(
           expectedRevenue - expectedExpense - cashPolicy,
