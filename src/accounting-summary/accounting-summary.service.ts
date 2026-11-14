@@ -26,6 +26,24 @@ interface CashflowRow {
   invoiceNone?: number | string;
 }
 
+interface SubjectCashflowRow {
+  schoolExpenseId: number | string;
+  subjectId: number | string;
+  subjectName: string;
+  expectedRevenue: number | string;
+  collectedRevenue: number | string;
+  receivable: number | string;
+  schoolExpense: number | string;
+  schoolExpensePaid: number | string;
+  schoolExpensePayable: number | string;
+  managementExpense: number | string;
+  managementExpensePaid: number | string;
+  managementExpensePayable: number | string;
+  invoiceTotal: number | string;
+  invoiceIssued: number | string;
+  invoiceNone: number | string;
+}
+
 const money = (value: unknown): number => {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
@@ -71,6 +89,15 @@ export class AccountingSummaryService {
 
     const where = schoolExpenseFilters.length
       ? `WHERE ${schoolExpenseFilters.join(' AND ')}`
+      : '';
+    const subjectWhere = [
+      ...schoolExpenseFilters,
+      ...(query.subjectId !== undefined
+        ? [`subject_row.id = $${parameters.length}`]
+        : []),
+    ];
+    const subjectRowsWhere = subjectWhere.length
+      ? `WHERE ${subjectWhere.join(' AND ')}`
       : '';
 
     // Mỗi bảng được gom riêng trước khi JOIN để không nhân chéo các dòng thu/chi.
@@ -200,6 +227,137 @@ export class AccountingSummaryService {
       parameters,
     );
 
+    // Breakdown theo môn dùng đúng các bảng nguồn có subject_id. Chính sách
+    // tiền mặt không có môn nên vẫn nằm ở cấp phiếu; frontend sẽ đưa phần chênh
+    // đó vào dòng "Khoản chung / chưa phân môn", không tự phân bổ.
+    const subjectRows = await this.dataSource.query<SubjectCashflowRow[]>(
+      `
+      WITH revenue AS (
+        SELECT
+          "school_expense_id",
+          "subject_id",
+          COALESCE(SUM("invoiceAmount"), 0) AS "expectedRevenue",
+          COALESCE(SUM("paidAmount"), 0) AS "collectedRevenue",
+          COALESCE(SUM("remainingAmount"), 0) AS receivable
+        FROM revenue_items
+        GROUP BY "school_expense_id", "subject_id"
+      ),
+      school_cost AS (
+        SELECT
+          "school_expense_id",
+          "subject_id",
+          COALESCE(SUM(expected), 0) AS "schoolExpense",
+          COALESCE(SUM(paid), 0) AS "schoolExpensePaid",
+          COALESCE(SUM(payable), 0) AS "schoolExpensePayable"
+        FROM (
+          SELECT "school_expense_id", "subject_id",
+            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable
+          FROM school_expense_items
+          UNION ALL
+          SELECT school_expense_id AS "school_expense_id", subject_id AS "subject_id",
+            amount AS expected,
+            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN amount ELSE 0 END AS paid,
+            CASE WHEN expense_date IS NOT NULL AND cash_account IS NOT NULL THEN 0 ELSE amount END AS payable
+          FROM school_teacher_expense_items
+        ) school_rows
+        GROUP BY "school_expense_id", "subject_id"
+      ),
+      management_cost AS (
+        SELECT
+          "school_expense_id",
+          "subject_id",
+          COALESCE(SUM("totalOutside"), 0) AS "managementExpense",
+          COALESCE(SUM("paidAmount"), 0) AS "managementExpensePaid",
+          COALESCE(SUM(remaining), 0) AS "managementExpensePayable"
+        FROM management_expense_items
+        GROUP BY "school_expense_id", "subject_id"
+      ),
+      invoice AS (
+        SELECT
+          r."school_expense_id",
+          r."subject_id",
+          COALESCE(SUM(a.amount), 0) AS "invoiceTotal",
+          COALESCE(SUM(a.amount) FILTER (
+            WHERE COALESCE(r."invoiceType", '') <> 'none'
+              AND (r."invoiceLocked" OR NULLIF(btrim(r."invoiceNumber"), '') IS NOT NULL)
+          ), 0) AS "invoiceIssued",
+          COALESCE(SUM(a.amount) FILTER (
+            WHERE r."invoiceType" = 'none'
+          ), 0) AS "invoiceNone"
+        FROM revenue_items r
+        LEFT JOIN LATERAL (
+          SELECT sei.teacher_unit_price, sei.tax_unit_price, sei.csvc, sei.payment_type
+          FROM school_expense_items sei
+          WHERE sei.school_expense_id = r.school_expense_id
+            AND sei.subject_id = r.subject_id
+            AND sei."rowIndex" = r."rowIndex"
+          ORDER BY sei.id
+          LIMIT 1
+        ) s ON true
+        CROSS JOIN LATERAL (
+          SELECT
+            (CASE WHEN COALESCE(r."studentCount", 0) > 0 THEN r."studentCount"
+                  ELSE COALESCE(r."totalPeriods", 0) END)
+            * COALESCE(r."monthsCount", 1)
+            * (CASE WHEN s.payment_type = 'not_in_contract' THEN COALESCE(r."unitPrice", 0)
+                    ELSE COALESCE(r."unitPrice", 0)
+                      - (COALESCE(s.teacher_unit_price, 0) + COALESCE(s.tax_unit_price, 0) + COALESCE(s.csvc, 0))
+               END) AS amount
+        ) a
+        GROUP BY r."school_expense_id", r."subject_id"
+      )
+      SELECT
+        se.id AS "schoolExpenseId",
+        subject_row.id AS "subjectId",
+        subject_row.name AS "subjectName",
+        COALESCE(r."expectedRevenue", 0) AS "expectedRevenue",
+        COALESCE(r."collectedRevenue", 0) AS "collectedRevenue",
+        COALESCE(r.receivable, 0) AS receivable,
+        COALESCE(sc."schoolExpense", 0) AS "schoolExpense",
+        COALESCE(sc."schoolExpensePaid", 0) AS "schoolExpensePaid",
+        COALESCE(sc."schoolExpensePayable", 0) AS "schoolExpensePayable",
+        COALESCE(mc."managementExpense", 0) AS "managementExpense",
+        COALESCE(mc."managementExpensePaid", 0) AS "managementExpensePaid",
+        COALESCE(mc."managementExpensePayable", 0) AS "managementExpensePayable",
+        COALESCE(inv."invoiceTotal", 0) AS "invoiceTotal",
+        COALESCE(inv."invoiceIssued", 0) AS "invoiceIssued",
+        COALESCE(inv."invoiceNone", 0) AS "invoiceNone"
+      FROM school_expenses se
+      INNER JOIN schools s ON s.id = se.school_id
+      INNER JOIN expense_periods ep ON ep.id = se.period_id
+      INNER JOIN subjects subject_row
+        ON subject_row.school_id = s.id
+       AND (
+         subject_row.school_year IS NULL
+         OR subject_row.school_year = CONCAT(
+           CASE WHEN ep.month >= 8 THEN ep.year ELSE ep.year - 1 END,
+           '-',
+           CASE WHEN ep.month >= 8 THEN ep.year + 1 ELSE ep.year END
+         )
+       )
+      LEFT JOIN revenue r
+        ON r."school_expense_id" = se.id AND r."subject_id" = subject_row.id
+      LEFT JOIN school_cost sc
+        ON sc."school_expense_id" = se.id AND sc."subject_id" = subject_row.id
+      LEFT JOIN management_cost mc
+        ON mc."school_expense_id" = se.id AND mc."subject_id" = subject_row.id
+      LEFT JOIN invoice inv
+        ON inv."school_expense_id" = se.id AND inv."subject_id" = subject_row.id
+      ${subjectRowsWhere}
+      ORDER BY ep.year DESC, ep.month DESC, s.name ASC, subject_row.name ASC, subject_row.id ASC
+      `,
+      parameters,
+    );
+
+    const subjectsBySchoolExpense = new Map<number, SubjectCashflowRow[]>();
+    subjectRows.forEach((row) => {
+      const schoolExpenseId = Number(row.schoolExpenseId);
+      subjectsBySchoolExpense.set(schoolExpenseId, [
+        ...(subjectsBySchoolExpense.get(schoolExpenseId) ?? []),
+        row,
+      ]);
+    });
+
     const items = rows.map((row) => {
       const expectedRevenue = money(row.expectedRevenue);
       const collectedRevenue = money(row.collectedRevenue);
@@ -255,6 +413,72 @@ export class AccountingSummaryService {
           },
         },
         cashPolicy,
+        subjects: (
+          subjectsBySchoolExpense.get(Number(row.schoolExpenseId)) ?? []
+        ).map((subjectRow) => {
+          const subjectExpectedRevenue = money(subjectRow.expectedRevenue);
+          const subjectCollectedRevenue = money(subjectRow.collectedRevenue);
+          const subjectReceivable = money(subjectRow.receivable);
+          const subjectSchoolExpense = money(subjectRow.schoolExpense);
+          const subjectSchoolExpensePaid = money(subjectRow.schoolExpensePaid);
+          const subjectSchoolExpensePayable = money(
+            subjectRow.schoolExpensePayable,
+          );
+          const subjectManagementExpense = money(subjectRow.managementExpense);
+          const subjectManagementExpensePaid = money(
+            subjectRow.managementExpensePaid,
+          );
+          const subjectManagementExpensePayable = money(
+            subjectRow.managementExpensePayable,
+          );
+          const subjectInvoiceTotal = money(subjectRow.invoiceTotal);
+          const subjectInvoiceIssued = money(subjectRow.invoiceIssued);
+          const subjectInvoiceNone = money(subjectRow.invoiceNone);
+
+          return {
+            subject: {
+              id: Number(subjectRow.subjectId),
+              name: subjectRow.subjectName,
+            },
+            revenue: {
+              expected: subjectExpectedRevenue,
+              collected: subjectCollectedRevenue,
+              receivable: subjectReceivable,
+            },
+            expense: {
+              expected: sumMoney([
+                subjectSchoolExpense,
+                subjectManagementExpense,
+              ]),
+              paid: sumMoney([
+                subjectSchoolExpensePaid,
+                subjectManagementExpensePaid,
+              ]),
+              payable: sumMoney([
+                subjectSchoolExpensePayable,
+                subjectManagementExpensePayable,
+              ]),
+              school: {
+                expected: subjectSchoolExpense,
+                paid: subjectSchoolExpensePaid,
+                payable: subjectSchoolExpensePayable,
+              },
+              management: {
+                expected: subjectManagementExpense,
+                paid: subjectManagementExpensePaid,
+                payable: subjectManagementExpensePayable,
+              },
+            },
+            invoice: {
+              total: subjectInvoiceTotal,
+              issued: subjectInvoiceIssued,
+              notIssued: money(
+                subjectInvoiceTotal - subjectInvoiceIssued - subjectInvoiceNone,
+              ),
+              noInvoice: subjectInvoiceNone,
+            },
+          };
+        }),
         // Tổng hợp bảng Hóa Đơn: Tổng tiền HĐ = Đã xuất + Chưa xuất + Không xuất HĐ.
         invoice: {
           total: invoiceTotal,
@@ -285,7 +509,9 @@ export class AccountingSummaryService {
     const cashPolicy = sumMoney(items.map((item) => item.cashPolicy));
     const invoiceTotal = sumMoney(items.map((item) => item.invoice.total));
     const invoiceIssued = sumMoney(items.map((item) => item.invoice.issued));
-    const invoiceNotIssued = sumMoney(items.map((item) => item.invoice.notIssued));
+    const invoiceNotIssued = sumMoney(
+      items.map((item) => item.invoice.notIssued),
+    );
     const invoiceNone = sumMoney(items.map((item) => item.invoice.noInvoice));
 
     return {

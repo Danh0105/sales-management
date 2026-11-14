@@ -10,51 +10,71 @@ describe('AccountingSummaryService', () => {
   beforeEach(() => query.mockReset());
 
   it('tổng hợp thu, chi, công nợ và số dư theo từng trường/kỳ', async () => {
-    query.mockResolvedValue([
-      {
-        schoolExpenseId: '10',
-        schoolId: '2',
-        schoolName: 'Trường A',
-        periodId: '20',
-        periodName: 'Tháng 10/2026',
-        month: '10',
-        year: '2026',
-        finalized: true,
-        expectedRevenue: '1000.00',
-        collectedRevenue: '700.00',
-        receivable: '300.00',
-        schoolExpense: '500.00',
-        schoolExpensePaid: '400.00',
-        schoolExpensePayable: '100.00',
-        managementExpense: '200.00',
-        managementExpensePaid: '150.00',
-        managementExpensePayable: '50.00',
-        cashPolicy: '25.00',
-        invoiceTotal: '600.00',
-        invoiceIssued: '350.00',
-        invoiceNone: '50.00',
-      },
-      {
-        schoolExpenseId: '11',
-        schoolId: '3',
-        schoolName: 'Trường B',
-        periodId: '21',
-        periodName: null,
-        month: '10',
-        year: '2026',
-        finalized: false,
-        expectedRevenue: '200.00',
-        collectedRevenue: '100.00',
-        receivable: '100.00',
-        schoolExpense: '100.00',
-        schoolExpensePaid: '100.00',
-        schoolExpensePayable: '0.00',
-        managementExpense: '0.00',
-        managementExpensePaid: '0.00',
-        managementExpensePayable: '0.00',
-        cashPolicy: '5.00',
-      },
-    ]);
+    query
+      .mockResolvedValueOnce([
+        {
+          schoolExpenseId: '10',
+          schoolId: '2',
+          schoolName: 'Trường A',
+          periodId: '20',
+          periodName: 'Tháng 10/2026',
+          month: '10',
+          year: '2026',
+          finalized: true,
+          expectedRevenue: '1000.00',
+          collectedRevenue: '700.00',
+          receivable: '300.00',
+          schoolExpense: '500.00',
+          schoolExpensePaid: '400.00',
+          schoolExpensePayable: '100.00',
+          managementExpense: '200.00',
+          managementExpensePaid: '150.00',
+          managementExpensePayable: '50.00',
+          cashPolicy: '25.00',
+          invoiceTotal: '600.00',
+          invoiceIssued: '350.00',
+          invoiceNone: '50.00',
+        },
+        {
+          schoolExpenseId: '11',
+          schoolId: '3',
+          schoolName: 'Trường B',
+          periodId: '21',
+          periodName: null,
+          month: '10',
+          year: '2026',
+          finalized: false,
+          expectedRevenue: '200.00',
+          collectedRevenue: '100.00',
+          receivable: '100.00',
+          schoolExpense: '100.00',
+          schoolExpensePaid: '100.00',
+          schoolExpensePayable: '0.00',
+          managementExpense: '0.00',
+          managementExpensePaid: '0.00',
+          managementExpensePayable: '0.00',
+          cashPolicy: '5.00',
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          schoolExpenseId: '10',
+          subjectId: '7',
+          subjectName: 'STEM',
+          expectedRevenue: '600.00',
+          collectedRevenue: '500.00',
+          receivable: '100.00',
+          schoolExpense: '300.00',
+          schoolExpensePaid: '250.00',
+          schoolExpensePayable: '50.00',
+          managementExpense: '100.00',
+          managementExpensePaid: '75.00',
+          managementExpensePayable: '25.00',
+          invoiceTotal: '400.00',
+          invoiceIssued: '250.00',
+          invoiceNone: '50.00',
+        },
+      ]);
 
     const result = await service.getCashflowSummary({
       year: 2026,
@@ -97,9 +117,26 @@ describe('AccountingSummaryService', () => {
       cashBalance: 150,
       // Đã xuất 350 + chưa xuất 200 + không xuất HĐ 50 = tổng 600.
       invoice: { total: 600, issued: 350, notIssued: 200, noInvoice: 50 },
+      subjects: [
+        {
+          subject: { id: 7, name: 'STEM' },
+          revenue: { expected: 600, collected: 500, receivable: 100 },
+          expense: {
+            expected: 400,
+            paid: 325,
+            payable: 75,
+          },
+          invoice: { total: 400, issued: 250, notIssued: 100, noInvoice: 50 },
+        },
+      ],
     });
     // Trường chưa có dòng hóa đơn: các số hóa đơn bằng 0.
-    expect(result.items[1].invoice).toEqual({ total: 0, issued: 0, notIssued: 0, noInvoice: 0 });
+    expect(result.items[1].invoice).toEqual({
+      total: 0,
+      issued: 0,
+      notIssued: 0,
+      noInvoice: 0,
+    });
     // Hóa đơn tính theo dòng Chi Trường cùng vị trí, lọc môn theo bảng Doanh Thu.
     const sql = query.mock.calls[0][0] as string;
     expect(sql).toContain('sei."rowIndex" = r."rowIndex"');
@@ -107,7 +144,7 @@ describe('AccountingSummaryService', () => {
   });
 
   it('trả tổng bằng 0 khi chưa có kỳ thu chi', async () => {
-    query.mockResolvedValue([]);
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
     const result = await service.getCashflowSummary({});
 
