@@ -12,11 +12,13 @@ import {
   IsDateString,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsPositive,
   IsString,
   Matches,
   MaxLength,
+  Min,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -113,6 +115,32 @@ export class MonthlyExpenseItemDto {
   schoolTeacherId?: number;
 }
 
+/**
+ * Đề xuất chi Năm cho trường: một dòng hỗ trợ tiền mặt / thiết bị trong chính
+ * sách đã duyệt mà kinh doanh tích, kèm số tiền đề xuất (≤ phần còn lại).
+ */
+export class PolicySupportItemDto {
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  policyId!: number;
+
+  @IsIn(['CASH', 'EQUIPMENT'], { message: 'Loại dòng chính sách không hợp lệ' })
+  supportType!: 'CASH' | 'EQUIPMENT';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  itemIndex!: number;
+
+  @Type(() => Number)
+  @IsNumber({}, { message: 'Số tiền không hợp lệ' })
+  @IsPositive({ message: 'Số tiền phải lớn hơn 0' })
+  amount!: number;
+}
+
+export const MAX_POLICY_SUPPORT_ITEMS = 100;
+
 export const MAX_MONTHLY_EXPENSE_ITEMS = 50;
 
 export class CreateExpenseRequestDto {
@@ -188,6 +216,16 @@ export class CreateExpenseRequestDto {
   })
   @ValidateNested({ each: true })
   monthlyItems?: MonthlyExpenseItemDto[];
+
+  /** Đề xuất chi Năm cho trường: dòng hỗ trợ đã tích (multipart gửi chuỗi JSON). */
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArrayOf(PolicySupportItemDto)({ value }))
+  @IsArray()
+  @ArrayMaxSize(MAX_POLICY_SUPPORT_ITEMS, {
+    message: `Tối đa ${MAX_POLICY_SUPPORT_ITEMS} dòng chính sách`,
+  })
+  @ValidateNested({ each: true })
+  policySupportItems?: PolicySupportItemDto[];
 
   @Type(() => Number)
   @IsOptional()

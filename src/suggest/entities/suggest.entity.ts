@@ -16,6 +16,7 @@ import { SuggestStockInOrder } from './suggest-stock-in-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 import { SuggestAssignment } from './suggest-assignment.entity';
 import { SuggestMonthlyItem } from './suggest-monthly-item.entity';
+import { SuggestPolicySupportItem } from './suggest-policy-support-item.entity';
 import type { CashflowSource } from '../cashflow-sources';
 
 /** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
@@ -356,4 +357,8 @@ export class Suggest {
      */
     @OneToMany(() => SuggestMonthlyItem, (item) => item.suggest)
     monthlyItems?: SuggestMonthlyItem[];
+
+    /** Đề xuất chi Năm cho trường: các dòng hỗ trợ trong chính sách đã tích. */
+    @OneToMany(() => SuggestPolicySupportItem, (item) => item.suggest)
+    policySupportItems?: SuggestPolicySupportItem[];
 }

@@ -11,6 +11,7 @@ import { ExpenseRole } from './constants/expense-roles';
 import { Suggest } from './entities/suggest.entity';
 import { SuggestMonthlyItem } from './entities/suggest-monthly-item.entity';
 import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
+import { SuggestPolicySupportItem } from './entities/suggest-policy-support-item.entity';
 import { ExpenseAction } from './enums/expense-action.enum';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 import { SuggestType } from './enums/suggest-type.enum';
@@ -422,28 +423,96 @@ describe('Đề xuất chi Năm cho trường cần chính sách có tiền mặ
   const policy = (data: object) => [
     { policy_id: 1, subject_id: 9, subject_name: 'Tin học', data },
   ];
-
-  it.each([
-    ['không có hỗ trợ', { httienmat: [], htthietbi: [] }, false],
-    ['hỗ trợ tiền mặt 0 đồng', { httienmat: [{ money: 0 }], htthietbi: [] }, false],
-    ['có tiền mặt', { httienmat: [{ money: 1000 }], htthietbi: [] }, true],
-    ['chỉ có thiết bị', { httienmat: [], htthietbi: [{ qty: 2, price: 500 }] }, true],
-  ])('%s', async (_name, data, allowed) => {
+  // Tin học: tiền mặt 9 tr (thực tế 9 tr), thiết bị 2 × 3 tr = 6 tr.
+  const fullPolicy = {
+    httienmat: [{ money: 0 }, { type: 'Chính sách', money: 9_000_000, realStudents: 1000, months: 9 }],
+    htthietbi: [{ category: 'Tablet', qty: 2, price: 3_000_000 }],
+  };
+  const setup = (
+    data: object,
+    usage: { policy_id: number; support_type: string; item_index: number; spent: string; held: string }[] = [],
+  ) => {
     const manager = makeManager({
       findOne: byEntity(new Map<unknown, unknown>([[School, school]])),
-      query: (sql) => (sql.includes('FROM policy p') ? policy(data) : undefined),
+      query: (sql) =>
+        sql.includes('FROM policy p')
+          ? policy(data)
+          : sql.includes('FROM suggest_policy_support_items')
+            ? usage
+            : undefined,
     });
-    const service = makeService(manager);
-    const run = service.create(
-      { ...body, schoolId: 445, schoolYear: '2099-2100' } as never,
+    return { manager, service: makeService(manager) };
+  };
+  const create = (service: SuggestService, items?: object[]) =>
+    service.create(
+      { ...body, schoolId: 445, schoolYear: '2099-2100', policySupportItems: items } as never,
       undefined,
       sales,
     );
-    if (allowed) {
-      await expect(run).resolves.toEqual({ id: 125 });
-    } else {
-      await expect(run).rejects.toThrow('không có hỗ trợ tiền mặt hoặc thiết bị');
-    }
+
+  it.each([
+    ['không có hỗ trợ', { httienmat: [], htthietbi: [] }],
+    ['hỗ trợ tiền mặt 0 đồng', { httienmat: [{ money: 0 }], htthietbi: [] }],
+  ])('%s → không tạo được', async (_name, data) => {
+    const { service } = setup(data);
+    await expect(
+      create(service, [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 1 }]),
+    ).rejects.toThrow('không có hỗ trợ tiền mặt hoặc thiết bị');
+  });
+
+  it('phải tích ít nhất một dòng', async () => {
+    const { service, manager } = setup(fullPolicy);
+    await expect(create(service, [])).rejects.toThrow('Tích ít nhất một dòng');
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('tích một dòng tiền mặt + một dòng thiết bị: lưu số tiền và ảnh chụp dòng', async () => {
+    const { service, manager } = setup(fullPolicy);
+    await expect(
+      create(service, [
+        { policyId: 1, supportType: 'CASH', itemIndex: 1, amount: 4_000_000 },
+        { policyId: 1, supportType: 'EQUIPMENT', itemIndex: 0, amount: 6_000_000 },
+      ]),
+    ).resolves.toEqual({ id: 125 });
+    const saved = manager.save.mock.calls.find(([entity]) => entity === SuggestPolicySupportItem)![1];
+    expect(saved).toEqual([
+      expect.objectContaining({
+        suggestId: 125, policyId: 1, subjectId: 9, supportType: 'CASH', itemIndex: 1,
+        label: 'Tiền mặt · Chính sách', policyAmount: 9_000_000, amount: 4_000_000, spentAmount: null,
+      }),
+      expect.objectContaining({
+        supportType: 'EQUIPMENT', itemIndex: 0, label: 'Thiết bị · Tablet', policyAmount: 6_000_000, amount: 6_000_000,
+      }),
+    ]);
+  });
+
+  it('vượt phần còn lại (chính sách − đã chi − đang đề xuất) thì từ chối', async () => {
+    const { service, manager } = setup(fullPolicy, [
+      { policy_id: 1, support_type: 'CASH', item_index: 1, spent: '5000000', held: '3000000' },
+    ]);
+    await expect(
+      create(service, [{ policyId: 1, supportType: 'CASH', itemIndex: 1, amount: 1_000_001 }]),
+    ).rejects.toThrow('tối đa 1.000.000');
+    await expect(
+      create(service, [{ policyId: 1, supportType: 'CASH', itemIndex: 1, amount: 1_000_000 }]),
+    ).resolves.toEqual({ id: 125 });
+    expect(manager.query.mock.calls.some(([sql]) => String(sql).includes('pg_advisory_xact_lock'))).toBe(true);
+  });
+
+  it.each([
+    ['dòng không có trong chính sách', [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 1 }], 'không còn trong chính sách'],
+    ['chính sách của trường khác', [{ policyId: 99, supportType: 'CASH', itemIndex: 1, amount: 1 }], 'không còn trong chính sách'],
+    [
+      'tích trùng dòng',
+      [
+        { policyId: 1, supportType: 'CASH', itemIndex: 1, amount: 1 },
+        { policyId: 1, supportType: 'CASH', itemIndex: 1, amount: 2 },
+      ],
+      'trùng',
+    ],
+  ])('%s → từ chối', async (_name, items, message) => {
+    const { service } = setup(fullPolicy);
+    await expect(create(service, items)).rejects.toThrow(message);
   });
 
   it('đề xuất phường/xã không kiểm chính sách', async () => {
@@ -455,6 +524,63 @@ describe('Đề xuất chi Năm cho trường cần chính sách có tiền mặ
       service.create({ ...body, wardId: 12 } as never, undefined, sales),
     ).resolves.toEqual({ id: 125 });
     expect(manager.query).not.toHaveBeenCalled();
+  });
+
+  it('hoàn thành (Đã chi) → Đã chi của từng dòng = đúng số kinh doanh nhập', async () => {
+    const manager = makeManager({});
+    manager.find.mockResolvedValue([
+      { id: 1, amount: '4000000.00', spentAmount: null, subjectName: 'Tin học', label: 'Tiền mặt · Chính sách' },
+      { id: 2, amount: '6000000.00', spentAmount: null, subjectName: 'Tin học', label: 'Thiết bị · Tablet' },
+    ]);
+    const service = makeService(manager);
+    const s: any = { id: 125, isMonthlyExpense: false };
+    let log: any;
+    Object.assign(service as object, {
+      saveExpenseAttachments: jest.fn(),
+      expenseTransition: jest.fn(async (opts) => {
+        opts.mutate?.(s);
+        await opts.extra?.(manager, s);
+        log = await opts.logData?.(manager, s);
+        return s;
+      }),
+    });
+    await service.confirmSpent(125, sales);
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestPolicySupportItem,
+      { id: 1 },
+      { spentAmount: 4_000_000, spentAt: expect.any(Date) },
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestPolicySupportItem,
+      { id: 2 },
+      { spentAmount: 6_000_000, spentAt: expect.any(Date) },
+    );
+    expect(log.policySupportSpent.total).toBe(10_000_000);
+  });
+
+  it('sửa lệnh chi Chi Năm (kể cả sau khi đã chi) → bỏ Đã chi đã ghi để ghi lại', async () => {
+    const manager = makeManager({});
+    manager.findOne.mockResolvedValue({ id: 9, amount: 1 });
+    const service = makeService(manager);
+    const s: any = { id: 125, isMonthlyExpense: false, status: SuggestStatus.SPENT };
+    Object.assign(service as object, {
+      repo: { findOne: jest.fn().mockResolvedValue(s) },
+      expenseTransition: jest.fn(async (opts) => {
+        opts.mutate?.(s);
+        await opts.extra?.(manager, s);
+        return s;
+      }),
+    });
+    await service.editExpensePaymentOrder(
+      125,
+      { amount: 1000, paymentMethod: 'CASH' } as never,
+      { id: 22, roles: [ExpenseRole.DEBT_ACCOUNTANT] } as never,
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      SuggestPolicySupportItem,
+      { suggestId: 125 },
+      { spentAmount: null, spentAt: null },
+    );
   });
 });
 
@@ -493,6 +619,8 @@ describe('Bảng hỗ trợ trong chính sách', () => {
         },
       ]),
     };
+    manager.query.mockResolvedValueOnce(await manager.query()).mockResolvedValueOnce([]);
+    manager.query.mockClear();
     const support = await loadPolicySupport(manager as never, 445, '2099-2100');
     expect(support.hasCash).toBe(true);
     expect(support.hasEquipment).toBe(true);
@@ -816,5 +944,41 @@ describe('Năm học của kỳ tháng', () => {
     [{ month: 13, year: 2026 }, null],
   ])('%j → %s', (input, expected) => {
     expect(schoolYearOfPeriod(input)).toBe(expected);
+  });
+});
+
+describe('Đã chi / còn lại của từng dòng chính sách', () => {
+  it('cộng Đã chi + đang đề xuất theo chính sách + loại + vị trí dòng; bỏ qua đề xuất đang sửa', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          policy_id: 1,
+          subject_id: 9,
+          subject_name: 'Tin học',
+          data: {
+            httienmat: [{ money: 0 }, { type: 'CS', money: 9_000_000, realStudents: 1000, months: 9 }],
+            htthietbi: [{ category: 'Tablet', qty: 2, price: 3_000_000 }],
+          },
+        },
+      ])
+      .mockResolvedValueOnce([
+        { policy_id: 1, support_type: 'CASH', item_index: 1, spent: '2000000', held: '1500000' },
+        { policy_id: 1, support_type: 'EQUIPMENT', item_index: 0, spent: '7000000', held: '0' },
+      ]);
+    const support = await loadPolicySupport({ query } as never, 445, '2099-2100', 77);
+    expect(support.cash[0]).toEqual(
+      expect.objectContaining({
+        rowKey: '1:CASH:1', itemIndex: 1, capAmount: 9_000_000,
+        spentAmount: 2_000_000, heldAmount: 1_500_000, remainingAmount: 5_500_000,
+      }),
+    );
+    // Đã chi vượt mốc thì còn lại = 0 (không âm).
+    expect(support.equipment[0]).toEqual(
+      expect.objectContaining({ rowKey: '1:EQUIPMENT:0', capAmount: 6_000_000, remainingAmount: 0 }),
+    );
+    expect(support.spentTotal).toBe(9_000_000);
+    expect(support.remainingTotal).toBe(5_500_000);
+    expect(query.mock.calls[1][1]).toEqual([[1], ['SPENT', 'REPAIR_ACCEPTED', 'REJECTED', 'WITHDRAWN'], 77]);
   });
 });

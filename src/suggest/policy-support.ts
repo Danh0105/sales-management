@@ -6,7 +6,23 @@ import type { EntityManager } from 'typeorm';
  * được Đề xuất chi Năm cho trường khi một trong hai có số tiền (16/11/2026).
  */
 
-export interface PolicyCashSupportRow {
+/** Đã chi / đang đề xuất / còn lại của một dòng hỗ trợ (theo các đề xuất chi Năm đã tích dòng đó). */
+export interface PolicySupportUsage {
+  /** `policyId:CASH|EQUIPMENT:itemIndex`. */
+  rowKey: string;
+  /** Vị trí dòng trong `httienmat` / `htthietbi`. */
+  itemIndex: number;
+  /** Mốc tối đa đề xuất được: tiền mặt = Thành tiền thực tế, thiết bị = Thành tiền. */
+  capAmount: number;
+  /** Đề xuất đã hoàn thành ghi vào. */
+  spentAmount: number;
+  /** Đề xuất khác chưa xong đang giữ. */
+  heldAmount: number;
+  /** capAmount − spentAmount − heldAmount (không âm). */
+  remainingAmount: number;
+}
+
+export interface PolicyCashSupportRow extends PolicySupportUsage {
   policyId: number;
   subjectId: number;
   subjectName: string | null;
@@ -23,7 +39,7 @@ export interface PolicyCashSupportRow {
   actualAmount: number;
 }
 
-export interface PolicyEquipmentSupportRow {
+export interface PolicyEquipmentSupportRow extends PolicySupportUsage {
   policyId: number;
   subjectId: number;
   subjectName: string | null;
@@ -45,7 +61,27 @@ export interface PolicySupport {
   equipmentTotal: number;
   hasCash: boolean;
   hasEquipment: boolean;
+  /** Tổng Đã chi / Còn lại của mọi dòng (tiền mặt + thiết bị). */
+  spentTotal: number;
+  remainingTotal: number;
 }
+
+export const policySupportRowKey = (
+  policyId: number,
+  type: 'CASH' | 'EQUIPMENT',
+  itemIndex: number,
+) => `${policyId}:${type}:${itemIndex}`;
+
+/**
+ * Đề xuất ở các trạng thái này không còn giữ phần của dòng: đã hoàn thành
+ * (phần đã ghi nằm ở `spent_amount`), bị từ chối hoặc đã rút.
+ */
+export const POLICY_SUPPORT_RELEASED_STATUSES = [
+  'SPENT',
+  'REPAIR_ACCEPTED',
+  'REJECTED',
+  'WITHDRAWN',
+];
 
 const num = (value: unknown) => {
   const parsed = Number(value);
@@ -99,11 +135,16 @@ const asItems = (value: unknown): Record<string, unknown>[] =>
       )
     : [];
 
-/** Chính sách đã được Giám đốc duyệt (bản mới nhất của mỗi môn). */
+/**
+ * Chính sách đã được Giám đốc duyệt (bản mới nhất của mỗi môn), kèm Đã chi /
+ * đang đề xuất / còn lại của từng dòng. `excludeSuggestId`: đang sửa đề xuất
+ * đó — phần của chính nó không tính là đang bị giữ.
+ */
 export async function loadPolicySupport(
   manager: EntityManager,
   schoolId: number,
   schoolYear: string,
+  excludeSuggestId: number | null = null,
 ): Promise<PolicySupport> {
   const rows = await manager.query<
     {
@@ -125,6 +166,50 @@ export async function loadPolicySupport(
     [schoolId, schoolYear],
   );
 
+  const usageRows = rows.length
+    ? await manager.query<
+        { policy_id: number; support_type: string; item_index: number; spent: string; held: string }[]
+      >(
+        `SELECT i.policy_id, i.support_type, i.item_index,
+           SUM(COALESCE(i.spent_amount, 0))::text AS spent,
+           SUM(CASE WHEN i.spent_amount IS NULL AND s.status::text <> ALL($2)
+                    THEN i.amount ELSE 0 END)::text AS held
+         FROM suggest_policy_support_items i
+         JOIN suggest s ON s.id = i.suggest_id
+         WHERE i.policy_id = ANY($1) AND ($3::int IS NULL OR i.suggest_id <> $3)
+         GROUP BY i.policy_id, i.support_type, i.item_index`,
+        [
+          rows.map((row) => Number(row.policy_id)),
+          POLICY_SUPPORT_RELEASED_STATUSES,
+          excludeSuggestId,
+        ],
+      )
+    : [];
+  const usage = new Map(
+    usageRows.map((row) => [
+      policySupportRowKey(Number(row.policy_id), row.support_type as 'CASH' | 'EQUIPMENT', Number(row.item_index)),
+      { spent: num(row.spent), held: num(row.held) },
+    ]),
+  );
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  const usageOf = (
+    policyId: number,
+    type: 'CASH' | 'EQUIPMENT',
+    itemIndex: number,
+    capAmount: number,
+  ): PolicySupportUsage => {
+    const rowKey = policySupportRowKey(policyId, type, itemIndex);
+    const used = usage.get(rowKey) ?? { spent: 0, held: 0 };
+    return {
+      rowKey,
+      itemIndex,
+      capAmount,
+      spentAmount: round2(used.spent),
+      heldAmount: round2(used.held),
+      remainingAmount: round2(Math.max(0, capAmount - used.spent - used.held)),
+    };
+  };
+
   const cash: PolicyCashSupportRow[] = [];
   const equipment: PolicyEquipmentSupportRow[] = [];
   for (const row of rows) {
@@ -135,11 +220,14 @@ export async function loadPolicySupport(
       subjectId: Number(row.subject_id),
       subjectName: row.subject_name,
     };
-    for (const item of asItems(data.httienmat)) {
+    // Vị trí giữ theo mảng gốc (kể cả dòng 0 đồng bị ẩn) để định danh dòng.
+    asItems(data.httienmat).forEach((item, itemIndex) => {
       const money = num(item.money ?? item.amount);
-      if (money <= 0) continue;
+      if (money <= 0) return;
+      const actualAmount = cashSupportActualAmount(item, mode);
       cash.push({
         ...base,
+        ...usageOf(base.policyId, 'CASH', itemIndex, actualAmount),
         type: text(item.type),
         money,
         depreciationYears: num(item.depreciationYears ?? 1),
@@ -148,14 +236,15 @@ export async function loadPolicySupport(
         students: num(item.students),
         realStudents: num(item.realStudents),
         realPeriods: num(item.realPeriods),
-        actualAmount: cashSupportActualAmount(item, mode),
+        actualAmount,
       });
-    }
-    for (const item of asItems(data.htthietbi)) {
+    });
+    asItems(data.htthietbi).forEach((item, itemIndex) => {
       const amount = equipmentSupportAmount(item);
-      if (amount <= 0) continue;
+      if (amount <= 0) return;
       equipment.push({
         ...base,
+        ...usageOf(base.policyId, 'EQUIPMENT', itemIndex, amount),
         category: text(item.category ?? item.name),
         qty: num(item.qty),
         price: num(item.price),
@@ -163,11 +252,12 @@ export async function loadPolicySupport(
         months: num(item.months),
         depreciationYears: num(item.depreciationYears ?? 1),
       });
-    }
+    });
   }
 
   const sum = (values: number[]) =>
-    Math.round(values.reduce((total, value) => total + value, 0) * 100) / 100;
+    round2(values.reduce((total, value) => total + value, 0));
+  const allRows: PolicySupportUsage[] = [...cash, ...equipment];
   return {
     schoolId,
     schoolYear,
@@ -178,5 +268,7 @@ export async function loadPolicySupport(
     equipmentTotal: sum(equipment.map((row) => row.amount)),
     hasCash: cash.length > 0,
     hasEquipment: equipment.length > 0,
+    spentTotal: sum(allRows.map((row) => row.spentAmount)),
+    remainingTotal: sum(allRows.map((row) => row.remainingAmount)),
   };
 }

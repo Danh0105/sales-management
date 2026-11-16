@@ -90,7 +90,7 @@ describe('Expense request school mapping', () => {
         policy_id: 1,
         subject_id: 9,
         subject_name: 'Tin học',
-        data: { httienmat: [{ type: 'Chính sách', money: 1000000 }], htthietbi: [] },
+        data: { httienmat: [{ type: 'Chính sách', money: 9_000_000, realStudents: 1000, months: 9 }], htthietbi: [] },
       },
     ];
 
@@ -100,9 +100,11 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
-        query: jest.fn().mockResolvedValue(policyWithCash),
+        query: jest.fn(async (sql: string) => (sql.includes('FROM policy p') ? policyWithCash : [])),
+        delete: jest.fn(),
         create: jest.fn((_entity, data) => {
-          createdSuggest = data;
+          // Dòng chính sách đã tích cũng tạo qua manager.create — chỉ bắt đề xuất.
+          if (!('itemIndex' in data)) createdSuggest = data;
           return data;
         }),
         save: jest
@@ -125,6 +127,7 @@ describe('Expense request school mapping', () => {
           expectedPaymentDate: '2099-09-15',
           schoolId: 445,
           type: SuggestType.EXPENSE_REQUEST,
+          policySupportItems: [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 100_000 }],
         },
         undefined,
         user,
@@ -166,7 +169,8 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(ward),
         create: jest.fn((_entity, data) => {
-          createdSuggest = data;
+          // Dòng chính sách đã tích cũng tạo qua manager.create — chỉ bắt đề xuất.
+          if (!('itemIndex' in data)) createdSuggest = data;
           return data;
         }),
         save: jest
@@ -223,7 +227,8 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(ward),
         create: jest.fn((_entity, data) => {
-          createdSuggest = data;
+          // Dòng chính sách đã tích cũng tạo qua manager.create — chỉ bắt đề xuất.
+          if (!('itemIndex' in data)) createdSuggest = data;
           return data;
         }),
         save: jest.fn().mockImplementation(async (data) => ({ ...data, id: 125 })),
@@ -287,6 +292,7 @@ describe('Expense request school mapping', () => {
             ...validBody,
             schoolId: 445,
             type: SuggestType.EXPENSE_REQUEST,
+            policySupportItems: [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 100_000 }],
           },
           undefined,
           user,
@@ -306,9 +312,11 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
-        query: jest.fn().mockResolvedValue(policyWithCash),
+        query: jest.fn(async (sql: string) => (sql.includes('FROM policy p') ? policyWithCash : [])),
+        delete: jest.fn(),
         create: jest.fn((_entity, data) => {
-          createdSuggest = data;
+          // Dòng chính sách đã tích cũng tạo qua manager.create — chỉ bắt đề xuất.
+          if (!('itemIndex' in data)) createdSuggest = data;
           return data;
         }),
         save: jest.fn().mockImplementation(async (data) => ({
@@ -335,6 +343,7 @@ describe('Expense request school mapping', () => {
           ...validBody,
           schoolId: 445,
           type: SuggestType.EXPENSE_REQUEST,
+          policySupportItems: [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 100_000 }],
         },
         undefined,
         user,
@@ -362,7 +371,8 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
-        query: jest.fn().mockResolvedValue(policyWithCash),
+        query: jest.fn(async (sql: string) => (sql.includes('FROM policy p') ? policyWithCash : [])),
+        delete: jest.fn(),
         create: jest.fn((_entity, data) => data),
         save: jest
           .fn()
@@ -384,6 +394,7 @@ describe('Expense request school mapping', () => {
             ...validBody,
             schoolId: 445,
             type: SuggestType.EXPENSE_REQUEST,
+            policySupportItems: [{ policyId: 1, supportType: 'CASH', itemIndex: 0, amount: 100_000 }],
           },
           undefined,
           user,

@@ -65,7 +65,37 @@ import {
   recordSchoolTeacherSuggestPayments,
   schoolYearOfPeriod,
 } from './cashflow-sources';
-import { loadPolicySupport } from './policy-support';
+import {
+  loadPolicySupport,
+  policySupportRowKey,
+  type PolicySupportUsage,
+} from './policy-support';
+import { SuggestPolicySupportItem } from './entities/suggest-policy-support-item.entity';
+
+/** Dòng chính sách đã kiểm, sẵn để lưu vào `suggest_policy_support_items`. */
+interface PolicySupportSelection {
+  policyId: number;
+  subjectId: number;
+  subjectName: string | null;
+  supportType: 'CASH' | 'EQUIPMENT';
+  itemIndex: number;
+  label: string;
+  policyAmount: number;
+  amount: number;
+}
+
+const policySelectionLog = (selections: PolicySupportSelection[]) =>
+  selections.length
+    ? {
+        policySupport: {
+          total: Math.round(selections.reduce((sum, item) => sum + item.amount, 0) * 100) / 100,
+          items: selections.map((item) => ({
+            label: [item.subjectName, item.label].filter(Boolean).join(' · '),
+            amount: item.amount,
+          })),
+        },
+      }
+    : {};
 import { loadSheetRows } from './cashflow-sheet';
 import {
   buildManagementViewSections,
@@ -259,6 +289,7 @@ export class SuggestService {
       const saved = await this.dataSource.transaction(async (manager) => {
         let school: School | undefined;
         let ward: Ward | undefined;
+        let policySelections: PolicySupportSelection[] = [];
 
         if (hasSchool) {
           school = (await manager.findOne(School, {
@@ -280,6 +311,13 @@ export class SuggestService {
             );
           }
           await this.assertPolicyHasSupport(manager, school, schoolYear!);
+          policySelections = await this.resolvePolicySupportSelections(
+            manager,
+            school,
+            schoolYear!,
+            dto.policySupportItems,
+            null,
+          );
         } else {
           ward = (await manager.findOne(Ward, {
             where: { id: dto.wardId },
@@ -319,6 +357,9 @@ export class SuggestService {
         });
 
         const s = await manager.save(suggest);
+        if (policySelections.length) {
+          await this.savePolicySupportSelections(manager, s.id!, policySelections);
+        }
 
         if (fileUrl) {
           await this.saveExpenseAttachments(
@@ -336,7 +377,10 @@ export class SuggestService {
           action: ExpenseAction.CREATE,
           fromStatus: null,
           toStatus: initialStatus,
-          details: await this.expenseNextStepDetails(manager, s),
+          details: {
+            ...policySelectionLog(policySelections),
+            ...(await this.expenseNextStepDetails(manager, s)),
+          },
         });
 
         return s;
@@ -590,7 +634,7 @@ export class SuggestService {
   /** Bảng hỗ trợ tiền mặt / thiết bị cho màn tạo và màn chi tiết đề xuất chi Năm. */
   async getPolicySupport(
     user: AuthUser,
-    query: { schoolId: number; schoolYear: string },
+    query: { schoolId: number; schoolYear: string; excludeSuggestId?: number },
   ) {
     const actor = this.ensureUser(user);
     const manager = this.dataSource.manager;
@@ -600,7 +644,151 @@ export class SuggestService {
         throw new ForbiddenException('Trường không thuộc trường bạn phụ trách');
       }
     }
-    return loadPolicySupport(manager, query.schoolId, query.schoolYear);
+    // Đang sửa đề xuất của chính mình: phần của đề xuất đó không tính là đang giữ.
+    let excludeSuggestId: number | null = null;
+    if (query.excludeSuggestId) {
+      const own = await this.repo.findOne({
+        where: { id: query.excludeSuggestId, createdBy: actor.id },
+        select: { id: true },
+      });
+      excludeSuggestId = own?.id ?? null;
+    }
+    return loadPolicySupport(manager, query.schoolId, query.schoolYear, excludeSuggestId);
+  }
+
+  /**
+   * Kiểm các dòng hỗ trợ kinh doanh tích ở Đề xuất chi Năm cho trường: dòng có
+   * trong chính sách đã duyệt của trường + năm học, không trùng, số tiền > 0 và
+   * không vượt phần còn lại (Thành tiền thực tế / Thành tiền − đã chi − đang đề
+   * xuất ở đề xuất khác). Khoá theo chính sách đến hết transaction.
+   */
+  private async resolvePolicySupportSelections(
+    manager: EntityManager,
+    school: School,
+    schoolYear: string,
+    input: { policyId: number; supportType: string; itemIndex: number; amount: number }[] | undefined,
+    excludeSuggestId: number | null,
+  ): Promise<PolicySupportSelection[]> {
+    const items = input ?? [];
+    if (!items.length) {
+      throw new BadRequestException(
+        'Tích ít nhất một dòng hỗ trợ tiền mặt hoặc thiết bị trong chính sách và nhập số tiền',
+      );
+    }
+    for (const policyId of [...new Set(items.map((item) => Number(item.policyId)))].sort((a, b) => a - b)) {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`policy-support:${policyId}`]);
+    }
+    const support = await loadPolicySupport(manager, school.id!, schoolYear, excludeSuggestId);
+    const rows = new Map<string, { row: PolicySupportUsage; type: 'CASH' | 'EQUIPMENT'; policyId: number; subjectId: number; subjectName: string | null; label: string }>();
+    for (const row of support.cash) {
+      rows.set(row.rowKey, {
+        row,
+        type: 'CASH',
+        policyId: row.policyId,
+        subjectId: row.subjectId,
+        subjectName: row.subjectName,
+        label: `Tiền mặt · ${row.type ?? 'Hỗ trợ'}`,
+      });
+    }
+    for (const row of support.equipment) {
+      rows.set(row.rowKey, {
+        row,
+        type: 'EQUIPMENT',
+        policyId: row.policyId,
+        subjectId: row.subjectId,
+        subjectName: row.subjectName,
+        label: `Thiết bị · ${row.category ?? 'Thiết bị'}`,
+      });
+    }
+    const seen = new Set<string>();
+    return items.map((item) => {
+      const type = item.supportType === 'EQUIPMENT' ? 'EQUIPMENT' : 'CASH';
+      const key = policySupportRowKey(Number(item.policyId), type, Number(item.itemIndex));
+      if (seen.has(key)) throw new BadRequestException('Tích trùng một dòng chính sách');
+      seen.add(key);
+      const found = rows.get(key);
+      if (!found) {
+        throw new BadRequestException(
+          `Dòng chính sách đã chọn không còn trong chính sách đã duyệt của ${school.name ?? 'trường'} năm học ${schoolYear} — tải lại và chọn lại`,
+        );
+      }
+      const amount = Math.round(Number(item.amount) * 100) / 100;
+      if (!(amount > 0)) {
+        throw new BadRequestException(`${found.subjectName ?? ''} · ${found.label}: số tiền phải lớn hơn 0`);
+      }
+      if (amount > found.row.remainingAmount + 0.005) {
+        throw new BadRequestException(
+          `${found.subjectName ?? ''} · ${found.label}: tối đa ${formatMoneyVnd(found.row.remainingAmount)} ` +
+            `(chính sách ${formatMoneyVnd(found.row.capAmount)}, đã chi ${formatMoneyVnd(found.row.spentAmount)}, ` +
+            `đang đề xuất ${formatMoneyVnd(found.row.heldAmount)})`,
+        );
+      }
+      return {
+        policyId: found.policyId,
+        subjectId: found.subjectId,
+        subjectName: found.subjectName,
+        supportType: type,
+        itemIndex: Number(item.itemIndex),
+        label: found.label,
+        policyAmount: found.row.capAmount,
+        amount,
+      };
+    });
+  }
+
+  private async savePolicySupportSelections(
+    manager: EntityManager,
+    suggestId: number,
+    selections: PolicySupportSelection[],
+  ) {
+    await manager.delete(SuggestPolicySupportItem, { suggestId });
+    if (!selections.length) return;
+    await manager.save(
+      SuggestPolicySupportItem,
+      selections.map((selection) =>
+        manager.create(SuggestPolicySupportItem, { ...selection, suggestId, spentAmount: null }),
+      ),
+    );
+  }
+
+  private async storedPolicySupportInput(manager: EntityManager, suggestId: number) {
+    const rows = await manager.find(SuggestPolicySupportItem, {
+      where: { suggestId },
+      order: { id: 'ASC' },
+    });
+    return rows.map((row) => ({
+      policyId: row.policyId,
+      supportType: row.supportType,
+      itemIndex: row.itemIndex,
+      amount: Number(row.amount),
+    }));
+  }
+
+  /** Đề xuất chi Năm hoàn thành: Đã chi của từng dòng chính sách = đúng số kinh doanh nhập. */
+  private async recordPolicySupportSpent(
+    manager: EntityManager,
+    suggestId: number,
+  ): Promise<Record<string, unknown>> {
+    const rows = await manager.find(SuggestPolicySupportItem, { where: { suggestId } });
+    const pending = rows.filter((row) => row.spentAmount === null || row.spentAmount === undefined);
+    if (!pending.length) return {};
+    const now = new Date();
+    for (const row of pending) {
+      await manager.update(
+        SuggestPolicySupportItem,
+        { id: row.id },
+        { spentAmount: Number(row.amount), spentAt: now },
+      );
+    }
+    return {
+      policySupportSpent: {
+        total: Math.round(pending.reduce((sum, row) => sum + Number(row.amount), 0) * 100) / 100,
+        items: pending.map((row) => ({
+          label: [row.subjectName, row.label].filter(Boolean).join(' · '),
+          amount: Number(row.amount),
+        })),
+      },
+    };
   }
 
   /** Đề xuất quy trình Kế toán khác đang chạy cho cùng bảng (trường + kỳ + loại). */
@@ -3311,6 +3499,7 @@ export class SuggestService {
         dto.isMonthlyExpense ?? suggest.isMonthlyExpense ?? false;
       let subjectId: number | null = null;
       let expensePeriodId: number | null = null;
+      let policySelections: PolicySupportSelection[] = [];
 
       // Có đủ định danh liên kết thì tự nhận diện đề xuất chi tháng, giúp các
       // client cũ không cần gửi thêm cờ isMonthlyExpense.
@@ -3375,6 +3564,14 @@ export class SuggestService {
           );
         }
         await this.assertPolicyHasSupport(manager, school, schoolYear);
+        // Không gửi lại danh sách thì kiểm lại các dòng đang có với trường/năm học mới.
+        policySelections = await this.resolvePolicySupportSelections(
+          manager,
+          school,
+          schoolYear,
+          dto.policySupportItems ?? (await this.storedPolicySupportInput(manager, suggest.id!)),
+          suggest.id!,
+        );
       } else if (!isMonthlyExpense && wardId) {
         const ward = await manager.findOne(Ward, { where: { id: wardId } });
         if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
@@ -3443,6 +3640,9 @@ export class SuggestService {
         await manager.delete(SuggestPaymentOrder, { suggestId: s.id! });
         await manager.delete(SuggestMonthlyItem, { suggestId: s.id! });
       }
+      // Dòng chính sách đã tích: thay bằng danh sách vừa kiểm (Đã chi ghi lại
+      // khi đề xuất hoàn thành lần nữa). Phường/xã, chi tháng: không có dòng.
+      await this.savePolicySupportSelections(manager, s.id!, policySelections);
 
       if (fileUrl) {
         await this.saveExpenseAttachments(
@@ -3729,6 +3929,13 @@ export class SuggestService {
           await manager.update(SuggestMonthlyItem, { suggestId: s.id! }, { spent: null });
         } else if (s.isMonthlyExpense) {
           await this.clearMonthlyItemSplit(manager, s.id!);
+        } else {
+          // Chi Năm sửa lệnh chi sau khi đã chi: Đã chi của dòng chính sách ghi lại khi chi lần nữa.
+          await manager.update(
+            SuggestPolicySupportItem,
+            { suggestId: s.id! },
+            { spentAmount: null, spentAt: null },
+          );
         }
 
         paymentOrder = await manager.save(SuggestPaymentOrder, {
@@ -3919,6 +4126,8 @@ export class SuggestService {
             (row) => !row.excluded,
           );
           synced = await this.recordCashflowPayments(manager, s, rows);
+        } else {
+          synced = await this.recordPolicySupportSpent(manager, s.id!);
         }
       },
       logData: () => synced,
@@ -4422,6 +4631,7 @@ export class SuggestService {
     note?: string,
     files?: UploadedAttachment[],
   ) {
+    let policySpent: Record<string, unknown> = {};
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
@@ -4429,6 +4639,7 @@ export class SuggestService {
       note,
       logData: (_manager, s) => ({
         amount: s.amount != null ? Number(s.amount) : null,
+        ...policySpent,
       }),
       mutate: (s) => {
         s.spentAt = new Date();
@@ -4441,6 +4652,7 @@ export class SuggestService {
           user.id,
           ExpenseAction.CONFIRM_STOCK_IN_ACCEPTED,
         );
+        policySpent = await this.recordPolicySupportSpent(manager, s.id!);
       },
     });
 
@@ -4474,6 +4686,7 @@ export class SuggestService {
 
   /** Phòng kỹ thuật chỉ cần xác nhận nhận việc; đây là trạng thái kết thúc. */
   async acceptRepair(id: number, user: AuthUser) {
+    let policySpent: Record<string, unknown> = {};
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.ACCEPT_REPAIR,
@@ -4483,6 +4696,11 @@ export class SuggestService {
         s.technicalRespondedAt = new Date();
         s.technicalRejectReason = null;
       },
+      // Sửa chữa kết thúc ở đây (Chính sách năm tính là đã chi).
+      extra: async (manager, s) => {
+        policySpent = await this.recordPolicySupportSpent(manager, s.id!);
+      },
+      logData: () => policySpent,
     });
 
     await this.notifyExpense(
@@ -5942,6 +6160,7 @@ export class SuggestService {
           schoolTeacher: true,
           expensePeriod: true,
         },
+        policySupportItems: true,
         assignedTechnician: true,
         stockInOrder: { creator: true, stocker: true, warehouseReceipt: true },
         stockInHandler: true,
@@ -5951,6 +6170,7 @@ export class SuggestService {
       order: {
         assignments: { id: 'ASC' },
         monthlyItems: { position: 'ASC', id: 'ASC' },
+        policySupportItems: { id: 'ASC' },
       },
     });
 

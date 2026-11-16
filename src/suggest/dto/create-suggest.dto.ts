@@ -6,7 +6,7 @@ import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
 import { CASHFLOW_SOURCES, type CashflowSource } from '../cashflow-sources';
-import { MonthlyExpenseItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
+import { MonthlyExpenseItemDto, PolicySupportItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
     @IsString()
@@ -110,6 +110,13 @@ export class CreateSuggestDto {
     @Type(() => Number)
     @IsInt()
     expensePeriodId?: number;
+
+    /** Dòng chính sách đã tích — xem `CreateExpenseRequestDto.policySupportItems`. */
+    @IsOptional()
+    @Transform(({ value }) => parseJsonArrayOf(PolicySupportItemDto)({ value }))
+    @IsArray()
+    @ValidateNested({ each: true })
+    policySupportItems?: PolicySupportItemDto[];
 
     /** Các trường của đề xuất chi tháng — xem `CreateExpenseRequestDto.monthlyItems`. */
     @IsOptional()

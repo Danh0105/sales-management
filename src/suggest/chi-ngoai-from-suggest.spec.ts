@@ -1,6 +1,7 @@
 import { SchoolExpenseManagementConfirmation } from '../school-expenses/entities/school-expense-management-confirmation.entity';
 import { ExpenseRole } from './constants/expense-roles';
 import { SuggestMonthlyItem } from './entities/suggest-monthly-item.entity';
+import { SuggestPolicySupportItem } from './entities/suggest-policy-support-item.entity';
 import { SuggestService } from './suggest.service';
 import { vnToday } from './utils/vn-date';
 
@@ -50,7 +51,8 @@ function setup(rows = [monthlyRow()], isMonthlyExpense = true, confirmations: un
   const sql: { text: string; params: unknown[] }[] = [];
   let sheets: unknown[] = [sheet];
   const manager = {
-    find: jest.fn().mockResolvedValue(rows),
+    // Đề xuất chi Năm: chưa tích dòng chính sách nào.
+    find: jest.fn(async (entity: unknown) => (entity === SuggestPolicySupportItem ? [] : rows)),
     findOne: jest.fn().mockResolvedValue({ amount: 250_000, cashAccount: '1111' }),
     update: jest.fn(),
     // Bảng thu chi + xác nhận BBCS theo môn (mặc định chưa môn nào xác nhận).
