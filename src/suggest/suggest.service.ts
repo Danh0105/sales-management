@@ -1918,6 +1918,7 @@ export class SuggestService {
     [ExpenseRole.DIRECTOR]: 'Giám đốc',
     [ExpenseRole.SALES_ADMIN]: 'Sales Admin',
     [ExpenseRole.CHIEF_ACCOUNTANT]: 'Kế toán trưởng',
+    [ExpenseRole.ACCOUNTANT]: 'Kế toán',
     [ExpenseRole.DEBT_ACCOUNTANT]: 'Kế toán công nợ',
     [ExpenseRole.TREASURER]: 'Thủ quỹ',
     [ExpenseRole.TECHNICAL]: 'Phòng kỹ thuật',
