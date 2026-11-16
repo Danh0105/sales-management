@@ -40,6 +40,8 @@ import {
 } from '../school-expenses/cashflow-roles';
 import { SchoolTeacher } from '../school-teacher-expense/school-teacher.entity';
 import {
+  ACCOUNTANT_CHAIN,
+  CASHFLOW_RELEASED_STATUSES,
   CASHFLOW_SOURCE_LABELS,
   CASHFLOW_TABLE_LABELS,
   type CashflowGroup,
@@ -51,15 +53,19 @@ import {
   cashflowItemKey,
   cashflowItemStatus,
   cashflowSourceOf,
+  isAccountantChain,
   isCashflowSource,
   loadOpenCashflowRequests,
   loadSchoolExpenseGroups,
   loadSchoolTeacherGroups,
   lockCashflowKeys,
   managementGroupsFromSections,
+  periodLabelOf,
   recordSchoolExpenseSuggestPayments,
   recordSchoolTeacherSuggestPayments,
+  schoolYearOfPeriod,
 } from './cashflow-sources';
+import { loadPolicySupport } from './policy-support';
 import {
   buildManagementViewSections,
   ManagementViewSection,
@@ -80,10 +86,8 @@ import {
   MonthlyItemInput,
   monthlyRemainingTotal,
   partialSpendSummary,
-  ResolvedMonthlyItem,
   selectApprovedItems,
 } from './monthly-expense-items';
-import { MAX_MONTHLY_EXPENSE_ITEMS } from './dto/expense/create-expense-request.dto';
 import fixVietnamese from '../utils/fixVietnamese';
 import { NotificationService } from '../notifications/services/notification.service';
 import { SuggestGateway } from './suggest.gateway';
@@ -208,9 +212,8 @@ export class SuggestService {
   // ================= CREATE =================
 
   async create(dto: CreateSuggestDto, fileUrl?: string, user?: Employee) {
-    // Chi Năm và chi tháng đều gửi thẳng Giám đốc duyệt. Chi tháng có thể gồm
-    // nhiều trường; số tiền chi tháng do hệ thống lấy từ bảng Chi Ngoài lúc
-    // Giám đốc duyệt.
+    // Chi Năm gửi thẳng Giám đốc duyệt. Chi Ngoài / Chi Trường / Chi GV trường
+    // (từ 16/11/2026) đi quy trình Kế toán — xem `createChainMonthlyExpense`.
     if (dto.type === SuggestType.EXPENSE_REQUEST) {
       const actor = this.ensureUser(user as AuthUser);
 
@@ -223,24 +226,23 @@ export class SuggestService {
       if (!dto.expectedPaymentDate) {
         throw new BadRequestException('Thiếu ngày dự kiến chi');
       }
+      if (dto.expectedPaymentDate < vnToday()) {
+        throw new BadRequestException(
+          'Ngày dự kiến chi phải từ hôm nay trở đi',
+        );
+      }
       const isMonthlyExpense =
         dto.isMonthlyExpense === true ||
         dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
+        dto.periodMonth !== undefined ||
         dto.monthlyItems !== undefined;
-      // Bảng nguồn trong QL thu chi; client cũ không gửi = Chi Ngoài.
-      const cashflowSource: CashflowSource | null = isMonthlyExpense
-        ? (dto.cashflowSource ?? 'MANAGEMENT')
-        : null;
-      const monthlyInput: MonthlyItemInput[] = isMonthlyExpense
-        ? (dto.monthlyItems ?? monthlyItemsFromColumns(dto))
-        : [];
-      if (isMonthlyExpense && monthlyInput.length === 0) {
-        throw new BadRequestException('Đề xuất chi tháng phải chọn trường');
+      if (isMonthlyExpense) {
+        return this.createChainMonthlyExpense(dto, fileUrl, actor);
       }
-      const hasSchool =
-        !isMonthlyExpense && dto.schoolId !== undefined && dto.schoolId !== null;
+
+      const hasSchool = dto.schoolId !== undefined && dto.schoolId !== null;
       // Năm học mặc định theo kỳ hiện tại để người tạo không cần tự chọn,
       // nhưng vẫn cho chọn năm khác — trường có thể chưa có môn học khai báo
       // cho năm hiện tại (chỉ có năm trước/sau), lúc đó phải tự đổi được.
@@ -250,46 +252,15 @@ export class SuggestService {
       if (hasSchool && schoolYear && !isValidSchoolYear(schoolYear)) {
         throw new BadRequestException('Năm học không hợp lệ');
       }
-      if (
-        !isMonthlyExpense &&
-        !hasSchool &&
-        (dto.wardId === undefined || dto.wardId === null)
-      ) {
+      if (!hasSchool && (dto.wardId === undefined || dto.wardId === null)) {
         throw new BadRequestException('Thiếu xã/phường');
-      }
-      if (dto.expectedPaymentDate < vnToday()) {
-        throw new BadRequestException(
-          'Ngày dự kiến chi phải từ hôm nay trở đi',
-        );
       }
 
       const saved = await this.dataSource.transaction(async (manager) => {
         let school: School | undefined;
         let ward: Ward | undefined;
-        let subject: Subject | undefined;
-        let expensePeriod: ExpensePeriod | undefined;
-        let monthlyItems: ResolvedMonthlyItem[] = [];
-        let requestedAmounts: number[] = [];
 
-        if (isMonthlyExpense) {
-          monthlyItems = await this.resolveMonthlyItems(
-            manager,
-            monthlyInput,
-            cashflowSource!,
-          );
-          // Chống trùng + chỉ đề xuất khoản còn phải chi.
-          requestedAmounts = await this.prepareCashflowItems(
-            manager,
-            cashflowSource!,
-            monthlyItems,
-            actor,
-            null,
-          );
-          // Dòng đầu chép lên các cột cũ để danh sách/bộ lọc cũ vẫn đọc được.
-          school = monthlyItems[0].school;
-          subject = monthlyItems[0].subject ?? undefined;
-          expensePeriod = monthlyItems[0].expensePeriod;
-        } else if (hasSchool) {
+        if (hasSchool) {
           school = (await manager.findOne(School, {
             where: { id: dto.schoolId },
           })) ?? undefined;
@@ -308,6 +279,7 @@ export class SuggestService {
               'Trường không có môn học trong năm học đã chọn',
             );
           }
+          await this.assertPolicyHasSupport(manager, school, schoolYear!);
         } else {
           ward = (await manager.findOne(Ward, {
             where: { id: dto.wardId },
@@ -324,28 +296,20 @@ export class SuggestService {
           type: SuggestType.EXPENSE_REQUEST,
           // Nhân viên không quyết định loại đề xuất. Để trống đến khi Giám
           // đốc/Sales Admin chốt CASH/EQUIPMENT/REPAIR lúc duyệt.
-          requestKind: isMonthlyExpense ? ExpenseRequestKind.CASH : null,
+          requestKind: null,
           content: dto.content,
           description: dto.description,
-          // Số tiền được xác định khi lập lệnh chi (chi tháng: lúc Giám đốc
-          // duyệt), không thuộc bước nhân viên kinh doanh tạo đề xuất.
+          // Số tiền được xác định khi lập lệnh chi, không thuộc bước nhân
+          // viên kinh doanh tạo đề xuất.
           amount: null,
           expectedPaymentDate: dto.expectedPaymentDate,
           beneficiaryInfo: dto.beneficiaryInfo ?? null,
           participants: dto.participants ?? null,
           deductPolicy: dto.deductPolicy ?? false,
           ...(school ? { schoolId: school.id, school } : {}),
-          isMonthlyExpense,
-          cashflowSource,
-          ...(subject ? { subjectId: subject.id, subject } : {}),
-          ...(expensePeriod
-            ? { expensePeriodId: expensePeriod.id, expensePeriod }
-            : {}),
-          ...(isMonthlyExpense
-            ? { schoolYear: monthlyItems[0].schoolYear }
-            : schoolYear
-              ? { schoolYear }
-              : {}),
+          isMonthlyExpense: false,
+          cashflowSource: null,
+          ...(schoolYear ? { schoolYear } : {}),
           ...(ward ? { wardId: ward.id, ward } : {}),
           fileUrl,
           code,
@@ -355,7 +319,6 @@ export class SuggestService {
         });
 
         const s = await manager.save(suggest);
-        await this.saveMonthlyItems(manager, s.id!, monthlyItems, requestedAmounts);
 
         if (fileUrl) {
           await this.saveExpenseAttachments(
@@ -382,20 +345,12 @@ export class SuggestService {
       await this.notifyExpense(
         {
           suggestId: saved.id!,
-          title: saved.isMonthlyExpense
-            ? `📋 ${this.monthlyKindLabel(saved)} chờ duyệt`
-            : '📋 Đề xuất mới chờ phân loại',
-          message: saved.isMonthlyExpense
-            ? `Có ${this.monthlyKindLabel(saved).toLowerCase()} cần duyệt: ${saved.code} - ${saved.content}`
-            : `Có đề xuất mới cần duyệt và phân loại: ${saved.code} - ${saved.content}`,
+          title: '📋 Đề xuất mới chờ phân loại',
+          message: `Có đề xuất mới cần duyệt và phân loại: ${saved.code} - ${saved.content}`,
           senderId: actor.id,
           meta: { status: saved.status },
         },
-        {
-          roles: saved.isMonthlyExpense
-            ? [ExpenseRole.DIRECTOR]
-            : [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
-        },
+        { roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN] },
       );
 
       return this.findOneExpense(saved.id!);
@@ -608,6 +563,675 @@ export class SuggestService {
 
     return saved;
   }
+  // ======== QUY TRÌNH KẾ TOÁN: Chi Ngoài / Chi Trường / Chi GV trường ========
+  // Từ 16/11/2026: kinh doanh tạo đề xuất cho một trường + một kỳ kế toán (chọn
+  // kỳ đã có hoặc tạo kỳ tháng mới) → Kế toán nhập số liệu bảng ở QL thu chi rồi
+  // gửi (chốt số tiền = Còn chi) → Kế toán trưởng duyệt → Giám đốc duyệt → Kế
+  // toán công nợ lập lệnh chi → Thủ quỹ xuất tiền → kinh doanh nhận và chi.
+
+  /**
+   * Chi Năm cho trường: chính sách đã duyệt của trường trong năm học phải có
+   * hỗ trợ tiền mặt hoặc thiết bị.
+   */
+  private async assertPolicyHasSupport(
+    manager: EntityManager,
+    school: School,
+    schoolYear: string,
+  ) {
+    const support = await loadPolicySupport(manager, school.id!, schoolYear);
+    if (!support.hasCash && !support.hasEquipment) {
+      throw new BadRequestException(
+        `Chính sách đã duyệt của ${school.name ?? 'trường'} năm học ${schoolYear} ` +
+          'không có hỗ trợ tiền mặt hoặc thiết bị nên không tạo được đề xuất chi Năm',
+      );
+    }
+  }
+
+  /** Bảng hỗ trợ tiền mặt / thiết bị cho màn tạo và màn chi tiết đề xuất chi Năm. */
+  async getPolicySupport(
+    user: AuthUser,
+    query: { schoolId: number; schoolYear: string },
+  ) {
+    const actor = this.ensureUser(user);
+    const manager = this.dataSource.manager;
+    if (this.isRequesterOnly(actor)) {
+      const allowed = await actorSchoolIds(manager, actor.id);
+      if (!allowed.includes(query.schoolId)) {
+        throw new ForbiddenException('Trường không thuộc trường bạn phụ trách');
+      }
+    }
+    return loadPolicySupport(manager, query.schoolId, query.schoolYear);
+  }
+
+  /** Kỳ tháng của trường: có thì dùng, chưa có thì tạo (cùng chốt trùng của QL thu chi). */
+  private async findOrCreateSchoolPeriod(
+    manager: EntityManager,
+    schoolId: number,
+    month: number,
+    year: number,
+  ): Promise<ExpensePeriod> {
+    const find = () =>
+      manager
+        .createQueryBuilder(ExpensePeriod, 'p')
+        .leftJoinAndSelect('p.school', 'school')
+        .where('p.school_id = :schoolId', { schoolId })
+        .andWhere('p.month = :month', { month })
+        .andWhere('p.year = :year', { year })
+        .getOne();
+    await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `expense-period:${schoolId}:${year}:${month}`,
+    ]);
+    const existing = await find();
+    if (existing) return existing;
+    await manager.insert(ExpensePeriod, {
+      month,
+      year,
+      name: `Tháng ${month}/${year}`,
+      status: 1,
+      school: { id: schoolId } as School,
+    });
+    return (await find())!;
+  }
+
+  /** Đề xuất quy trình Kế toán khác đang chạy cho cùng bảng (trường + kỳ + loại). */
+  private async findOpenSheetRequest(
+    manager: EntityManager,
+    source: CashflowSource,
+    schoolId: number,
+    periodId: number,
+    excludeSuggestId: number | null,
+  ): Promise<{ id: number; code: string | null } | null> {
+    const rows = await manager.query<{ id: number; code: string | null }[]>(
+      `SELECT id, code FROM suggest
+       WHERE type = 'EXPENSE_REQUEST' AND is_monthly_expense = true
+         AND approval_flow = $1
+         AND COALESCE(cashflow_source, 'MANAGEMENT') = $2
+         AND school_id = $3 AND expense_period_id = $4
+         AND status::text <> ALL($5)
+         AND ($6::int IS NULL OR id <> $6)
+       ORDER BY id LIMIT 1`,
+      [
+        ACCOUNTANT_CHAIN,
+        source,
+        schoolId,
+        periodId,
+        CASHFLOW_RELEASED_STATUSES,
+        excludeSuggestId,
+      ],
+    );
+    return rows[0] ? { id: Number(rows[0].id), code: rows[0].code } : null;
+  }
+
+  /**
+   * Kiểm trường + kỳ của đề xuất quy trình Kế toán (tạo / sửa): trường thuộc
+   * trường mình phụ trách, kỳ thuộc trường (hoặc tạo kỳ tháng mới), chưa có
+   * đề xuất khác đang chạy cho cùng bảng.
+   */
+  private async resolveChainSheet(
+    manager: EntityManager,
+    actor: AuthUser,
+    source: CashflowSource,
+    input: {
+      schoolId?: number | null;
+      expensePeriodId?: number | null;
+      periodMonth?: number | null;
+      periodYear?: number | null;
+      schoolYear?: string | null;
+    },
+    excludeSuggestId: number | null,
+  ): Promise<{ school: School; period: ExpensePeriod; schoolYear: string }> {
+    if (!input.schoolId) {
+      throw new BadRequestException('Chọn trường của đề xuất');
+    }
+    const school = await manager.findOne(School, {
+      where: { id: input.schoolId },
+    });
+    if (!school) throw new BadRequestException('Trường không tồn tại');
+    const allowed = await actorSchoolIds(manager, actor.id);
+    if (!allowed.includes(school.id!)) {
+      throw new ForbiddenException(
+        `Trường ${school.name ?? `#${school.id}`} không thuộc trường bạn phụ trách`,
+      );
+    }
+
+    let period: ExpensePeriod | null = null;
+    if (input.expensePeriodId) {
+      period = await manager.findOne(ExpensePeriod, {
+        where: { id: input.expensePeriodId },
+        relations: ['school'],
+      });
+      if (!period) throw new BadRequestException('Kỳ kế toán không tồn tại');
+      if (period.school?.id !== school.id) {
+        throw new BadRequestException('Kỳ kế toán không thuộc trường đã chọn');
+      }
+    } else if (input.periodMonth && input.periodYear) {
+      period = await this.findOrCreateSchoolPeriod(
+        manager,
+        school.id!,
+        input.periodMonth,
+        input.periodYear,
+      );
+    } else {
+      throw new BadRequestException('Chọn kỳ kế toán hoặc tạo kỳ mới');
+    }
+
+    const schoolYear =
+      input.schoolYear ?? schoolYearOfPeriod(period) ?? currentSchoolYear();
+    if (!isValidSchoolYear(schoolYear)) {
+      throw new BadRequestException('Năm học không hợp lệ');
+    }
+
+    await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `suggest-cashflow-sheet:${source}:${school.id}:${period.id}`,
+    ]);
+    const open = await this.findOpenSheetRequest(
+      manager,
+      source,
+      school.id!,
+      period.id,
+      excludeSuggestId,
+    );
+    if (open) {
+      throw new BadRequestException(
+        `Bảng ${CASHFLOW_TABLE_LABELS[source]} của ${school.name ?? 'trường'} ` +
+          `${periodLabelOf({ periodName: period.name, periodMonth: period.month, periodYear: period.year })} ` +
+          `đã có đề xuất ${open.code ?? `#${open.id}`} đang chạy`,
+      );
+    }
+    return { school, period, schoolYear };
+  }
+
+  /** Trường + kỳ của client cũ gửi danh sách khoản: chỉ nhận một trường, một kỳ. */
+  private chainSheetInput(dto: {
+    schoolId?: number | null;
+    expensePeriodId?: number | null;
+    monthlyItems?: MonthlyItemInput[];
+  }) {
+    if (!dto.monthlyItems?.length) {
+      return { schoolId: dto.schoolId, expensePeriodId: dto.expensePeriodId };
+    }
+    const schools = new Set(dto.monthlyItems.map((item) => item.schoolId));
+    const periods = new Set(dto.monthlyItems.map((item) => item.expensePeriodId));
+    if (schools.size > 1) {
+      throw new BadRequestException('Mỗi đề xuất chỉ cho một trường');
+    }
+    if (periods.size > 1) {
+      throw new BadRequestException('Mỗi đề xuất chỉ cho một kỳ kế toán');
+    }
+    return {
+      schoolId: dto.monthlyItems[0].schoolId,
+      expensePeriodId: dto.monthlyItems[0].expensePeriodId,
+    };
+  }
+
+  private async createChainMonthlyExpense(
+    dto: CreateSuggestDto,
+    fileUrl: string | undefined,
+    actor: AuthUser,
+  ) {
+    const source: CashflowSource = dto.cashflowSource ?? 'MANAGEMENT';
+    const sheetInput = this.chainSheetInput(dto);
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const { school, period, schoolYear } = await this.resolveChainSheet(
+        manager,
+        actor,
+        source,
+        {
+          ...sheetInput,
+          periodMonth: dto.periodMonth,
+          periodYear: dto.periodYear,
+          schoolYear: dto.schoolYear,
+        },
+        null,
+      );
+
+      const code = await this.generateCode(manager, 'suggest', 'code', 'DX');
+      const initialStatus = SuggestStatus.PENDING_ACCOUNTANT;
+      const s = await manager.save(
+        manager.create(Suggest, {
+          type: SuggestType.EXPENSE_REQUEST,
+          requestKind: ExpenseRequestKind.CASH,
+          content: dto.content,
+          description: dto.description,
+          // Số tiền chốt khi Kế toán gửi Kế toán trưởng (Còn chi của bảng).
+          amount: null,
+          expectedPaymentDate: dto.expectedPaymentDate,
+          beneficiaryInfo: dto.beneficiaryInfo ?? null,
+          participants: dto.participants ?? null,
+          deductPolicy: dto.deductPolicy ?? false,
+          schoolId: school.id,
+          school,
+          isMonthlyExpense: true,
+          cashflowSource: source,
+          approvalFlow: ACCOUNTANT_CHAIN,
+          expensePeriodId: period.id,
+          expensePeriod: period,
+          schoolYear,
+          fileUrl,
+          code,
+          version: 1,
+          status: initialStatus,
+          createdBy: actor.id,
+        }),
+      );
+
+      if (fileUrl) {
+        await this.saveExpenseAttachments(
+          manager,
+          s.id!,
+          [{ fileUrl, fileName: fileUrl.split('/').pop() || 'file' }],
+          actor.id,
+          ExpenseAction.CREATE,
+        );
+      }
+
+      await this.writeExpenseLog(manager, {
+        suggestId: s.id!,
+        userId: actor.id,
+        action: ExpenseAction.CREATE,
+        fromStatus: null,
+        toStatus: initialStatus,
+        details: {
+          cashflowSource: source,
+          sheet: {
+            schoolId: school.id,
+            schoolName: school.name ?? null,
+            expensePeriodId: period.id,
+            period: periodLabelOf({
+              periodName: period.name,
+              periodMonth: period.month,
+              periodYear: period.year,
+            }),
+          },
+          ...(await this.expenseNextStepDetails(manager, s)),
+        },
+      });
+      return s;
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: `📋 ${this.monthlyKindLabel(saved)} chờ Kế toán nhập số liệu`,
+        message:
+          `${this.monthlyKindLabel(saved)} ${saved.code} - ${saved.content}: ` +
+          'vui lòng nhập số liệu bảng ở QL thu chi rồi gửi Kế toán trưởng duyệt',
+        senderId: actor.id,
+        meta: { status: saved.status },
+      },
+      { roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT] },
+    );
+
+    return this.findOneExpense(saved.id!);
+  }
+
+  /** Khoản của bảng nguồn một trường trong một kỳ, như QL thu chi đang có. */
+  private async sheetGroups(
+    manager: EntityManager,
+    source: CashflowSource,
+    schoolId: number,
+    periodId: number,
+  ): Promise<{
+    groups: CashflowGroup[];
+    unassigned: Awaited<ReturnType<typeof loadSchoolTeacherGroups>>['unassigned'];
+  }> {
+    const filter = { schoolIds: [schoolId], periodIds: [periodId] };
+    if (source === 'SCHOOL_EXPENSE') {
+      return { groups: await loadSchoolExpenseGroups(manager, filter), unassigned: [] };
+    }
+    if (source === 'SCHOOL_TEACHER') {
+      return loadSchoolTeacherGroups(manager, filter);
+    }
+    const sections = await this.loadSchoolManagementSections(
+      schoolId,
+      periodId,
+      { schoolYear: null, subjectId: null },
+      manager,
+    );
+    const periods = await this.loadPeriodInfo(manager, [periodId]);
+    return { groups: managementGroupsFromSections(sections, periods), unassigned: [] };
+  }
+
+  /**
+   * Kế toán gửi: chốt khoản + số tiền của đề xuất theo Còn chi hiện tại của
+   * bảng. Đề xuất mới lấy mọi khoản còn phải chi của bảng (trường + kỳ); đề
+   * xuất chuyển từ luồng cũ giữ các khoản kinh doanh đã chọn. Khoản đang nằm
+   * trong đề xuất khác chưa xong thì bỏ qua (ghi vào lịch sử).
+   */
+  private async lockInChainItems(manager: EntityManager, s: Suggest) {
+    const source = cashflowSourceOf(s) ?? 'MANAGEMENT';
+    const table = CASHFLOW_TABLE_LABELS[source];
+    const existing = await this.loadMonthlyRows(manager, s.id!);
+
+    type Candidate = {
+      ref: CashflowItemRef;
+      schoolYear: string | null;
+      label: string;
+      remaining: number;
+    };
+    let candidates: Candidate[];
+    if (existing.length) {
+      const refs = existing.map((row) => this.cashflowRefOfRow(row));
+      const groups = await this.cashflowGroupsFor(manager, source, refs);
+      candidates = existing.map((row, index) => ({
+        ref: refs[index],
+        schoolYear: row.schoolYear ?? s.schoolYear ?? null,
+        label: monthlyItemLabel(row),
+        remaining: groups.get(cashflowItemKey(source, refs[index]))?.remainingAmount ?? 0,
+      }));
+    } else {
+      if (!s.schoolId || !s.expensePeriodId) {
+        throw new BadRequestException('Đề xuất thiếu trường hoặc kỳ kế toán');
+      }
+      const { groups, unassigned } = await this.sheetGroups(
+        manager,
+        source,
+        s.schoolId,
+        s.expensePeriodId,
+      );
+      if (unassigned.length) {
+        const rows = unassigned.reduce((sum, item) => sum + item.rowCount, 0);
+        const amount = unassigned.reduce((sum, item) => sum + item.amount, 0);
+        throw new BadRequestException(
+          `Bảng ${table} còn ${rows} dòng chưa chọn giáo viên (${formatMoneyVnd(amount)}) — ` +
+            'chọn giáo viên ở QL thu chi trước khi gửi',
+        );
+      }
+      candidates = groups.map((group) => ({
+        ref: group,
+        schoolYear: group.schoolYear ?? s.schoolYear ?? null,
+        label: cashflowGroupLabel(group),
+        remaining: group.remainingAmount,
+      }));
+    }
+
+    const keys = candidates.map((c) => cashflowItemKey(source, c.ref));
+    await lockCashflowKeys(manager, source, keys);
+    const schoolIds = [
+      ...new Set(
+        candidates
+          .map((c) => c.ref.schoolId)
+          .filter((id): id is number => !!id),
+      ),
+    ];
+    const open = await loadOpenCashflowRequests(manager, source, schoolIds, s.id!);
+    const heldBy = new Map(open.map((request) => [request.key, request]));
+
+    const chosen: Candidate[] = [];
+    const skipped: { label: string; amount: number; code: string | null }[] = [];
+    candidates.forEach((candidate, index) => {
+      if (!(candidate.remaining > 0)) return;
+      const holder = heldBy.get(keys[index]);
+      if (holder) {
+        skipped.push({
+          label: candidate.label,
+          amount: candidate.remaining,
+          code: holder.code ?? `#${holder.suggestId}`,
+        });
+        return;
+      }
+      chosen.push(candidate);
+    });
+    if (!chosen.length) {
+      throw new BadRequestException(
+        skipped.length
+          ? `Các khoản còn phải chi của bảng ${table} đang nằm trong đề xuất ` +
+              `${[...new Set(skipped.map((item) => item.code))].join(', ')} chưa xong`
+          : `Bảng ${table} của đề xuất chưa có khoản nào cần chi (Còn chi = 0) — ` +
+              'nhập số liệu ở QL thu chi trước khi gửi',
+      );
+    }
+
+    await manager.delete(SuggestMonthlyItem, { suggestId: s.id! });
+    await manager.save(
+      SuggestMonthlyItem,
+      chosen.map((candidate, position) =>
+        manager.create(SuggestMonthlyItem, {
+          suggestId: s.id!,
+          schoolId: candidate.ref.schoolId,
+          schoolYear: candidate.schoolYear,
+          subjectId: candidate.ref.subjectId ?? null,
+          schoolTeacherId: candidate.ref.schoolTeacherId ?? null,
+          expensePeriodId: candidate.ref.expensePeriodId,
+          requestedAmount: candidate.remaining,
+          position,
+        }),
+      ),
+    );
+    const total =
+      Math.round(chosen.reduce((sum, c) => sum + c.remaining, 0) * 100) / 100;
+    s.amount = total;
+    await manager.update(Suggest, { id: s.id! }, { amount: total });
+    return {
+      cashflowSource: source,
+      cashflowTable: table,
+      amount: total,
+      items: chosen.map((c) => ({ label: c.label, amount: c.remaining })),
+      ...(skipped.length ? { skippedItems: skipped } : {}),
+    };
+  }
+
+  async submitToChiefAccountant(id: number, user: AuthUser, note?: string) {
+    const existing = await this.repo.findOne({ where: { id } });
+    if (!existing) throw new NotFoundException('Đề xuất chi không tồn tại');
+    if (!isAccountantChain(existing)) {
+      throw new BadRequestException('Đề xuất này không theo quy trình Kế toán');
+    }
+    const snapshot =
+      cashflowSourceOf(existing) === 'MANAGEMENT'
+        ? await this.managementExpenseSnapshot(existing)
+        : {};
+    let summary: Record<string, unknown> = {};
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.SUBMIT_TO_CHIEF_ACCOUNTANT,
+      user,
+      note: note?.trim() || undefined,
+      extra: async (manager, s) => {
+        summary = await this.lockInChainItems(manager, s);
+      },
+      logData: () => ({ ...summary, ...snapshot }),
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: `📋 ${this.monthlyKindLabel(saved)} chờ Kế toán trưởng duyệt`,
+        message:
+          `Kế toán đã nhập số liệu cho đề xuất ${saved.code} ` +
+          `(${formatMoneyVnd(Number(saved.amount) || 0)}), vui lòng duyệt`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      { roles: [ExpenseRole.CHIEF_ACCOUNTANT] },
+    );
+    return saved;
+  }
+
+  async chiefApproveExpense(id: number, user: AuthUser, note?: string) {
+    const existing = await this.repo.findOne({ where: { id } });
+    if (!existing) throw new NotFoundException('Đề xuất chi không tồn tại');
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CHIEF_APPROVE,
+      user,
+      note: note?.trim() || undefined,
+      extra: async (_manager, s) => {
+        if (!isAccountantChain(s)) {
+          throw new BadRequestException('Đề xuất này không theo quy trình Kế toán');
+        }
+      },
+      logData: (_manager, s) => ({ amount: s.amount === null ? null : Number(s.amount) }),
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: `📋 ${this.monthlyKindLabel(saved)} chờ Giám đốc duyệt`,
+        message:
+          `Kế toán trưởng đã duyệt đề xuất ${saved.code} ` +
+          `(${formatMoneyVnd(Number(saved.amount) || 0)}), vui lòng duyệt`,
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      { roles: [ExpenseRole.DIRECTOR] },
+    );
+    return saved;
+  }
+
+  async chiefRejectExpense(id: number, user: AuthUser, reason: string) {
+    const existing = await this.repo.findOne({ where: { id } });
+    if (!existing) throw new NotFoundException('Đề xuất chi không tồn tại');
+    // Kế toán vừa gửi cũng cần biết đề xuất bị trả.
+    const submitterId = await this.lastExpenseActorId(this.dataSource.manager, id);
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.CHIEF_REJECT,
+      user,
+      note: reason,
+      mutate: (s) => {
+        s.rejectReason = reason;
+      },
+      extra: async (_manager, s) => {
+        if (!isAccountantChain(s)) {
+          throw new BadRequestException('Đề xuất này không theo quy trình Kế toán');
+        }
+      },
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: '❌ Đề xuất chi bị từ chối',
+        message: `Đề xuất ${saved.code} đã bị Kế toán trưởng từ chối: ${reason}`,
+        senderId: user.id,
+        meta: { status: saved.status, reason },
+      },
+      {
+        userIds: [saved.createdBy, submitterId].filter(
+          (value): value is number => !!value,
+        ),
+      },
+    );
+    return saved;
+  }
+
+  /**
+   * Giám đốc duyệt đề xuất quy trình Kế toán: số tiền đã chốt lúc Kế toán gửi;
+   * bỏ tích khoản thì khoản đó không vào lệnh chi. Kế toán công nợ lập lệnh chi
+   * ở bước sau, đúng số này.
+   */
+  private async approveMonthlyChain(
+    id: number,
+    user: AuthUser,
+    dto: ApproveExpenseDto,
+  ) {
+    const existing = await this.repo.findOne({ where: { id } });
+    if (!existing) throw new NotFoundException('Đề xuất chi không tồn tại');
+    const snapshot =
+      cashflowSourceOf(existing) === 'MANAGEMENT'
+        ? await this.managementExpenseSnapshot(existing)
+        : {};
+    let decided: { id: number; label: string; amount: number; approved: boolean }[] = [];
+    let total = 0;
+    const saved = await this.expenseTransition({
+      id,
+      action: ExpenseAction.APPROVE_MONTHLY_CHAIN,
+      user,
+      note: dto.note?.trim() || undefined,
+      mutate: (s) => {
+        s.approvedBy = user.id;
+        s.approvedAt = new Date();
+        s.rejectReason = null;
+        s.requestKind = ExpenseRequestKind.CASH;
+        if (dto.note !== undefined) s.approveNote = dto.note || null;
+      },
+      extra: async (manager, s) => {
+        const rows = await this.loadMonthlyRows(manager, s.id!);
+        if (!rows.length) {
+          throw new BadRequestException('Kế toán chưa gửi số liệu của đề xuất');
+        }
+        const amounts = rows.map((row) => Number(row.requestedAmount) || 0);
+        const selection = selectApprovedItems(rows, amounts, dto.approvedItemIds);
+        const excludedCount = rows.filter((row) => !selection.approvedIds.has(row.id)).length;
+        if (excludedCount > 0 && !dto.note?.trim()) {
+          throw new BadRequestException('Phải ghi lý do không duyệt các khoản bỏ chọn');
+        }
+        if (!(selection.total > 0)) {
+          throw new BadRequestException('Các khoản được chọn không còn tiền cần chi nên không duyệt được');
+        }
+        total = selection.total;
+        for (const [index, row] of rows.entries()) {
+          const approved = selection.approvedIds.has(row.id);
+          await manager.update(
+            SuggestMonthlyItem,
+            { id: row.id },
+            {
+              approvedAmount: approved ? amounts[index] : null,
+              spent: null,
+              excluded: !approved,
+            },
+          );
+        }
+        s.amount = total;
+        await manager.update(Suggest, { id: s.id! }, { amount: total });
+        decided = rows.map((row, index) => ({
+          id: row.id,
+          label: monthlyItemLabel(row),
+          amount: amounts[index],
+          approved: selection.approvedIds.has(row.id),
+        }));
+      },
+      logData: () => ({
+        requestKind: ExpenseRequestKind.CASH,
+        amount: total,
+        cashflowSource: cashflowSourceOf(existing),
+        items: decided,
+        ...snapshot,
+      }),
+    });
+
+    await this.notifyExpense(
+      {
+        suggestId: saved.id!,
+        title: `✅ ${this.monthlyKindLabel(saved)} đã duyệt`,
+        message:
+          `Đề xuất ${saved.code} đã được Giám đốc duyệt ${formatMoneyVnd(total)}, ` +
+          'vui lòng lập lệnh chi' +
+          (decided.some((item) => !item.approved)
+            ? `. Không duyệt: ${decided
+                .filter((item) => !item.approved)
+                .map((item) => item.label)
+                .join('; ')}`
+            : ''),
+        senderId: user.id,
+        meta: { status: saved.status },
+      },
+      {
+        roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        userIds: saved.createdBy ? [saved.createdBy] : [],
+      },
+    );
+    return saved;
+  }
+
+  /** Tổng phần Giám đốc đã duyệt của đề xuất quy trình Kế toán = số tiền lệnh chi. */
+  private async chainApprovedTotal(manager: EntityManager, suggestId: number) {
+    const rows = await manager.find(SuggestMonthlyItem, { where: { suggestId } });
+    const approved = rows.filter(
+      (row) => !row.excluded && row.approvedAmount !== null && row.approvedAmount !== undefined,
+    );
+    if (!approved.length) {
+      throw new BadRequestException('Đề xuất chưa có số tiền Giám đốc duyệt');
+    }
+    return (
+      Math.round(
+        approved.reduce((sum, row) => sum + (Number(row.approvedAmount) || 0), 0) * 100,
+      ) / 100
+    );
+  }
+
   // ================= UPDATE =================
 
   async update(
@@ -1899,7 +2523,24 @@ export class SuggestService {
     }
 
     if (existing.isMonthlyExpense) {
-      return this.approveMonthlyExpense(id, user, dto);
+      if (dto.requestKind && dto.requestKind !== ExpenseRequestKind.CASH) {
+        throw new BadRequestException('Đề xuất chi tháng chỉ được chi bằng tiền');
+      }
+      if (
+        dto.equipmentSource ||
+        dto.assignedTechnicianId ||
+        dto.supporterIds?.length ||
+        dto.stockInItems?.length ||
+        dto.stockInHandlerId ||
+        dto.acceptorId
+      ) {
+        throw new BadRequestException(
+          'Đề xuất chi tháng không dùng thông tin thiết bị/sửa chữa',
+        );
+      }
+      return isAccountantChain(existing)
+        ? this.approveMonthlyChain(id, user, dto)
+        : this.approveMonthlyExpense(id, user, dto);
     }
 
     if (!dto?.requestKind) {
@@ -2442,6 +3083,15 @@ export class SuggestService {
    * nhiệm vụ thì người tạo không còn cách nào tự huỷ đơn của mình.
    */
   async withdrawExpense(id: number, user: AuthUser, reason?: string) {
+    const before = await this.repo.findOne({ where: { id } });
+    const waitingAt = before
+      ? expenseActorForStatus(
+          before.status as SuggestStatus,
+          before.requestKind ?? ExpenseRequestKind.CASH,
+          before.equipmentSource,
+          before.isMonthlyExpense,
+        )
+      : null;
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.WITHDRAW,
@@ -2467,7 +3117,11 @@ export class SuggestService {
         meta: { status: saved.status, reason: reason ?? null },
       },
       {
-        roles: [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
+        // Người đang giữ bước (Kế toán / Kế toán trưởng / Giám đốc...).
+        roles:
+          waitingAt && !waitingAt.owner && waitingAt.roles.length
+            ? waitingAt.roles
+            : [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
         // Chủ đơn không tự biết như khi chính họ rút — phải báo riêng cho họ.
         userIds: !withdrawnByOwner && saved.createdBy ? [saved.createdBy] : [],
       },
@@ -2562,8 +3216,6 @@ export class SuggestService {
         dto.isMonthlyExpense ?? suggest.isMonthlyExpense ?? false;
       let subjectId: number | null = null;
       let expensePeriodId: number | null = null;
-      let monthlyItems: ResolvedMonthlyItem[] = [];
-      let requestedAmounts: number[] = [];
 
       // Có đủ định danh liên kết thì tự nhận diện đề xuất chi tháng, giúp các
       // client cũ không cần gửi thêm cờ isMonthlyExpense.
@@ -2571,61 +3223,40 @@ export class SuggestService {
         dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
+        dto.periodMonth !== undefined ||
         dto.monthlyItems !== undefined
       ) {
         isMonthlyExpense = true;
       }
-      // Đổi bảng nguồn thì phải gửi lại danh sách khoản.
       const cashflowSource: CashflowSource =
         dto.cashflowSource ?? cashflowSourceOf(suggest) ?? 'MANAGEMENT';
-      if (
-        isMonthlyExpense &&
-        dto.cashflowSource !== undefined &&
-        dto.cashflowSource !== (cashflowSourceOf(suggest) ?? 'MANAGEMENT') &&
-        dto.monthlyItems === undefined
-      ) {
-        throw new BadRequestException('Đổi loại đề xuất thì phải chọn lại khoản chi');
-      }
 
       if (isMonthlyExpense) {
-        // Gửi danh sách mới thì thay cả danh sách. Client cũ chỉ gửi một
-        // trường qua các cột đơn thì gộp lên giá trị đang lưu. Không gửi gì
-        // thì giữ nguyên các trường đang có.
-        let input: MonthlyItemInput[];
-        if (dto.monthlyItems !== undefined) {
-          input = dto.monthlyItems;
-        } else if (
-          changesSchool ||
-          dto.subjectId !== undefined ||
-          dto.expensePeriodId !== undefined ||
-          dto.schoolYear !== undefined
-        ) {
-          input = monthlyItemsFromColumns({
-            schoolId: changesSchool ? dto.schoolId : suggest.schoolId,
-            schoolYear:
-              dto.schoolYear ?? (changesSchool ? null : suggest.schoolYear),
-            subjectId: dto.subjectId ?? suggest.subjectId,
-            expensePeriodId: dto.expensePeriodId ?? suggest.expensePeriodId,
-          });
-        } else {
-          input = await this.storedMonthlyItemsInput(manager, suggest);
-        }
-        if (input.length === 0) {
-          throw new BadRequestException('Đề xuất chi tháng phải chọn trường');
-        }
-        monthlyItems = await this.resolveMonthlyItems(manager, input, cashflowSource);
-        requestedAmounts = await this.prepareCashflowItems(
+        // Sửa xong luôn đi quy trình Kế toán (kể cả đề xuất chi tháng cũ):
+        // một trường + một kỳ, Kế toán nhập số liệu lại từ đầu.
+        const sheetInput = this.chainSheetInput({
+          schoolId: dto.schoolId ?? suggest.schoolId ?? null,
+          expensePeriodId: dto.expensePeriodId ?? suggest.expensePeriodId ?? null,
+          monthlyItems: dto.monthlyItems,
+        });
+        const newPeriod = !!(dto.periodMonth && dto.periodYear);
+        const sheet = await this.resolveChainSheet(
           manager,
-          cashflowSource,
-          monthlyItems,
           actor,
+          cashflowSource,
+          {
+            schoolId: sheetInput.schoolId,
+            expensePeriodId: newPeriod ? null : sheetInput.expensePeriodId,
+            periodMonth: dto.periodMonth,
+            periodYear: dto.periodYear,
+            schoolYear: dto.schoolYear ?? null,
+          },
           suggest.id!,
         );
-        const first = monthlyItems[0];
-        schoolId = first.school.id;
-        schoolYear = first.schoolYear;
-        subjectId = first.subject?.id ?? null;
-        expensePeriodId = first.expensePeriod.id;
+        schoolId = sheet.school.id!;
+        schoolYear = sheet.schoolYear;
+        expensePeriodId = sheet.period.id;
+        subjectId = null;
         wardId = null;
       } else if (changesSchool) {
         schoolId = dto.schoolId!;
@@ -2637,7 +3268,6 @@ export class SuggestService {
         schoolYear = null;
       }
 
-      // Chi tháng đã kiểm từng trường ở resolveMonthlyItems.
       if (!isMonthlyExpense && schoolId) {
         const school = await manager.findOne(School, { where: { id: schoolId } });
         if (!school) throw new BadRequestException('Trường không tồn tại');
@@ -2653,6 +3283,7 @@ export class SuggestService {
             'Trường không có môn học trong năm học đã chọn',
           );
         }
+        await this.assertPolicyHasSupport(manager, school, schoolYear);
       } else if (!isMonthlyExpense && wardId) {
         const ward = await manager.findOne(Ward, { where: { id: wardId } });
         if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
@@ -2662,9 +3293,10 @@ export class SuggestService {
 
       const fromStatus = suggest.status;
       const wasMonthlyExpense = suggest.isMonthlyExpense ?? false;
-      // Chi tháng cũng gửi thẳng Giám đốc. Đề xuất cũ còn chờ Kế toán nhập
-      // tiền mà được sửa thì chuyển sang luồng mới luôn.
-      const targetStatus = SuggestStatus.PENDING_APPROVAL;
+      // Chi Năm về chờ Giám đốc duyệt; chi tháng về chờ Kế toán nhập số liệu.
+      const targetStatus = isMonthlyExpense
+        ? SuggestStatus.PENDING_ACCOUNTANT
+        : SuggestStatus.PENDING_APPROVAL;
       const needsReapproval = fromStatus !== targetStatus;
 
       suggest.content = content;
@@ -2682,6 +3314,7 @@ export class SuggestService {
       suggest.wardId = wardId;
       suggest.isMonthlyExpense = isMonthlyExpense;
       suggest.cashflowSource = isMonthlyExpense ? cashflowSource : null;
+      suggest.approvalFlow = isMonthlyExpense ? ACCOUNTANT_CHAIN : null;
       suggest.subjectId = subjectId;
       suggest.expensePeriodId = expensePeriodId;
       if (fileUrl) suggest.fileUrl = fileUrl;
@@ -2714,10 +3347,10 @@ export class SuggestService {
       await manager.delete(SuggestAssignment, { suggestId: s.id! });
       // Số tiền/lệnh chi cũ không còn hiệu lực khi nội dung chi tháng bị sửa
       // hoặc khi đổi qua lại giữa chi tháng và chi Năm.
+      // Chi tháng: khoản + số tiền chốt lại khi Kế toán gửi.
       if (wasMonthlyExpense || isMonthlyExpense) {
         await manager.delete(SuggestPaymentOrder, { suggestId: s.id! });
         await manager.delete(SuggestMonthlyItem, { suggestId: s.id! });
-        await this.saveMonthlyItems(manager, s.id!, monthlyItems, requestedAmounts);
       }
 
       if (fileUrl) {
@@ -2746,22 +3379,22 @@ export class SuggestService {
     await this.notifyExpense(
       {
         suggestId: saved.s.id!,
-        title: saved.needsReapproval
-          ? saved.s.isMonthlyExpense
-            ? `🔁 ${this.monthlyKindLabel(saved.s)} cần duyệt lại`
-            : '🔁 Đề xuất chi cần duyệt lại'
-          : '✏️ Đề xuất chi đã được sửa',
-        message: saved.needsReapproval
-          ? saved.s.isMonthlyExpense
-            ? `${this.monthlyKindLabel(saved.s)} ${saved.s.code} đã được sửa, cần duyệt lại: ${saved.s.content}`
-            : `Đề xuất ${saved.s.code} đã được sửa sau khi duyệt, cần duyệt lại: ${saved.s.content}`
-          : `Đề xuất ${saved.s.code} đang chờ duyệt vừa được sửa: ${saved.s.content}`,
+        title: saved.s.isMonthlyExpense
+          ? `🔁 ${this.monthlyKindLabel(saved.s)} cần Kế toán nhập số liệu lại`
+          : saved.needsReapproval
+            ? '🔁 Đề xuất chi cần duyệt lại'
+            : '✏️ Đề xuất chi đã được sửa',
+        message: saved.s.isMonthlyExpense
+          ? `${this.monthlyKindLabel(saved.s)} ${saved.s.code} đã được sửa, cần nhập số liệu và gửi lại: ${saved.s.content}`
+          : saved.needsReapproval
+            ? `Đề xuất ${saved.s.code} đã được sửa sau khi duyệt, cần duyệt lại: ${saved.s.content}`
+            : `Đề xuất ${saved.s.code} đang chờ duyệt vừa được sửa: ${saved.s.content}`,
         senderId: actor.id,
         meta: { status: saved.s.status, reapproval: saved.needsReapproval },
       },
       {
         roles: saved.s.isMonthlyExpense
-          ? [ExpenseRole.DIRECTOR]
+          ? [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT]
           : [ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN],
       },
     );
@@ -2846,23 +3479,28 @@ export class SuggestService {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
     let paymentOrder: SuggestPaymentOrder | null = null;
+    // Quy trình Kế toán: lệnh chi đúng số Giám đốc duyệt, giữ phần từng khoản
+    // để ghi ngược QL thu chi / chi một phần như lệnh chi hệ thống lập.
+    const chain = isAccountantChain(existing);
+    let amount = dto.amount;
 
     const saved = await this.expenseTransition({
       id,
-      action: existing.isMonthlyExpense
-        ? ExpenseAction.CREATE_MONTHLY_PAYMENT_ORDER
-        : ExpenseAction.CREATE_PAYMENT_ORDER,
+      action:
+        existing.isMonthlyExpense && !chain
+          ? ExpenseAction.CREATE_MONTHLY_PAYMENT_ORDER
+          : ExpenseAction.CREATE_PAYMENT_ORDER,
       user,
       note: dto.note,
       logData: () => ({
         paymentOrder: {
           code: (paymentOrder as SuggestPaymentOrder | null)?.code ?? null,
-          amount: dto.amount,
+          amount,
           paymentMethod: dto.paymentMethod,
         },
       }),
       mutate: (s) => {
-        if (s.isMonthlyExpense) s.amount = dto.amount;
+        if (s.isMonthlyExpense && !chain) s.amount = dto.amount;
         // Một đề xuất có thể được chi lại sau khi đã hoàn quỹ.
         // Xóa dấu vết trạng thái của vòng chi trước trước khi mở vòng mới.
         s.cashReleasedBy = null;
@@ -2886,12 +3524,17 @@ export class SuggestService {
         await manager.delete(SuggestPaymentOrder, {
           suggestId: s.id!,
         });
-        if (s.isMonthlyExpense) await this.clearMonthlyItemSplit(manager, s.id!);
+        if (chain) {
+          amount = await this.chainApprovedTotal(manager, s.id!);
+          await manager.update(SuggestMonthlyItem, { suggestId: s.id! }, { spent: null });
+        } else if (s.isMonthlyExpense) {
+          await this.clearMonthlyItemSplit(manager, s.id!);
+        }
 
         paymentOrder = await manager.save(SuggestPaymentOrder, {
           code,
           suggestId: s.id!,
-          amount: dto.amount,
+          amount,
           paymentMethod: dto.paymentMethod,
           note: dto.note ?? null,
           createdBy: user.id,
@@ -2902,10 +3545,10 @@ export class SuggestService {
     await this.notifyExpense(
       {
         suggestId: saved.id!,
-        title: saved.isMonthlyExpense
+        title: saved.isMonthlyExpense && !chain
           ? '📋 Đề xuất chi tháng chờ duyệt'
           : '🧾 Lệnh chi mới',
-        message: saved.isMonthlyExpense
+        message: saved.isMonthlyExpense && !chain
           ? `Kế toán công nợ đã nhập số tiền cho đề xuất ${saved.code}, vui lòng duyệt`
           : `Lệnh chi ${(paymentOrder as SuggestPaymentOrder | null)?.code} đã được lập` +
             ` cho đề xuất ${saved.code}, vui lòng xuất tiền và chọn nguồn tiền`,
@@ -2916,7 +3559,7 @@ export class SuggestService {
         },
       },
       {
-        roles: saved.isMonthlyExpense
+        roles: saved.isMonthlyExpense && !chain
           ? [ExpenseRole.DIRECTOR]
           : [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       },
@@ -2942,23 +3585,33 @@ export class SuggestService {
       throw new NotFoundException('Đề xuất chi không tồn tại');
     }
     let paymentOrder: SuggestPaymentOrder | null = null;
+    // Quy trình Kế toán: chỉ sửa hình thức / ghi chú, số tiền giữ đúng số
+    // Giám đốc duyệt. Đã chi thì QL thu chi đã ghi theo lệnh chi — không sửa.
+    const chain = isAccountantChain(request);
+    if (chain && request.status === SuggestStatus.SPENT) {
+      throw new BadRequestException(
+        'Đề xuất đã chi và đã ghi về QL thu chi nên không sửa lệnh chi được',
+      );
+    }
+    let amount = dto.amount;
 
     const saved = await this.expenseTransition({
       id,
-      action: request.isMonthlyExpense
-        ? ExpenseAction.EDIT_MONTHLY_PAYMENT_ORDER
-        : ExpenseAction.EDIT_PAYMENT_ORDER,
+      action:
+        request.isMonthlyExpense && !chain
+          ? ExpenseAction.EDIT_MONTHLY_PAYMENT_ORDER
+          : ExpenseAction.EDIT_PAYMENT_ORDER,
       user,
       note: dto.note,
       logData: () => ({
         paymentOrder: {
           code: (paymentOrder as SuggestPaymentOrder | null)?.code ?? null,
-          amount: dto.amount,
+          amount,
           paymentMethod: dto.paymentMethod,
         },
       }),
       mutate: (s) => {
-        if (s.isMonthlyExpense) {
+        if (s.isMonthlyExpense && !chain) {
           s.amount = dto.amount;
           s.approvedBy = null;
           s.approvedAt = null;
@@ -2980,12 +3633,17 @@ export class SuggestService {
         if (!existing) {
           throw new BadRequestException('Đề xuất chưa có lệnh chi để sửa');
         }
-        if (s.isMonthlyExpense) await this.clearMonthlyItemSplit(manager, s.id!);
+        if (chain) {
+          amount = await this.chainApprovedTotal(manager, s.id!);
+          await manager.update(SuggestMonthlyItem, { suggestId: s.id! }, { spent: null });
+        } else if (s.isMonthlyExpense) {
+          await this.clearMonthlyItemSplit(manager, s.id!);
+        }
 
         paymentOrder = await manager.save(SuggestPaymentOrder, {
           ...(existing ?? {}),
           suggestId: s.id!,
-          amount: dto.amount,
+          amount,
           paymentMethod: dto.paymentMethod,
           note: dto.note ?? null,
           // Nguồn tiền do thủ quỹ chọn lại khi xuất tiền lần này.
@@ -2998,10 +3656,10 @@ export class SuggestService {
     await this.notifyExpense(
       {
         suggestId: saved.id!,
-        title: saved.isMonthlyExpense
+        title: saved.isMonthlyExpense && !chain
           ? '📋 Số tiền chi tháng đã được sửa'
           : '✏️ Lệnh chi đã được sửa',
-        message: saved.isMonthlyExpense
+        message: saved.isMonthlyExpense && !chain
           ? `Số tiền của đề xuất ${saved.code} vừa được Kế toán công nợ sửa, vui lòng duyệt lại`
           : `Lệnh chi ${(paymentOrder as SuggestPaymentOrder | null)?.code} của đề xuất ${saved.code}` +
             ` vừa được kế toán công nợ sửa lại, vui lòng xuất tiền lại theo số liệu mới`,
@@ -3012,7 +3670,7 @@ export class SuggestService {
         },
       },
       {
-        roles: saved.isMonthlyExpense
+        roles: saved.isMonthlyExpense && !chain
           ? [ExpenseRole.DIRECTOR]
           : [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       },
@@ -4515,6 +5173,18 @@ export class SuggestService {
     }
 
     const items = await this.storedMonthlyItemsInput(this.dataSource.manager, s);
+    // Quy trình Kế toán chưa gửi số liệu: cả bảng Chi Ngoài của trường trong kỳ.
+    if (
+      isAccountantChain(s) &&
+      s.schoolId &&
+      s.expensePeriodId &&
+      items.every((item) => !item.subjectId)
+    ) {
+      return this.loadSchoolManagementSections(s.schoolId, s.expensePeriodId, {
+        schoolYear: null,
+        subjectId: null,
+      });
+    }
     const sections: ManagementViewSection[] = [];
     for (const item of items) {
       if (!item.schoolId || !item.expensePeriodId || !item.subjectId) continue;
@@ -4775,151 +5445,6 @@ export class SuggestService {
       }));
   }
 
-  /**
-   * Kiểm từng trường của đề xuất chi tháng: trường có thật, môn thuộc đúng
-   * trường + năm học, kỳ kế toán thuộc đúng trường, không chọn trùng môn + kỳ
-   * (trùng thì bảng Chi Ngoài và số tiền bị cộng hai lần).
-   */
-  private async resolveMonthlyItems(
-    manager: EntityManager,
-    input: MonthlyItemInput[],
-    source: CashflowSource = 'MANAGEMENT',
-  ): Promise<ResolvedMonthlyItem[]> {
-    if (input.length === 0) {
-      throw new BadRequestException('Đề xuất chi tháng phải chọn trường');
-    }
-    if (input.length > MAX_MONTHLY_EXPENSE_ITEMS) {
-      throw new BadRequestException(
-        `Một đề xuất chi tháng tối đa ${MAX_MONTHLY_EXPENSE_ITEMS} trường`,
-      );
-    }
-    const seen = new Set<string>();
-    const resolved: ResolvedMonthlyItem[] = [];
-    for (const raw of input) {
-      const school = raw.schoolId
-        ? await manager.findOne(School, { where: { id: raw.schoolId } })
-        : null;
-      if (!school) throw new BadRequestException('Trường không tồn tại');
-      const label = school.name ? ` (${school.name})` : '';
-
-      const schoolYear = raw.schoolYear ?? currentSchoolYear();
-      if (!isValidSchoolYear(schoolYear)) {
-        throw new BadRequestException(`Năm học không hợp lệ${label}`);
-      }
-      if (source === 'SCHOOL_TEACHER') {
-        resolved.push(
-          await this.resolveTeacherItem(manager, raw, school, schoolYear, label, seen),
-        );
-        continue;
-      }
-      if (!raw.subjectId || !raw.expensePeriodId) {
-        throw new BadRequestException(
-          `Đề xuất chi tháng phải chọn môn học và kỳ kế toán${label}`,
-        );
-      }
-
-      const subject = await manager.findOne(Subject, {
-        where: { id: raw.subjectId },
-      });
-      if (
-        !subject ||
-        subject.schoolId !== school.id ||
-        subject.schoolYear !== schoolYear
-      ) {
-        throw new BadRequestException(
-          `Môn học không thuộc trường và năm học đã chọn${label}`,
-        );
-      }
-
-      const expensePeriod = await manager.findOne(ExpensePeriod, {
-        where: { id: raw.expensePeriodId },
-        relations: ['school'],
-      });
-      if (!expensePeriod) {
-        throw new BadRequestException(`Kỳ kế toán không tồn tại${label}`);
-      }
-      if (expensePeriod.school?.id !== school.id) {
-        throw new BadRequestException(
-          `Kỳ kế toán không thuộc trường đã chọn${label}`,
-        );
-      }
-
-      const key = `${subject.id}:${expensePeriod.id}`;
-      if (seen.has(key)) {
-        throw new BadRequestException(
-          `Chọn trùng môn và kỳ kế toán${label}`,
-        );
-      }
-      seen.add(key);
-      resolved.push({ school, schoolYear, subject, expensePeriod });
-    }
-    return resolved;
-  }
-
-  /** Khoản lương một giáo viên: giáo viên thuộc trường, kỳ thuộc trường, không trùng. */
-  private async resolveTeacherItem(
-    manager: EntityManager,
-    raw: MonthlyItemInput,
-    school: School,
-    schoolYear: string,
-    label: string,
-    seen: Set<string>,
-  ): Promise<ResolvedMonthlyItem> {
-    if (!raw.schoolTeacherId || !raw.expensePeriodId) {
-      throw new BadRequestException(
-        `Đề xuất Chi GV trường phải chọn giáo viên và kỳ kế toán${label}`,
-      );
-    }
-    const schoolTeacher = await manager.findOne(SchoolTeacher, {
-      where: { id: raw.schoolTeacherId },
-    });
-    if (!schoolTeacher || schoolTeacher.schoolId !== school.id) {
-      throw new BadRequestException(
-        `Giáo viên không thuộc danh sách giáo viên của trường${label}`,
-      );
-    }
-    const expensePeriod = await manager.findOne(ExpensePeriod, {
-      where: { id: raw.expensePeriodId },
-      relations: ['school'],
-    });
-    if (!expensePeriod) {
-      throw new BadRequestException(`Kỳ kế toán không tồn tại${label}`);
-    }
-    if (expensePeriod.school?.id !== school.id) {
-      throw new BadRequestException(`Kỳ kế toán không thuộc trường đã chọn${label}`);
-    }
-    const key = `t${schoolTeacher.id}:${expensePeriod.id}`;
-    if (seen.has(key)) {
-      throw new BadRequestException(`Chọn trùng giáo viên và kỳ kế toán${label}`);
-    }
-    seen.add(key);
-    return { school, schoolYear, subject: null, schoolTeacher, expensePeriod };
-  }
-
-  private async saveMonthlyItems(
-    manager: EntityManager,
-    suggestId: number,
-    items: ResolvedMonthlyItem[],
-    requestedAmounts: number[] = [],
-  ) {
-    if (items.length === 0) return;
-    await manager.save(
-      SuggestMonthlyItem,
-      items.map((item, position) =>
-        manager.create(SuggestMonthlyItem, {
-          suggestId,
-          schoolId: item.school.id,
-          schoolYear: item.schoolYear,
-          subjectId: item.subject?.id ?? null,
-          schoolTeacherId: item.schoolTeacher?.id ?? null,
-          expensePeriodId: item.expensePeriod.id,
-          requestedAmount: requestedAmounts[position] ?? null,
-          position,
-        }),
-      ),
-    );
-  }
-
   /** "Đề xuất Chi Trường" / "Đề xuất Chi GV trường" / "Đề xuất Chi Ngoài (Chi chính sách tháng)". */
   private monthlyKindLabel(s: { isMonthlyExpense?: boolean | null; cashflowSource?: string | null }) {
     return CASHFLOW_SOURCE_LABELS[cashflowSourceOf(s) ?? 'MANAGEMENT'];
@@ -4990,71 +5515,6 @@ export class SuggestService {
         },
       ]),
     );
-  }
-
-  /**
-   * Trước khi lưu khoản của đề xuất chi tháng: khoản phải thuộc trường mình
-   * phụ trách (Chi Trường / GV trường — có số tiền), không nằm trong đề xuất
-   * khác chưa xong, và còn tiền phải chi. Trả Còn phải chi từng khoản.
-   * Khoá theo khoản đến hết transaction để hai người không cùng đề xuất.
-   */
-  private async prepareCashflowItems(
-    manager: EntityManager,
-    source: CashflowSource,
-    items: ResolvedMonthlyItem[],
-    actor: AuthUser,
-    excludeSuggestId: number | null,
-  ): Promise<number[]> {
-    const refs: CashflowItemRef[] = items.map((item) => ({
-      schoolId: item.school.id,
-      expensePeriodId: item.expensePeriod.id,
-      subjectId: item.subject?.id ?? null,
-      schoolTeacherId: item.schoolTeacher?.id ?? null,
-    }));
-    const table = CASHFLOW_TABLE_LABELS[source];
-    if (source !== 'MANAGEMENT') {
-      const allowed = new Set(await actorSchoolIds(manager, actor.id));
-      const outside = items.find((item) => !allowed.has(item.school.id));
-      if (outside) {
-        throw new ForbiddenException(
-          `Trường ${outside.school.name ?? `#${outside.school.id}`} không thuộc trường bạn phụ trách`,
-        );
-      }
-    }
-    const keys = refs.map((ref) => cashflowItemKey(source, ref));
-    await lockCashflowKeys(manager, source, keys);
-
-    const open = await loadOpenCashflowRequests(
-      manager,
-      source,
-      [...new Set(items.map((item) => item.school.id))],
-      excludeSuggestId,
-    );
-    const groups = await this.cashflowGroupsFor(manager, source, refs);
-    return items.map((item, index) => {
-      const label = monthlyItemLabel({
-        schoolId: item.school.id,
-        school: item.school,
-        subject: item.subject,
-        schoolTeacherId: item.schoolTeacher?.id ?? null,
-        schoolTeacher: item.schoolTeacher,
-        expensePeriod: item.expensePeriod,
-      });
-      const holder = open.find((request) => request.key === keys[index]);
-      if (holder) {
-        throw new BadRequestException(
-          `${label} đang nằm trong đề xuất ${holder.code ?? `#${holder.suggestId}`} chưa xong — ` +
-            'chờ đề xuất đó chi xong hoặc bị từ chối rồi mới đề xuất lại',
-        );
-      }
-      const remaining = groups.get(keys[index])?.remainingAmount ?? 0;
-      if (!(remaining > 0)) {
-        throw new BadRequestException(
-          `${label}: bảng ${table} không còn tiền phải chi (đã chi đủ hoặc chưa có số liệu)`,
-        );
-      }
-      return remaining;
-    });
   }
 
   /** Còn phải chi hiện tại của từng dòng đề xuất (bảng Chi Trường / Giáo viên trường). */
@@ -5277,6 +5737,11 @@ export class SuggestService {
     }
     const manager = this.dataSource.manager;
     const rows = await this.loadMonthlyRows(manager, id);
+    // Quy trình Kế toán chưa gửi: xem trước cả bảng của trường trong kỳ — số
+    // Còn chi lúc này là số sẽ chốt nếu Kế toán gửi ngay.
+    if (!rows.length && isAccountantChain(s) && s.schoolId && s.expensePeriodId) {
+      return this.previewChainSheet(s, source);
+    }
     const refs = rows.map((row) => this.cashflowRefOfRow(row));
     const groups = await this.cashflowGroupsFor(manager, source, refs);
     const { payments } = SUGGEST_PAYMENT_TABLES[source];
@@ -5319,6 +5784,53 @@ export class SuggestService {
           .reduce((sum, item) => sum + item.amount, 0) * 100,
       ) / 100;
     return { source, table: CASHFLOW_TABLE_LABELS[source], items, remainingTotal };
+  }
+
+  private async previewChainSheet(s: Suggest, source: CashflowSource) {
+    const manager = this.dataSource.manager;
+    const { groups, unassigned } = await this.sheetGroups(
+      manager,
+      source,
+      s.schoolId!,
+      s.expensePeriodId!,
+    );
+    const open = await loadOpenCashflowRequests(manager, source, [s.schoolId!], s.id!);
+    const openByKey = new Map(open.map((request) => [request.key, request]));
+    const items = groups.map((group) => {
+      const holder = openByKey.get(group.key) ?? null;
+      return {
+        id: null,
+        label: cashflowGroupLabel(group),
+        schoolId: group.schoolId,
+        expensePeriodId: group.expensePeriodId,
+        subjectId: group.subjectId,
+        schoolTeacherId: group.schoolTeacherId,
+        requestedAmount: null,
+        approvedAmount: null,
+        excluded: false,
+        spent: null,
+        totalAmount: group.totalAmount,
+        paidAmount: group.paidAmount,
+        remainingAmount: group.remainingAmount,
+        // Khoản đang nằm trong đề xuất khác sẽ bị bỏ qua khi gửi.
+        amount: holder ? 0 : Math.max(0, group.remainingAmount),
+        paidBySuggest: 0,
+        status: cashflowItemStatus(group, holder),
+        openRequest: holder
+          ? { id: holder.suggestId, code: holder.code, status: holder.status }
+          : null,
+      };
+    });
+    const remainingTotal =
+      Math.round(items.reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
+    return {
+      source,
+      table: CASHFLOW_TABLE_LABELS[source],
+      items,
+      remainingTotal,
+      preview: true,
+      unassigned,
+    };
   }
 
   async findOneExpense(id: number, actor?: AuthUser) {
@@ -5511,6 +6023,18 @@ export class SuggestService {
         notMine('s.status = :caStatus AND s.isMonthlyExpense = false'),
       );
       params.caStatus = SuggestStatus.PENDING_APPROVAL;
+    }
+    // Quy trình Kế toán của Chi Ngoài / Chi Trường / Chi GV trường.
+    if (
+      roles.includes(ExpenseRole.ACCOUNTANT) ||
+      roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)
+    ) {
+      conditions.push(notMine('s.status = :accountantInputStatus'));
+      params.accountantInputStatus = SuggestStatus.PENDING_ACCOUNTANT;
+    }
+    if (roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)) {
+      conditions.push(notMine('s.status = :chiefApprovalStatus'));
+      params.chiefApprovalStatus = SuggestStatus.PENDING_CHIEF_APPROVAL;
     }
     // Kế toán & thủ quỹ chỉ giữ nhánh tiền, phòng kỹ thuật chỉ giữ nhánh
     // thiết bị. `APPROVED` và `NOT_SPENT` dùng chung cho cả hai nhánh nên

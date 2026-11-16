@@ -12,6 +12,14 @@ export enum SuggestStatus {
    * công nợ nhập số tiền. Đề xuất mới vào thẳng PENDING_APPROVAL.
    */
   PENDING_ACCOUNTING = 'PENDING_ACCOUNTING',
+  /**
+   * Đề xuất Chi Ngoài / Chi Trường / Chi GV trường (từ 16/11/2026): kinh doanh
+   * tạo cho một trường + một kỳ kế toán, chờ Kế toán nhập số liệu bảng ở QL thu
+   * chi rồi gửi Kế toán trưởng duyệt.
+   */
+  PENDING_ACCOUNTANT = 'PENDING_ACCOUNTANT',
+  /** Kế toán đã gửi, chờ Kế toán trưởng duyệt rồi mới tới Giám đốc. */
+  PENDING_CHIEF_APPROVAL = 'PENDING_CHIEF_APPROVAL',
   PENDING_APPROVAL = 'PENDING_APPROVAL',
   PAYMENT_ORDERED = 'PAYMENT_ORDERED',
   CASH_RELEASED = 'CASH_RELEASED',

@@ -45,6 +45,8 @@ import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { CashflowItemsQueryDto } from './dto/expense/cashflow-items-query.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
+import { ChainNoteDto, ChainRejectDto } from './dto/expense/accountant-chain.dto';
+import { PolicySupportQueryDto } from './dto/expense/policy-support-query.dto';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 import { ReassignRepairDto } from './dto/expense/reassign-repair.dto';
@@ -216,6 +218,39 @@ export class ExpenseRequestController {
         @Req() req: any,
     ) {
         return this.service.approveExpense(id, req.user, dto);
+    }
+
+    // ===== Quy trình Kế toán: Chi Ngoài / Chi Trường / Chi GV trường =====
+
+    /** Kế toán nhập xong số liệu bảng ở QL thu chi: chốt số tiền, gửi Kế toán trưởng. */
+    @Post(':id/submit-to-chief')
+    @Roles(ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT)
+    submitToChief(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.submitToChiefAccountant(id, req.user, dto.note);
+    }
+
+    @Post(':id/chief-approve')
+    @Roles(ExpenseRole.CHIEF_ACCOUNTANT)
+    chiefApprove(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.chiefApproveExpense(id, req.user, dto.note);
+    }
+
+    @Post(':id/chief-reject')
+    @Roles(ExpenseRole.CHIEF_ACCOUNTANT)
+    chiefReject(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainRejectDto,
+        @Req() req: any,
+    ) {
+        return this.service.chiefRejectExpense(id, req.user, dto.reason);
     }
 
     @Post(':id/reject')
@@ -529,6 +564,15 @@ export class ExpenseRequestController {
      * ở các trường mình phụ trách (kèm khoản đã chi đủ / đang đề xuất để hiện
      * trạng thái). Khai báo trước `:id`.
      */
+    /**
+     * Hỗ trợ tiền mặt / thiết bị trong chính sách đã duyệt của trường — màn tạo
+     * Đề xuất chi Năm cho trường. Khai báo trước `:id`.
+     */
+    @Get('policy-support')
+    policySupport(@Query() query: PolicySupportQueryDto, @Req() req: any) {
+        return this.service.getPolicySupport(req.user, query);
+    }
+
     @Get('cashflow-items')
     @Roles(...EXPENSE_REQUESTER_ROLES)
     cashflowItems(@Query() query: CashflowItemsQueryDto, @Req() req: any) {

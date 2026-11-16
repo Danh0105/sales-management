@@ -16,7 +16,9 @@ import {
   IsPositive,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -168,6 +170,24 @@ export class CreateExpenseRequestDto {
   @IsInt()
   @IsPositive()
   expensePeriodId?: number;
+
+  /**
+   * Chi Ngoài / Chi Trường / Chi GV trường chưa có kỳ: kinh doanh tạo kỳ theo
+   * tháng (1–12) + năm cho trường đã chọn. Kỳ đã có thì trả lại kỳ đó.
+   */
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @Min(1, { message: 'Tháng không hợp lệ' })
+  @Max(12, { message: 'Tháng không hợp lệ' })
+  periodMonth?: number;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @Min(2020, { message: 'Năm không hợp lệ' })
+  @Max(2100, { message: 'Năm không hợp lệ' })
+  periodYear?: number;
 
   /** Không bắt buộc — bỏ trống thì server tự điền năm học hiện tại. */
   @IsOptional()

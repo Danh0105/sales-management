@@ -69,7 +69,15 @@ export type ExpenseAssignee = 'stockInHandler' | 'acceptor';
  *                                      └─ PAYMENT_ORDERED (lập lại lệnh chi)
  * PENDING_APPROVAL → REJECTED (kết thúc - bị từ chối)
  *
- * Chi tháng: PENDING_APPROVAL → PAYMENT_ORDERED → CASH_RELEASED → …
+ * Chi Ngoài / Chi Trường / Chi GV trường từ 16/11/2026 (quy trình Kế toán,
+ * `suggest.approval_flow = ACCOUNTANT_CHAIN`): kinh doanh tạo cho một trường +
+ * một kỳ kế toán → PENDING_ACCOUNTANT (Kế toán nhập số liệu bảng ở QL thu chi,
+ * gửi đi thì chốt số tiền = Còn chi) → PENDING_CHIEF_APPROVAL (Kế toán trưởng)
+ * → PENDING_APPROVAL (Giám đốc) → APPROVED → Kế toán công nợ lập lệnh chi đúng
+ * số đã duyệt → PAYMENT_ORDERED → Thủ quỹ → kinh doanh như Chi Năm.
+ *
+ * Chi tháng cũ (trước 16/11/2026, approval_flow trống) đi tiếp luồng cũ:
+ * PENDING_APPROVAL → PAYMENT_ORDERED → CASH_RELEASED → …
  *             (Giám đốc duyệt, hệ thống lập lệnh chi = tổng Còn chi Chi Ngoài)
  *   Sau hoàn quỹ / khi sửa số tiền: Kế toán công nợ lập/sửa lệnh chi →
  *   PENDING_APPROVAL → Giám đốc duyệt lại. PENDING_ACCOUNTING chỉ còn cho đề
@@ -130,6 +138,40 @@ export const EXPENSE_TRANSITIONS: Partial<
     kinds: [ExpenseRequestKind.CASH],
   },
 
+  // ===== quy trình Kế toán của Chi Ngoài / Chi Trường / Chi GV trường =====
+  // Kế toán trưởng có toàn quyền của Kế toán nên làm được cả bước nhập số
+  // liệu; ràng buộc "hai bước liên tiếp hai người khác nhau" vẫn buộc người
+  // duyệt ở bước sau phải là Kế toán trưởng khác.
+
+  [ExpenseAction.SUBMIT_TO_CHIEF_ACCOUNTANT]: {
+    from: [SuggestStatus.PENDING_ACCOUNTANT],
+    to: SuggestStatus.PENDING_CHIEF_APPROVAL,
+    roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CHIEF_APPROVE]: {
+    from: [SuggestStatus.PENDING_CHIEF_APPROVAL],
+    to: SuggestStatus.PENDING_APPROVAL,
+    roles: [ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CHIEF_REJECT]: {
+    from: [SuggestStatus.PENDING_CHIEF_APPROVAL],
+    to: SuggestStatus.REJECTED,
+    roles: [ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  /** Giám đốc duyệt; lệnh chi do Kế toán công nợ lập ở bước sau (CREATE_PAYMENT_ORDER). */
+  [ExpenseAction.APPROVE_MONTHLY_CHAIN]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.APPROVED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
   /**
    * Chủ đề xuất tự rút đơn khi chưa được duyệt. Giám đốc rút hộ được đơn của
    * BẤT KỲ ai (không cần là chủ đơn) — `overrideRoles` miễn ràng buộc
@@ -144,6 +186,8 @@ export const EXPENSE_TRANSITIONS: Partial<
     from: [
       SuggestStatus.DRAFT,
       SuggestStatus.PENDING_ACCOUNTING,
+      SuggestStatus.PENDING_ACCOUNTANT,
+      SuggestStatus.PENDING_CHIEF_APPROVAL,
       SuggestStatus.PENDING_APPROVAL,
     ],
     to: SuggestStatus.WITHDRAWN,
@@ -497,6 +541,15 @@ export function expenseActorForStatus(
     kind === ExpenseRequestKind.REPAIR;
 
   switch (status) {
+    case SuggestStatus.PENDING_ACCOUNTANT:
+      return {
+        roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        owner: false,
+      };
+
+    case SuggestStatus.PENDING_CHIEF_APPROVAL:
+      return { roles: [ExpenseRole.CHIEF_ACCOUNTANT], owner: false };
+
     case SuggestStatus.PENDING_ACCOUNTING:
       return {
         roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],

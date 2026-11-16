@@ -10,6 +10,19 @@ export enum ExpenseAction {
     REJECT = 'REJECT',
   /** Giám đốc từ chối đề xuất chi tháng. */
   REJECT_MONTHLY = 'REJECT_MONTHLY',
+  /**
+   * Quy trình Kế toán (16/11/2026): Kế toán nhập xong số liệu bảng ở QL thu chi,
+   * hệ thống chốt số tiền = Còn chi của bảng, gửi Kế toán trưởng duyệt.
+   */
+  SUBMIT_TO_CHIEF_ACCOUNTANT = 'SUBMIT_TO_CHIEF_ACCOUNTANT',
+  /** Kế toán trưởng duyệt, chuyển Giám đốc. */
+  CHIEF_APPROVE = 'CHIEF_APPROVE',
+  /** Kế toán trưởng từ chối. */
+  CHIEF_REJECT = 'CHIEF_REJECT',
+  /** Giám đốc duyệt đề xuất theo quy trình Kế toán — chờ Kế toán công nợ lập lệnh chi. */
+  APPROVE_MONTHLY_CHAIN = 'APPROVE_MONTHLY_CHAIN',
+  /** Hệ thống chuyển đề xuất đang chờ Giám đốc sang quy trình Kế toán (lúc deploy 16/11/2026). */
+  MOVE_TO_ACCOUNTANT_FLOW = 'MOVE_TO_ACCOUNTANT_FLOW',
     /** Chủ đề xuất tự rút đơn khi chưa được duyệt. */
     WITHDRAW = 'WITHDRAW',
     CREATE_PAYMENT_ORDER = 'CREATE_PAYMENT_ORDER',

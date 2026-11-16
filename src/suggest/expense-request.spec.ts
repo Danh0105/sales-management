@@ -84,12 +84,23 @@ describe('Expense request school mapping', () => {
       roles: [ExpenseRole.SALES, ExpenseRole.TREASURER],
     } as any;
 
+    // Chính sách đã duyệt của trường có hỗ trợ tiền mặt (điều kiện tạo chi Năm).
+    const policyWithCash = [
+      {
+        policy_id: 1,
+        subject_id: 9,
+        subject_name: 'Tin học',
+        data: { httienmat: [{ type: 'Chính sách', money: 1000000 }], htthietbi: [] },
+      },
+    ];
+
     it('có schoolId thì tự điền năm học hiện tại khi chưa truyền schoolYear', async () => {
       const school = { id: 445, name: 'TH ABC' };
       let createdSuggest: any;
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
+        query: jest.fn().mockResolvedValue(policyWithCash),
         create: jest.fn((_entity, data) => {
           createdSuggest = data;
           return data;
@@ -295,6 +306,7 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
+        query: jest.fn().mockResolvedValue(policyWithCash),
         create: jest.fn((_entity, data) => {
           createdSuggest = data;
           return data;
@@ -350,6 +362,7 @@ describe('Expense request school mapping', () => {
       const manager = {
         findOne: jest.fn().mockResolvedValue(school),
         count: jest.fn().mockResolvedValue(1),
+        query: jest.fn().mockResolvedValue(policyWithCash),
         create: jest.fn((_entity, data) => data),
         save: jest
           .fn()

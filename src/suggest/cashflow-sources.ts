@@ -40,6 +40,29 @@ export const isCashflowSource = (value: unknown): value is CashflowSource =>
   typeof value === 'string' &&
   (CASHFLOW_SOURCES as readonly string[]).includes(value);
 
+/**
+ * Quy trình Kế toán (16/11/2026): kinh doanh tạo đề xuất cho một trường + một
+ * kỳ kế toán, Kế toán nhập số liệu bảng rồi gửi, Kế toán trưởng → Giám đốc →
+ * Kế toán công nợ lập lệnh chi → Thủ quỹ → kinh doanh.
+ */
+export const ACCOUNTANT_CHAIN = 'ACCOUNTANT_CHAIN';
+
+export const isAccountantChain = (s: {
+  isMonthlyExpense?: boolean | null;
+  approvalFlow?: string | null;
+}) => !!s.isMonthlyExpense && s.approvalFlow === ACCOUNTANT_CHAIN;
+
+/** Năm học của kỳ tháng thật (tháng 8 trở đi thuộc năm học bắt đầu năm đó). */
+export function schoolYearOfPeriod(period: {
+  month?: number | null;
+  year?: number | null;
+}): string | null {
+  const month = Number(period.month);
+  const year = Number(period.year);
+  if (!(month >= 1 && month <= 12) || !(year > 2000)) return null;
+  return month >= 8 ? `${year}-${year + 1}` : `${year - 1}-${year}`;
+}
+
 /** Bảng nguồn của đề xuất; đề xuất chi tháng cũ (trống) là Chi Ngoài, chi Năm là null. */
 export function cashflowSourceOf(s: {
   isMonthlyExpense?: boolean | null;
@@ -56,7 +79,12 @@ export function cashflowSourceOf(s: {
  * được) vẫn giữ khoản để không chi hai lần.
  */
 export const CASHFLOW_RELEASED_STATUSES = ['SPENT', 'REJECTED', 'WITHDRAWN'];
-const PROPOSED_STATUSES = ['PENDING_APPROVAL', 'PENDING_ACCOUNTING'];
+const PROPOSED_STATUSES = [
+  'PENDING_APPROVAL',
+  'PENDING_ACCOUNTING',
+  'PENDING_ACCOUNTANT',
+  'PENDING_CHIEF_APPROVAL',
+];
 
 export type CashflowItemStatus =
   | 'UNPAID'

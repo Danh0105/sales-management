@@ -111,6 +111,17 @@ export class CreateSuggestDto {
     @IsInt()
     expensePeriodId?: number;
 
+    /** Kỳ mới kinh doanh tạo — xem `CreateExpenseRequestDto.periodMonth`. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    periodMonth?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    periodYear?: number;
+
     /** Các trường của đề xuất chi tháng — xem `CreateExpenseRequestDto.monthlyItems`. */
     @IsOptional()
     @Transform(({ value }) => parseJsonArrayOf(MonthlyExpenseItemDto)({ value }))

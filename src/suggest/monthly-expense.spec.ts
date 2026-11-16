@@ -185,134 +185,7 @@ describe('DTO đề xuất chi tháng', () => {
   });
 });
 
-describe('Tạo đề xuất chi tháng', () => {
-  const body = {
-    content: 'Chi tháng 9',
-    expectedPaymentDate: '2099-09-15',
-    schoolYear: '2099-2100',
-    type: SuggestType.EXPENSE_REQUEST,
-  };
-  const user = { id: 7, roles: [ExpenseRole.SALES] } as never;
-  const school = { id: 445, name: 'TH ABC' };
-  const subject = { id: 901, schoolId: 445, schoolYear: '2099-2100' };
-  const period = { id: 77, name: 'Tháng 9', school };
-
-  const makeService = (found: unknown[]) => {
-    const findOne = jest.fn();
-    found.forEach((row) => findOne.mockResolvedValueOnce(row));
-    const manager = {
-      findOne,
-      count: jest.fn().mockResolvedValue(1),
-      create: jest.fn((_entity, data) => data),
-      save: jest.fn(async (data) => ({ ...data, id: 125 })),
-    };
-    const service = Object.create(SuggestService.prototype) as SuggestService;
-    Object.assign(service as object, {
-      dataSource: { transaction: jest.fn((run) => run(manager)) },
-      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
-      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
-        items.map(() => 100_000),
-      ),
-      generateCode: jest.fn().mockResolvedValue('DX-1'),
-      writeExpenseLog: jest.fn(),
-      expenseNextStepDetails: jest.fn(),
-      notifyExpense: jest.fn(),
-      findOneExpense: jest.fn().mockResolvedValue({ id: 125 }),
-    });
-    return { service, manager };
-  };
-
-  it('client cũ gửi một trường: lưu môn và kỳ, gửi thẳng Giám đốc', async () => {
-    const { service, manager } = makeService([school, subject, period]);
-    await service.create(
-      {
-        ...body,
-        schoolId: 445,
-        isMonthlyExpense: true,
-        subjectId: 901,
-        expensePeriodId: 77,
-      } as never,
-      undefined,
-      user,
-    );
-    expect(manager.create.mock.calls[0][1]).toEqual(
-      expect.objectContaining({
-        isMonthlyExpense: true,
-        requestKind: ExpenseRequestKind.CASH,
-        status: SuggestStatus.PENDING_APPROVAL,
-        subjectId: 901,
-        expensePeriodId: 77,
-        amount: null,
-      }),
-    );
-    expect((service as never as { notifyExpense: jest.Mock }).notifyExpense)
-      .toHaveBeenCalledWith(expect.anything(), {
-        roles: [ExpenseRole.DIRECTOR],
-      });
-  });
-
-  it('đề xuất năm vẫn gửi Giám đốc và không có môn, kỳ', async () => {
-    const { service, manager } = makeService([school]);
-    await service.create(
-      { ...body, schoolId: 445, isMonthlyExpense: false } as never,
-      undefined,
-      user,
-    );
-    expect(manager.create.mock.calls[0][1]).toEqual(
-      expect.objectContaining({
-        isMonthlyExpense: false,
-        requestKind: null,
-        status: SuggestStatus.PENDING_APPROVAL,
-      }),
-    );
-    expect(manager.create.mock.calls[0][1].subjectId).toBeUndefined();
-  });
-
-  it.each([
-    [
-      'thiếu môn và kỳ',
-      { schoolId: 445, isMonthlyExpense: true },
-      [school],
-      'phải chọn môn học và kỳ kế toán',
-    ],
-    [
-      'chọn môn của năm học khác',
-      { schoolId: 445, subjectId: 901, expensePeriodId: 77 },
-      [school, { ...subject, schoolYear: '2098-2099' }],
-      'Môn học không thuộc trường và năm học',
-    ],
-    [
-      'chọn môn của trường khác',
-      { schoolId: 445, subjectId: 901, expensePeriodId: 77 },
-      [school, { ...subject, schoolId: 999 }],
-      'Môn học không thuộc trường và năm học',
-    ],
-    [
-      'chọn kỳ của trường khác',
-      { schoolId: 445, subjectId: 901, expensePeriodId: 77 },
-      [school, subject, { id: 77, school: { id: 999 } }],
-      'Kỳ kế toán không thuộc trường',
-    ],
-    [
-      'kỳ không tồn tại',
-      { schoolId: 445, subjectId: 901, expensePeriodId: 77 },
-      [school, subject, null],
-      'Kỳ kế toán không tồn tại',
-    ],
-    [
-      'chi tháng theo phường/xã',
-      { wardId: 12, isMonthlyExpense: true },
-      [],
-      'phải chọn trường',
-    ],
-  ])('từ chối khi %s', async (_name, extra, found, message) => {
-    const { service, manager } = makeService(found);
-    await expect(
-      service.create({ ...body, ...extra } as never, undefined, user),
-    ).rejects.toThrow(message);
-    expect(manager.save).not.toHaveBeenCalled();
-  });
-});
+// Tạo Chi Ngoài / Chi Trường / Chi GV trường (quy trình Kế toán): accountant-chain.spec.ts.
 
 describe('Chủ đơn sửa đề xuất chi tháng', () => {
   const actor = { id: 7, roles: [ExpenseRole.SALES] } as never;
@@ -333,10 +206,6 @@ describe('Chủ đơn sửa đề xuất chi tháng', () => {
     const service = Object.create(SuggestService.prototype) as SuggestService;
     Object.assign(service as object, {
       dataSource: { transaction: jest.fn((run) => run(manager)) },
-      // Chống trùng + Còn phải chi: kiểm riêng ở cashflow-sources.spec.ts.
-      prepareCashflowItems: jest.fn(async (_m: unknown, _s: unknown, items: unknown[]) =>
-        items.map(() => 100_000),
-      ),
     });
     return { service, manager };
   };

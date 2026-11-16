@@ -190,6 +190,15 @@ export class Suggest {
     @Column({ type: 'varchar', name: 'cashflow_source', length: 20, nullable: true })
     cashflowSource?: CashflowSource | null;
 
+    /**
+     * Quy trình duyệt của đề xuất chi tháng. `ACCOUNTANT_CHAIN` (từ 16/11/2026):
+     * Kế toán nhập số liệu → Kế toán trưởng → Giám đốc → Kế toán công nợ lập
+     * lệnh chi → Thủ quỹ → kinh doanh. Trống = luồng cũ (Giám đốc duyệt là hệ
+     * thống tự lập lệnh chi). Chi Năm luôn trống.
+     */
+    @Column({ type: 'varchar', name: 'approval_flow', length: 30, nullable: true })
+    approvalFlow?: string | null;
+
     /** Môn học áp dụng cho đề xuất chi tháng. */
     @Column({ type: 'int', name: 'subject_id', nullable: true })
     subjectId?: number | null;
