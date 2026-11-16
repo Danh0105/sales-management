@@ -206,8 +206,10 @@ function makeService(manager: ReturnType<typeof makeManager>) {
     expenseNextStepDetails: jest.fn().mockResolvedValue({}),
     notifyExpense: jest.fn(),
     findOneExpense: jest.fn().mockResolvedValue({ id: 125 }),
+    // Bảng chưa có số liệu (Kế toán nhập ở bước sau); test riêng ở dưới.
+    sheetGroups: jest.fn().mockResolvedValue({ groups: [], unassigned: [] }),
   });
-  return service as SuggestService & { notifyExpense: jest.Mock };
+  return service as SuggestService & { notifyExpense: jest.Mock; sheetGroups: jest.Mock };
 }
 
 const byEntity =
@@ -251,42 +253,74 @@ describe('Kinh doanh tạo Chi Ngoài / Chi Trường / Chi GV trường', () =>
     });
   });
 
-  it('tạo kỳ tháng mới cho trường khi chưa có', async () => {
-    const created = { ...period, id: 78, month: 10, name: 'Tháng 10/2099' };
+  it('kinh doanh không tạo kỳ kế toán: gửi tháng/năm mà không chọn kỳ thì từ chối, không tạo kỳ', async () => {
     const manager = makeManager({
       findOne: byEntity(new Map<unknown, unknown>([[School, school]])),
-      periodsByQb: [null, created],
     });
     const service = makeService(manager);
-    await service.create(
-      { ...body, cashflowSource: 'MANAGEMENT', schoolId: 445, periodMonth: 10, periodYear: 2099 } as never,
-      undefined,
-      sales,
-    );
-    expect(manager.insert).toHaveBeenCalledWith(
-      ExpensePeriod,
-      expect.objectContaining({ month: 10, year: 2099, school: { id: 445 } }),
-    );
-    const suggest = manager.create.mock.calls.find(([entity]) => entity === Suggest)![1];
-    expect(suggest).toEqual(expect.objectContaining({ expensePeriodId: 78 }));
+    await expect(
+      service.create(
+        { ...body, cashflowSource: 'MANAGEMENT', schoolId: 445, periodMonth: 10, periodYear: 2099 } as never,
+        undefined,
+        sales,
+      ),
+    ).rejects.toThrow('Chọn kỳ kế toán của trường');
+    expect(manager.insert).not.toHaveBeenCalled();
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
-  it('kỳ tháng đã có thì dùng lại, không tạo thêm', async () => {
+  it('bảng đã có số liệu nhưng không còn khoản đề xuất được (Có trong HĐ) thì từ chối', async () => {
     const manager = makeManager({
-      findOne: byEntity(new Map<unknown, unknown>([[School, school]])),
-      periodsByQb: [period],
+      findOne: byEntity(
+        new Map<unknown, unknown>([
+          [School, school],
+          [ExpensePeriod, period],
+        ]),
+      ),
     });
     const service = makeService(manager);
-    await service.create(
-      { ...body, cashflowSource: 'MANAGEMENT', schoolId: 445, periodMonth: 9, periodYear: 2099 } as never,
-      undefined,
-      sales,
-    );
-    expect(manager.insert).not.toHaveBeenCalled();
+    service.sheetGroups.mockResolvedValue({
+      groups: [{ key: '445:77:s1', remainingAmount: 0, inContractAmount: 500_000 }],
+      unassigned: [],
+    });
+    await expect(
+      service.create(
+        { ...body, cashflowSource: 'SCHOOL_EXPENSE', schoolId: 445, expensePeriodId: 77 } as never,
+        undefined,
+        sales,
+      ),
+    ).rejects.toThrow('"Có trong HĐ" đã tính là đã chi');
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('bảng còn khoản chưa chi thì tạo được', async () => {
+    const manager = makeManager({
+      findOne: byEntity(
+        new Map<unknown, unknown>([
+          [School, school],
+          [ExpensePeriod, period],
+        ]),
+      ),
+    });
+    const service = makeService(manager);
+    service.sheetGroups.mockResolvedValue({
+      groups: [
+        { key: '445:77:s1', remainingAmount: 0, inContractAmount: 500_000 },
+        { key: '445:77:s2', remainingAmount: 200_000, inContractAmount: 0 },
+      ],
+      unassigned: [],
+    });
+    await expect(
+      service.create(
+        { ...body, cashflowSource: 'SCHOOL_EXPENSE', schoolId: 445, expensePeriodId: 77 } as never,
+        undefined,
+        sales,
+      ),
+    ).resolves.toEqual({ id: 125 });
   });
 
   it.each([
-    ['không chọn kỳ', { schoolId: 445 }, 'Chọn kỳ kế toán hoặc tạo kỳ mới'],
+    ['không chọn kỳ', { schoolId: 445 }, 'Chọn kỳ kế toán của trường'],
     ['không chọn trường', { expensePeriodId: 77 }, 'Chọn trường của đề xuất'],
     [
       'client cũ gửi nhiều trường',

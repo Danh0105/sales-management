@@ -42,7 +42,7 @@ import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto'
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
 import { ConfirmPartiallySpentDto } from './dto/expense/confirm-partially-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
-import { CashflowItemsQueryDto } from './dto/expense/cashflow-items-query.dto';
+import { CashflowItemsQueryDto, CashflowSheetQueryDto } from './dto/expense/cashflow-items-query.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
 import { ChainNoteDto, ChainRejectDto } from './dto/expense/accountant-chain.dto';
@@ -571,6 +571,15 @@ export class ExpenseRequestController {
     @Get('policy-support')
     policySupport(@Query() query: PolicySupportQueryDto, @Req() req: any) {
         return this.service.getPolicySupport(req.user, query);
+    }
+
+    /**
+     * Màn tạo Chi Ngoài / Chi Trường / Chi GV trường: toàn bộ số liệu Kế toán
+     * đã nhập ở bảng của trường trong kỳ. Khai báo trước `:id`.
+     */
+    @Get('cashflow-sheet')
+    cashflowSheet(@Query() query: CashflowSheetQueryDto, @Req() req: any) {
+        return this.service.getCashflowSheet(req.user, query);
     }
 
     @Get('cashflow-items')

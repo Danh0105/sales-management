@@ -137,6 +137,11 @@ export interface CashflowGroup {
   remainingAmount: number;
   /** Kỳ đã "Kết thúc" ở QL thu chi. */
   finalized: boolean;
+  /**
+   * Chi Trường: phần của các dòng Hình thức chi "Có trong HĐ" — trường giữ lại
+   * qua hoá đơn nên tính là đã chi, không đề xuất được (0 với bảng khác).
+   */
+  inContractAmount: number;
 }
 
 export interface OpenCashflowRequest {
@@ -223,6 +228,9 @@ function periodWhere(filter: CashflowGroupFilter, params: unknown[]): string {
   return parts.join(' AND ');
 }
 
+/** Hình thức chi "Có trong HĐ" của dòng Chi Trường (`school_expense_items.payment_type`). */
+export const SCHOOL_PAYMENT_IN_CONTRACT = 'in_contract';
+
 type GroupRow = {
   school_id: number;
   school_name: string | null;
@@ -239,6 +247,7 @@ type GroupRow = {
   total: string;
   paid: string;
   remaining: string;
+  in_contract?: string | null;
 };
 
 function toGroup(source: CashflowSource, row: GroupRow): CashflowGroup {
@@ -266,6 +275,7 @@ function toGroup(source: CashflowSource, row: GroupRow): CashflowGroup {
     paidAmount: round2(num(row.paid)),
     remainingAmount: round2(num(row.remaining)),
     finalized: !!row.finalized,
+    inContractAmount: round2(num(row.in_contract)),
   };
 }
 
@@ -277,7 +287,10 @@ const SHEET_JOINS = `JOIN school_expenses se ON se.id = t.school_expense_id
   JOIN schools sc ON sc.id = se.school_id
   JOIN expense_periods p ON p.id = se.period_id`;
 
-/** Chi Trường theo môn: Phải chi = Σ Tiền chi trường, Còn = Σ phần chưa chi của từng dòng. */
+/**
+ * Chi Trường theo môn: Phải chi = Σ Tiền chi trường, Còn = Σ phần chưa chi của
+ * từng dòng. Dòng Hình thức chi "Có trong HĐ" tính đã chi đủ (Còn = 0).
+ */
 export async function loadSchoolExpenseGroups(
   manager: EntityManager,
   filter: CashflowGroupFilter,
@@ -292,8 +305,12 @@ export async function loadSchoolExpenseGroups(
        sub.school_year,
        count(*)::int AS row_count,
        SUM(t."schoolExpenseAmount")::text AS total,
-       SUM(t."paidAmount")::text AS paid,
-       SUM(GREATEST(t."schoolExpenseAmount" - t."paidAmount", 0))::text AS remaining
+       SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}'
+                THEN t."schoolExpenseAmount" ELSE t."paidAmount" END)::text AS paid,
+       SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}' THEN 0
+                ELSE GREATEST(t."schoolExpenseAmount" - t."paidAmount", 0) END)::text AS remaining,
+       SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}'
+                THEN t."schoolExpenseAmount" ELSE 0 END)::text AS in_contract
      FROM school_expense_items t
      ${SHEET_JOINS}
      JOIN subjects sub ON sub.id = t.subject_id
@@ -311,7 +328,7 @@ export async function loadSchoolExpenseGroups(
  * Dòng Giáo viên trường đã trả: đủ Ngày chi + Nguồn chi (nhập tay), hoặc đã có
  * đề xuất chi ghi vào.
  */
-const TEACHER_ROW_PAID = `((t.expense_date IS NOT NULL AND t.cash_account IS NOT NULL)
+export const TEACHER_ROW_PAID = `((t.expense_date IS NOT NULL AND t.cash_account IS NOT NULL)
   OR EXISTS (SELECT 1 FROM school_teacher_suggest_payments sp
              WHERE sp.school_teacher_expense_item_id = t.id))`;
 
@@ -445,6 +462,7 @@ export function managementGroupsFromSections(
       paidAmount: round2(num(section.totals?.paidAmount)),
       remainingAmount: round2(rowRemaining),
       finalized: section.finalized,
+      inContractAmount: 0,
     });
   }
   // Bảng không có tiền phải chi thì không phải khoản.
@@ -668,10 +686,12 @@ export async function recordSchoolExpenseSuggestPayments(
             paid: string;
           }[]
         >(
+          // Dòng "Có trong HĐ" đã tính chi đủ — không ghi đề xuất vào.
           `SELECT id, school_expense_id, "rowIndex" AS row_index,
              "schoolExpenseAmount"::text AS amount, "paidAmount"::text AS paid
            FROM school_expense_items
            WHERE school_expense_id = ANY($1) AND subject_id = $2
+             AND payment_type IS DISTINCT FROM '${SCHOOL_PAYMENT_IN_CONTRACT}'
            ORDER BY school_expense_id, "rowIndex", id`,
           [sheetIds, row.subjectId],
         )

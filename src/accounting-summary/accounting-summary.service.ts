@@ -134,8 +134,11 @@ export class AccountingSummaryService {
           COALESCE(SUM(paid), 0) AS "schoolExpensePaid",
           COALESCE(SUM(payable), 0) AS "schoolExpensePayable"
         FROM (
+          -- Hình thức chi "Có trong HĐ": trường giữ lại qua hoá đơn, tính đã chi đủ.
           SELECT "school_expense_id", "subject_id",
-            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable
+            "schoolExpenseAmount" AS expected,
+            CASE WHEN payment_type = 'in_contract' THEN "schoolExpenseAmount" ELSE "paidAmount" END AS paid,
+            CASE WHEN payment_type = 'in_contract' THEN 0 ELSE remaining END AS payable
           FROM school_expense_items
           UNION ALL
           SELECT school_expense_id AS "school_expense_id", subject_id AS "subject_id",
@@ -272,13 +275,19 @@ export class AccountingSummaryService {
           COALESCE(SUM(school_only_paid), 0) AS "schoolOnlyPaid",
           COALESCE(SUM(teacher), 0) AS "schoolTeacherExpense"
         FROM (
+          -- Hình thức chi "Có trong HĐ": trường giữ lại qua hoá đơn, tính đã chi đủ.
           SELECT "school_expense_id", "subject_id",
-            "schoolExpenseAmount" AS expected, "paidAmount" AS paid, remaining AS payable,
+            "schoolExpenseAmount" AS expected,
+            CASE WHEN payment_type = 'in_contract' THEN "schoolExpenseAmount" ELSE "paidAmount" END AS paid,
+            CASE WHEN payment_type = 'in_contract' THEN 0 ELSE remaining END AS payable,
             GREATEST("schoolExpenseAmount" - "teacherAmount", 0) AS school_only,
-            LEAST(
-              GREATEST("paidAmount", 0),
-              GREATEST("schoolExpenseAmount" - "teacherAmount", 0)
-            ) AS school_only_paid,
+            CASE WHEN payment_type = 'in_contract'
+              THEN GREATEST("schoolExpenseAmount" - "teacherAmount", 0)
+              ELSE LEAST(
+                GREATEST("paidAmount", 0),
+                GREATEST("schoolExpenseAmount" - "teacherAmount", 0)
+              )
+            END AS school_only_paid,
             GREATEST("teacherAmount", 0) AS teacher
           FROM school_expense_items
           UNION ALL

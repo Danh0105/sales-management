@@ -66,6 +66,7 @@ import {
   schoolYearOfPeriod,
 } from './cashflow-sources';
 import { loadPolicySupport } from './policy-support';
+import { loadSheetRows } from './cashflow-sheet';
 import {
   buildManagementViewSections,
   ManagementViewSection,
@@ -236,7 +237,6 @@ export class SuggestService {
         dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
-        dto.periodMonth !== undefined ||
         dto.monthlyItems !== undefined;
       if (isMonthlyExpense) {
         return this.createChainMonthlyExpense(dto, fileUrl, actor);
@@ -603,36 +603,6 @@ export class SuggestService {
     return loadPolicySupport(manager, query.schoolId, query.schoolYear);
   }
 
-  /** Kỳ tháng của trường: có thì dùng, chưa có thì tạo (cùng chốt trùng của QL thu chi). */
-  private async findOrCreateSchoolPeriod(
-    manager: EntityManager,
-    schoolId: number,
-    month: number,
-    year: number,
-  ): Promise<ExpensePeriod> {
-    const find = () =>
-      manager
-        .createQueryBuilder(ExpensePeriod, 'p')
-        .leftJoinAndSelect('p.school', 'school')
-        .where('p.school_id = :schoolId', { schoolId })
-        .andWhere('p.month = :month', { month })
-        .andWhere('p.year = :year', { year })
-        .getOne();
-    await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-      `expense-period:${schoolId}:${year}:${month}`,
-    ]);
-    const existing = await find();
-    if (existing) return existing;
-    await manager.insert(ExpensePeriod, {
-      month,
-      year,
-      name: `Tháng ${month}/${year}`,
-      status: 1,
-      school: { id: schoolId } as School,
-    });
-    return (await find())!;
-  }
-
   /** Đề xuất quy trình Kế toán khác đang chạy cho cùng bảng (trường + kỳ + loại). */
   private async findOpenSheetRequest(
     manager: EntityManager,
@@ -664,8 +634,9 @@ export class SuggestService {
 
   /**
    * Kiểm trường + kỳ của đề xuất quy trình Kế toán (tạo / sửa): trường thuộc
-   * trường mình phụ trách, kỳ thuộc trường (hoặc tạo kỳ tháng mới), chưa có
-   * đề xuất khác đang chạy cho cùng bảng.
+   * trường mình phụ trách, kỳ kế toán (Kế toán đã tạo) thuộc trường, chưa có
+   * đề xuất khác đang chạy cho cùng bảng, và bảng đã có số liệu thì phải còn
+   * khoản đề xuất được (Chi Trường: dòng "Có trong HĐ" tính đã chi).
    */
   private async resolveChainSheet(
     manager: EntityManager,
@@ -674,8 +645,6 @@ export class SuggestService {
     input: {
       schoolId?: number | null;
       expensePeriodId?: number | null;
-      periodMonth?: number | null;
-      periodYear?: number | null;
       schoolYear?: string | null;
     },
     excludeSuggestId: number | null,
@@ -694,25 +663,16 @@ export class SuggestService {
       );
     }
 
-    let period: ExpensePeriod | null = null;
-    if (input.expensePeriodId) {
-      period = await manager.findOne(ExpensePeriod, {
-        where: { id: input.expensePeriodId },
-        relations: ['school'],
-      });
-      if (!period) throw new BadRequestException('Kỳ kế toán không tồn tại');
-      if (period.school?.id !== school.id) {
-        throw new BadRequestException('Kỳ kế toán không thuộc trường đã chọn');
-      }
-    } else if (input.periodMonth && input.periodYear) {
-      period = await this.findOrCreateSchoolPeriod(
-        manager,
-        school.id!,
-        input.periodMonth,
-        input.periodYear,
-      );
-    } else {
-      throw new BadRequestException('Chọn kỳ kế toán hoặc tạo kỳ mới');
+    if (!input.expensePeriodId) {
+      throw new BadRequestException('Chọn kỳ kế toán của trường');
+    }
+    const period = await manager.findOne(ExpensePeriod, {
+      where: { id: input.expensePeriodId },
+      relations: ['school'],
+    });
+    if (!period) throw new BadRequestException('Kỳ kế toán không tồn tại');
+    if (period.school?.id !== school.id) {
+      throw new BadRequestException('Kỳ kế toán không thuộc trường đã chọn');
     }
 
     const schoolYear =
@@ -731,14 +691,153 @@ export class SuggestService {
       period.id,
       excludeSuggestId,
     );
+    const sheetLabel =
+      `Bảng ${CASHFLOW_TABLE_LABELS[source]} của ${school.name ?? 'trường'} ` +
+      periodLabelOf({ periodName: period.name, periodMonth: period.month, periodYear: period.year });
     if (open) {
       throw new BadRequestException(
-        `Bảng ${CASHFLOW_TABLE_LABELS[source]} của ${school.name ?? 'trường'} ` +
-          `${periodLabelOf({ periodName: period.name, periodMonth: period.month, periodYear: period.year })} ` +
-          `đã có đề xuất ${open.code ?? `#${open.id}`} đang chạy`,
+        `${sheetLabel} đã có đề xuất ${open.code ?? `#${open.id}`} đang chạy`,
+      );
+    }
+    // Bảng đã có số liệu mà không còn khoản nào đề xuất được thì không tạo.
+    // Bảng chưa có số liệu vẫn tạo được (Kế toán nhập ở bước sau).
+    const sheet = await this.sheetProposable(manager, source, school.id!, period.id, excludeSuggestId);
+    if (sheet.hasData && !(sheet.proposableTotal > 0)) {
+      throw new BadRequestException(
+        `${sheetLabel} không còn khoản nào cần đề xuất` +
+          (sheet.inContractTotal > 0
+            ? ' (dòng Hình thức chi "Có trong HĐ" đã tính là đã chi)'
+            : ' (đã chi đủ hoặc đang nằm trong đề xuất khác)'),
       );
     }
     return { school, period, schoolYear };
+  }
+
+  /**
+   * Số liệu bảng nguồn của trường trong kỳ: có số liệu chưa, tổng còn đề xuất
+   * được (bỏ khoản đang nằm trong đề xuất khác chưa xong), phần "Có trong HĐ".
+   */
+  private async sheetProposable(
+    manager: EntityManager,
+    source: CashflowSource,
+    schoolId: number,
+    periodId: number,
+    excludeSuggestId: number | null,
+  ) {
+    const { groups, unassigned } = await this.sheetGroups(manager, source, schoolId, periodId);
+    const open = await loadOpenCashflowRequests(manager, source, [schoolId], excludeSuggestId);
+    const held = new Map(open.map((request) => [request.key, request]));
+    const round = (value: number) => Math.round(value * 100) / 100;
+    return {
+      groups,
+      unassigned,
+      held,
+      hasData: groups.length > 0,
+      proposableTotal: round(
+        groups
+          .filter((group) => !held.has(group.key))
+          .reduce((sum, group) => sum + Math.max(0, group.remainingAmount), 0),
+      ),
+      inContractTotal: round(groups.reduce((sum, group) => sum + group.inContractAmount, 0)),
+    };
+  }
+
+  /**
+   * Màn tạo đề xuất Chi Ngoài / Chi Trường / Chi GV trường: toàn bộ số liệu Kế
+   * toán đã nhập ở bảng nguồn của trường trong kỳ (từng dòng), kèm từng khoản
+   * (Phải chi / Đã chi / Còn lại / trạng thái) và số còn đề xuất được.
+   */
+  async getCashflowSheet(
+    user: AuthUser,
+    query: { source: CashflowSource; schoolId: number; expensePeriodId: number; excludeSuggestId?: number },
+  ) {
+    const actor = this.ensureUser(user);
+    const source = query.source;
+    if (!isCashflowSource(source)) {
+      throw new BadRequestException('Loại đề xuất chi tháng không hợp lệ');
+    }
+    const manager = this.dataSource.manager;
+    const requesterOnly = this.isRequesterOnly(actor);
+    if (requesterOnly) {
+      const allowed = await actorSchoolIds(manager, actor.id);
+      if (!allowed.includes(query.schoolId)) {
+        throw new ForbiddenException('Trường không thuộc trường bạn phụ trách');
+      }
+    } else if (
+      source === 'SCHOOL_TEACHER' &&
+      !(actor.roles ?? []).some((role) =>
+        [...(CASHFLOW_TEACHER_PAY_ROLES as readonly string[]), ...EXPENSE_REQUESTER_ROLES].includes(role),
+      )
+    ) {
+      throw new ForbiddenException('Bạn không xem được lương giáo viên trường');
+    }
+    const period = await manager.findOne(ExpensePeriod, {
+      where: { id: query.expensePeriodId },
+      relations: ['school'],
+    });
+    if (!period || period.school?.id !== query.schoolId) {
+      throw new BadRequestException('Kỳ kế toán không thuộc trường đã chọn');
+    }
+    // Sửa đề xuất của chính mình: khoản của đề xuất đó không tính là đang bị giữ.
+    let excludeSuggestId: number | null = null;
+    if (query.excludeSuggestId) {
+      const own = await this.repo.findOne({
+        where: { id: query.excludeSuggestId, createdBy: actor.id },
+        select: { id: true },
+      });
+      excludeSuggestId = own?.id ?? null;
+    }
+    const sheet = await this.sheetProposable(
+      manager,
+      source,
+      query.schoolId,
+      query.expensePeriodId,
+      excludeSuggestId,
+    );
+    const openSheet = await this.findOpenSheetRequest(
+      manager,
+      source,
+      query.schoolId,
+      query.expensePeriodId,
+      excludeSuggestId,
+    );
+    const sections =
+      source === 'MANAGEMENT'
+        ? await this.loadSchoolManagementSections(
+            query.schoolId,
+            query.expensePeriodId,
+            { schoolYear: null, subjectId: null },
+            manager,
+          )
+        : [];
+    const rows =
+      source === 'MANAGEMENT'
+        ? []
+        : await loadSheetRows(manager, source, query.schoolId, query.expensePeriodId);
+    return {
+      source,
+      table: CASHFLOW_TABLE_LABELS[source],
+      school: { id: query.schoolId, name: period.school?.name ?? null },
+      period: { id: period.id, month: period.month, year: period.year, name: period.name },
+      hasData: sheet.hasData,
+      proposableTotal: sheet.proposableTotal,
+      inContractTotal: sheet.inContractTotal,
+      openSheetRequest: openSheet,
+      groups: sheet.groups.map((group) => {
+        const holder = sheet.held.get(group.key) ?? null;
+        return {
+          ...group,
+          label: cashflowGroupLabel(group),
+          status: cashflowItemStatus(group, holder),
+          openRequest: holder
+            ? { id: holder.suggestId, code: holder.code, status: holder.status }
+            : null,
+        };
+      }),
+      sections,
+      rows,
+      unassigned: sheet.unassigned,
+    };
   }
 
   /** Trường + kỳ của client cũ gửi danh sách khoản: chỉ nhận một trường, một kỳ. */
@@ -777,12 +876,7 @@ export class SuggestService {
         manager,
         actor,
         source,
-        {
-          ...sheetInput,
-          periodMonth: dto.periodMonth,
-          periodYear: dto.periodYear,
-          schoolYear: dto.schoolYear,
-        },
+        { ...sheetInput, schoolYear: dto.schoolYear },
         null,
       );
 
@@ -3224,7 +3318,6 @@ export class SuggestService {
         dto.cashflowSource !== undefined ||
         dto.subjectId !== undefined ||
         dto.expensePeriodId !== undefined ||
-        dto.periodMonth !== undefined ||
         dto.monthlyItems !== undefined
       ) {
         isMonthlyExpense = true;
@@ -3240,16 +3333,13 @@ export class SuggestService {
           expensePeriodId: dto.expensePeriodId ?? suggest.expensePeriodId ?? null,
           monthlyItems: dto.monthlyItems,
         });
-        const newPeriod = !!(dto.periodMonth && dto.periodYear);
         const sheet = await this.resolveChainSheet(
           manager,
           actor,
           cashflowSource,
           {
             schoolId: sheetInput.schoolId,
-            expensePeriodId: newPeriod ? null : sheetInput.expensePeriodId,
-            periodMonth: dto.periodMonth,
-            periodYear: dto.periodYear,
+            expensePeriodId: sheetInput.expensePeriodId,
             schoolYear: dto.schoolYear ?? null,
           },
           suggest.id!,
@@ -5813,6 +5903,7 @@ export class SuggestService {
         totalAmount: group.totalAmount,
         paidAmount: group.paidAmount,
         remainingAmount: group.remainingAmount,
+        inContractAmount: group.inContractAmount,
         // Khoản đang nằm trong đề xuất khác sẽ bị bỏ qua khi gửi.
         amount: holder ? 0 : Math.max(0, group.remainingAmount),
         paidBySuggest: 0,

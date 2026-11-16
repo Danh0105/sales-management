@@ -37,3 +37,28 @@ export class CashflowItemsQueryDto {
   @IsPositive()
   excludeSuggestId?: number;
 }
+
+/** Màn tạo đề xuất: toàn bộ số liệu bảng nguồn của một trường trong một kỳ. */
+export class CashflowSheetQueryDto {
+  @IsIn(CASHFLOW_SOURCES as unknown as string[], {
+    message: 'Loại đề xuất chi tháng không hợp lệ',
+  })
+  source!: CashflowSource;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  schoolId!: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  expensePeriodId!: number;
+
+  /** Đang sửa đề xuất của chính mình. */
+  @Type(() => Number)
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  excludeSuggestId?: number;
+}
