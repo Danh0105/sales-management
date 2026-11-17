@@ -184,7 +184,7 @@ export class Suggest {
 
     /**
      * Bảng nguồn của đề xuất chi tháng trong QL thu chi: MANAGEMENT (Chi Ngoài —
-     * "Đề xuất Chi Ngoài (Chi chính sách tháng)"), SCHOOL_EXPENSE (Chi Trường),
+     * "Chi chính sách tháng"), SCHOOL_EXPENSE (Chi Trường),
      * SCHOOL_TEACHER (Giáo viên trường). Đề xuất chi tháng tạo trước 13/11/2026
      * để trống = Chi Ngoài. Đề xuất chi Năm luôn trống.
      */

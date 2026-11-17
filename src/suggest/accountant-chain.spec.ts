@@ -205,6 +205,7 @@ function makeService(manager: ReturnType<typeof makeManager>) {
     generateCode: jest.fn().mockResolvedValue('DX-1'),
     writeExpenseLog: jest.fn(),
     expenseNextStepDetails: jest.fn().mockResolvedValue({}),
+    assertNoOpenExpense: jest.fn(),
     notifyExpense: jest.fn(),
     findOneExpense: jest.fn().mockResolvedValue({ id: 125 }),
     // Bảng chưa có số liệu (Kế toán nhập ở bước sau); test riêng ở dưới.

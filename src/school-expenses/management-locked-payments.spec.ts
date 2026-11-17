@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
 import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
+import { PolicyStatus } from '../policy/policy.enum';
 import {
   assertManagementPaidWithinOutside,
   buildManagementPaymentData,
@@ -149,7 +150,17 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       repo([{ id: 61, rowIndex: 0 }]) as any,
       repo(oldSchoolRows) as any,
       repo(oldRows) as any,
-      repo({ id: 3, schoolId: 5 }) as any,
+      repo({
+        id: 3,
+        schoolId: 5,
+        policies: [
+          {
+            status: PolicyStatus.DIRECTOR_APPROVED,
+            createdAt: new Date('2026-11-01T00:00:00Z'),
+            data: { ttcs: [{ teacher: 70000 }] },
+          },
+        ],
+      }) as any,
       repo(null) as any,
       { createQueryRunner: () => queryRunner, manager } as any,
     );
@@ -203,6 +214,26 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
       ]);
     },
   );
+
+  it('Chi Trường luôn lấy đơn giá giáo viên từ Thông tin cơ sở vật chất', async () => {
+    const { save, manager, calls } = setup(
+      ['ketoan_truong'],
+      [],
+      {
+        confirmed: false,
+        schoolExpenseItems: [schoolBodyRow(undefined, 0)],
+      },
+    );
+
+    await save();
+
+    expect(calls(manager.create, SchoolExpenseItem)).toEqual([
+      [
+        SchoolExpenseItem,
+        expect.objectContaining({ giaovien: 70000 }),
+      ],
+    ]);
+  });
 
   it('khớp theo id: dòng đầu bị xoá ở client → không ghi nhầm sang dòng 71', async () => {
     const { save, manager, calls } = setup(['accountant'], [bodyRow(72, 0)]);

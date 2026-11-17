@@ -7,7 +7,7 @@ import type { ManagementViewSection } from './expense-management-view';
  * Đề xuất chi tháng lấy khoản chưa chi từ QL thu chi (13/11/2026). Một đề xuất
  * chỉ thuộc một bảng nguồn; mỗi dòng đề xuất (`suggest_monthly_items`) là một
  * "khoản":
- * - MANAGEMENT — "Đề xuất Chi Ngoài (Chi chính sách tháng)" (đề xuất chi tháng
+ * - MANAGEMENT — "Chi chính sách tháng" (đề xuất chi tháng
  *   có từ trước): một môn của bảng thu chi một kỳ, bảng Chi Ngoài.
  * - SCHOOL_EXPENSE — "Đề xuất Chi Trường": một môn của bảng thu chi một kỳ,
  *   bảng Chi Trường.
@@ -24,7 +24,7 @@ export const CASHFLOW_SOURCES = [
 export type CashflowSource = (typeof CASHFLOW_SOURCES)[number];
 
 export const CASHFLOW_SOURCE_LABELS: Record<CashflowSource, string> = {
-  MANAGEMENT: 'Đề xuất Chi Ngoài (Chi chính sách tháng)',
+  MANAGEMENT: 'Chi chính sách tháng',
   SCHOOL_EXPENSE: 'Đề xuất Chi Trường',
   SCHOOL_TEACHER: 'Đề xuất Chi GV trường',
 };

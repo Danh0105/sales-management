@@ -27,6 +27,7 @@ import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.en
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
 import { Subject } from '../subject/subject.entity';
+import { PolicyStatus } from '../policy/policy.enum';
 import {
   assertNotFinalized,
   buildManagementExpenseItemData,
@@ -446,6 +447,7 @@ export class RealExpensesService {
       where: {
         id: body.subjectId,
       },
+      relations: { policies: true },
     });
 
     if (!subject) {
@@ -455,6 +457,22 @@ export class RealExpensesService {
     if (subject.schoolId !== schoolExpense.school?.id) {
       throw new BadRequestException('Subject does not belong to school');
     }
+
+    const approvedPolicy = (subject.policies ?? [])
+      .filter((policy) => policy.status === PolicyStatus.DIRECTOR_APPROVED)
+      .sort(
+        (left, right) =>
+          new Date(right.createdAt).getTime() -
+          new Date(left.createdAt).getTime(),
+      )[0];
+    const rawPolicyTeacherUnitPrice = Number(
+      approvedPolicy?.data?.ttcs?.[0]?.teacher ?? 0,
+    );
+    const policyTeacherUnitPrice =
+      Number.isFinite(rawPolicyTeacherUnitPrice) &&
+      rawPolicyTeacherUnitPrice >= 0
+        ? rawPolicyTeacherUnitPrice
+        : 0;
 
     const where = {
       schoolExpense: { id: schoolExpenseId },
@@ -674,9 +692,16 @@ export class RealExpensesService {
       // Create school expense items
       const keptSchoolIds = new Set<number>();
       for (const [index, item] of schoolExpenseItems.entries()) {
-        const built = buildSchoolExpenseItemData(item, index, sharedItems[index], {
-          teacherSplit,
-        });
+        const built = buildSchoolExpenseItemData(
+          {
+            ...item,
+            giaovien: policyTeacherUnitPrice,
+            teacherUnitPrice: policyTeacherUnitPrice,
+          },
+          index,
+          sharedItems[index],
+          { teacherSplit },
+        );
         const linkedId = Number(item?.id);
         const linkedRow =
           linkedId && !keptSchoolIds.has(linkedId) ? linkedSchool.get(linkedId) : undefined;

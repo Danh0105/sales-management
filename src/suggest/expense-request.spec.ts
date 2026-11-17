@@ -76,6 +76,7 @@ describe('Expense request school mapping', () => {
       (service as any).dataSource = {
         transaction: jest.fn((callback) => callback(manager)),
       };
+      (service as any).assertNoOpenExpense = jest.fn();
       return service;
     }
 
@@ -355,6 +356,7 @@ describe('Expense request school mapping', () => {
           school,
           schoolYear: '2099-2100',
           amount: null,
+          deductPolicy: true,
         }),
       );
       expect(result).toEqual(
@@ -401,6 +403,70 @@ describe('Expense request school mapping', () => {
         ),
       ).resolves.toEqual({ id: 124 });
     });
+
+    it('bỏ Trừ chính sách thì không yêu cầu hỗ trợ tiền mặt hoặc thiết bị', async () => {
+      const school = { id: 445, name: 'TH ABC' };
+      let createdSuggest: any;
+      const manager = {
+        findOne: jest.fn().mockResolvedValue(school),
+        count: jest.fn().mockResolvedValue(1),
+        query: jest.fn(),
+        delete: jest.fn(),
+        create: jest.fn((_entity, data) => {
+          createdSuggest = data;
+          return data;
+        }),
+        save: jest.fn().mockImplementation(async (data) => ({
+          ...data,
+          id: 125,
+        })),
+      };
+      const service = makeService(manager);
+      (service as any).generateCode = jest
+        .fn()
+        .mockResolvedValue('DX-209909-0003');
+      (service as any).writeExpenseLog = jest.fn();
+      (service as any).notifyExpense = jest.fn();
+      (service as any).findOneExpense = jest.fn().mockResolvedValue({ id: 125 });
+
+      await service.create(
+        {
+          ...validBody,
+          schoolId: 445,
+          deductPolicy: false,
+          type: SuggestType.EXPENSE_REQUEST,
+        },
+        undefined,
+        user,
+      );
+
+      expect(createdSuggest).toEqual(
+        expect.objectContaining({ deductPolicy: false }),
+      );
+      expect(manager.query).not.toHaveBeenCalled();
+    });
+  });
+
+  it('chặn tạo khi nhân viên còn đề xuất chi chưa hoàn tất', async () => {
+    const manager = {
+      query: jest.fn(),
+      findOne: jest.fn().mockResolvedValue({
+        id: 91,
+        code: 'DX-202611-0091',
+        status: SuggestStatus.PENDING_APPROVAL,
+      }),
+    };
+    const service = Object.create(SuggestService.prototype) as SuggestService;
+
+    await expect(
+      (service as any).assertNoOpenExpense(manager, 7),
+    ).rejects.toThrow(
+      'Bạn còn đề xuất DX-202611-0091 chưa hoàn tất',
+    );
+    expect(manager.query).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      [7],
+    );
   });
 
   it('áp dụng đồng thời status, schoolId và schoolYear trước pagination', async () => {

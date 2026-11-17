@@ -287,6 +287,8 @@ export class SuggestService {
       }
 
       const saved = await this.dataSource.transaction(async (manager) => {
+        await this.assertNoOpenExpense(manager, actor.id);
+
         let school: School | undefined;
         let ward: Ward | undefined;
         let policySelections: PolicySupportSelection[] = [];
@@ -310,14 +312,16 @@ export class SuggestService {
               'Trường không có môn học trong năm học đã chọn',
             );
           }
-          await this.assertPolicyHasSupport(manager, school, schoolYear!);
-          policySelections = await this.resolvePolicySupportSelections(
-            manager,
-            school,
-            schoolYear!,
-            dto.policySupportItems,
-            null,
-          );
+          if (dto.deductPolicy !== false) {
+            await this.assertPolicyHasSupport(manager, school, schoolYear!);
+            policySelections = await this.resolvePolicySupportSelections(
+              manager,
+              school,
+              schoolYear!,
+              dto.policySupportItems,
+              null,
+            );
+          }
         } else {
           ward = (await manager.findOne(Ward, {
             where: { id: dto.wardId },
@@ -343,7 +347,9 @@ export class SuggestService {
           expectedPaymentDate: dto.expectedPaymentDate,
           beneficiaryInfo: dto.beneficiaryInfo ?? null,
           participants: dto.participants ?? null,
-          deductPolicy: dto.deductPolicy ?? false,
+          // Chi Năm mặc định trừ chính sách. Khi kinh doanh chủ động bỏ chọn,
+          // đề xuất không phụ thuộc hỗ trợ tiền mặt/thiết bị của chính sách.
+          deductPolicy: dto.deductPolicy ?? true,
           ...(school ? { schoolId: school.id, school } : {}),
           isMonthlyExpense: false,
           cashflowSource: null,
@@ -1060,6 +1066,8 @@ export class SuggestService {
     const sheetInput = this.chainSheetInput(dto);
 
     const saved = await this.dataSource.transaction(async (manager) => {
+      await this.assertNoOpenExpense(manager, actor.id);
+
       const { school, period, schoolYear } = await this.resolveChainSheet(
         manager,
         actor,
@@ -2116,6 +2124,35 @@ export class SuggestService {
       throw new UnauthorizedException('User không hợp lệ');
     }
     return user;
+  }
+
+  /** Mỗi nhân viên chỉ được có một đề xuất chi chưa hoàn tất tại một thời điểm. */
+  private async assertNoOpenExpense(
+    manager: EntityManager,
+    employeeId: number,
+  ): Promise<void> {
+    // Tuần tự hóa các lần tạo của cùng nhân viên để hai request đồng thời
+    // không cùng vượt qua bước kiểm tra rồi tạo hai đề xuất đang mở.
+    await manager.query(
+      `SELECT pg_advisory_xact_lock(hashtext('suggest_expense_create'), $1)`,
+      [employeeId],
+    );
+
+    const openExpense = await manager.findOne(Suggest, {
+      where: {
+        type: SuggestType.EXPENSE_REQUEST,
+        createdBy: employeeId,
+        status: Not(In(EXPENSE_TERMINAL_STATUSES)),
+      },
+      select: ['id', 'code', 'status'],
+      order: { createdAt: 'DESC' },
+    });
+    if (!openExpense) return;
+
+    const reference = openExpense.code ?? `#${openExpense.id}`;
+    throw new BadRequestException(
+      `Bạn còn đề xuất ${reference} chưa hoàn tất. Vui lòng hoàn tất hoặc rút đề xuất này trước khi tạo đề xuất mới`,
+    );
   }
 
   /**
@@ -3513,6 +3550,9 @@ export class SuggestService {
       }
       const cashflowSource: CashflowSource =
         dto.cashflowSource ?? cashflowSourceOf(suggest) ?? 'MANAGEMENT';
+      const deductPolicy = isMonthlyExpense
+        ? dto.deductPolicy ?? suggest.deductPolicy ?? false
+        : dto.deductPolicy ?? suggest.deductPolicy ?? true;
 
       if (isMonthlyExpense) {
         // Sửa xong luôn đi quy trình Kế toán (kể cả đề xuất chi tháng cũ):
@@ -3563,15 +3603,18 @@ export class SuggestService {
             'Trường không có môn học trong năm học đã chọn',
           );
         }
-        await this.assertPolicyHasSupport(manager, school, schoolYear);
-        // Không gửi lại danh sách thì kiểm lại các dòng đang có với trường/năm học mới.
-        policySelections = await this.resolvePolicySupportSelections(
-          manager,
-          school,
-          schoolYear,
-          dto.policySupportItems ?? (await this.storedPolicySupportInput(manager, suggest.id!)),
-          suggest.id!,
-        );
+        if (deductPolicy) {
+          await this.assertPolicyHasSupport(manager, school, schoolYear);
+          // Không gửi lại danh sách thì kiểm lại các dòng đang có với trường/năm học mới.
+          policySelections = await this.resolvePolicySupportSelections(
+            manager,
+            school,
+            schoolYear,
+            dto.policySupportItems ??
+              (await this.storedPolicySupportInput(manager, suggest.id!)),
+            suggest.id!,
+          );
+        }
       } else if (!isMonthlyExpense && wardId) {
         const ward = await manager.findOne(Ward, { where: { id: wardId } });
         if (!ward) throw new BadRequestException('Xã/phường không tồn tại');
@@ -3593,9 +3636,7 @@ export class SuggestService {
       if (dto.beneficiaryInfo !== undefined) {
         suggest.beneficiaryInfo = dto.beneficiaryInfo;
       }
-      if (dto.deductPolicy !== undefined) {
-        suggest.deductPolicy = dto.deductPolicy;
-      }
+      suggest.deductPolicy = deductPolicy;
       suggest.expectedPaymentDate = expectedPaymentDate;
       suggest.schoolId = schoolId;
       suggest.schoolYear = schoolYear;
@@ -5754,7 +5795,7 @@ export class SuggestService {
       }));
   }
 
-  /** "Đề xuất Chi Trường" / "Đề xuất Chi GV trường" / "Đề xuất Chi Ngoài (Chi chính sách tháng)". */
+  /** "Đề xuất Chi Trường" / "Đề xuất Chi GV trường" / "Chi chính sách tháng". */
   private monthlyKindLabel(s: { isMonthlyExpense?: boolean | null; cashflowSource?: string | null }) {
     return CASHFLOW_SOURCE_LABELS[cashflowSourceOf(s) ?? 'MANAGEMENT'];
   }
