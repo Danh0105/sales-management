@@ -199,9 +199,9 @@ describe('Chi Trường khi tách Giáo viên trường', () => {
     });
   });
 
-  it('kỳ từ 11/2026: Chi Trường chỉ còn Thuế + CSVC', () => {
+  it('khi tách bảng: giữ ĐG giáo viên theo chính sách nhưng không cộng trùng vào Chi Trường', () => {
     expect(buildSchoolExpenseItemData(item, 0, shared, { teacherSplit: true })).toMatchObject({
-      giaovien: 0,
+      giaovien: 5000,
       teacherAmount: 0,
       schoolExpenseAmount: 150_000,
       remaining: 150_000,
