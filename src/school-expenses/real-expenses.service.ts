@@ -427,7 +427,11 @@ export class RealExpensesService {
     // để không mất tiền giáo viên; môn đã có bảng thì không tính hai lần.
     const sendsSchoolTeacher = Array.isArray(body.schoolTeacherItems);
     const teacherSplit =
-      schoolTeacherSplitApplies(schoolExpense.period) &&
+      (await this.teacherSplitApplies(
+        this.dataSource.manager,
+        schoolExpenseId,
+        schoolExpense.period,
+      )) &&
       (sendsSchoolTeacher ||
         (await this.dataSource.getRepository(SchoolTeacherExpenseItem).count({
           where: { schoolExpenseId, subjectId: body.subjectId },
@@ -1193,6 +1197,25 @@ export class RealExpensesService {
     };
   }
 
+  /**
+   * Bảng thu chi có dùng bảng Giáo viên trường không: theo tháng thật của kỳ
+   * (xem schoolTeacherSplitApplies). Kỳ ảo đã nhập tiền ở bảng Giáo viên trường
+   * trước 17/11/2026 thì giữ bảng đó, không đưa tiền về Chi Trường.
+   */
+  private async teacherSplitApplies(
+    manager: EntityManager,
+    schoolExpenseId: number,
+    period: { year?: number | null; month?: number | null; name?: string | null } | null | undefined,
+  ): Promise<boolean> {
+    if (schoolTeacherSplitApplies(period)) return true;
+    const [row] = await manager.query<unknown[]>(
+      `SELECT 1 FROM school_teacher_expense_items
+       WHERE school_expense_id = $1 AND amount > 0 LIMIT 1`,
+      [schoolExpenseId],
+    );
+    return !!row;
+  }
+
   /** Bảng Giáo viên trường + dấu "Duyệt lương" của một môn. */
   async getSchoolTeacherItems(schoolExpenseId: number, subjectId: number) {
     if (!subjectId) throw new BadRequestException('subjectId is required');
@@ -1240,7 +1263,11 @@ export class RealExpensesService {
         })
       : [];
     return {
-      applies: schoolTeacherSplitApplies(schoolExpense.period),
+      applies: await this.teacherSplitApplies(
+        this.dataSource.manager,
+        schoolExpenseId,
+        schoolExpense.period,
+      ),
       splitFrom: SCHOOL_TEACHER_SPLIT_FROM,
       schoolId: schoolExpense.school?.id ?? null,
       teachers,
@@ -1272,14 +1299,14 @@ export class RealExpensesService {
   ) {
     if (!subjectId) throw new BadRequestException('subjectId is required');
     await this.dataSource.transaction(async (manager) => {
-      const [sheet] = await manager.query<{ month: number; year: number }[]>(
-        `SELECT ep.month, ep.year FROM school_expenses se
+      const [sheet] = await manager.query<{ month: number; year: number; name: string | null }[]>(
+        `SELECT ep.month, ep.year, ep.name FROM school_expenses se
          JOIN expense_periods ep ON ep.id = se.period_id
          WHERE se.id = $1 FOR UPDATE OF se`,
         [schoolExpenseId],
       );
       if (!sheet) throw new NotFoundException('SchoolExpense not found');
-      if (!schoolTeacherSplitApplies(sheet)) {
+      if (!(await this.teacherSplitApplies(manager, schoolExpenseId, sheet))) {
         throw new BadRequestException(
           'Kỳ này chưa có bảng Giáo viên trường (áp dụng từ kỳ tháng 11/2026)',
         );

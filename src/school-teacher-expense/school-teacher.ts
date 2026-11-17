@@ -11,18 +11,48 @@ import {
 /**
  * Từ kỳ tháng 11/2026, tiền "Giáo viên trường" không còn nằm trong Chi Trường
  * (chỉ còn Thuế + CSVC) mà trả thẳng cho giáo viên ở bảng Giáo viên trường.
- * Kỳ trước giữ nguyên như cũ. Dòng tuỳ chỉnh (tháng ảo > 12) theo năm của nó.
+ * Kỳ trước giữ nguyên như cũ.
+ *
+ * Kỳ tạo không chọn tháng được cấp tháng ảo (13, 14…) — không phải tháng thật.
+ * Khi đó đọc tháng trong tên kỳ ("Tháng 10", "T10/2026", "10/2026"); tên không
+ * có tháng ("LẦN 1"…) thì coi như trước 11/2026 (17/11/2026, user chọn).
  */
 export const SCHOOL_TEACHER_SPLIT_FROM = { year: 2026, month: 11 } as const;
 
-export function schoolTeacherSplitApplies(
-  period: { year?: number | null; month?: number | null } | null | undefined,
-): boolean {
+const PERIOD_NAME_MONTH =
+  /(?:^|[^\p{L}\d])(?:th[aá]ng|t)\s*0?(\d{1,2})(?:\s*[\/\-.]\s*(\d{4}))?|(?:^|\D)0?(\d{1,2})\s*[\/\-.]\s*(\d{4})/iu;
+
+/** Tháng thật của kỳ; `null` khi không xác định được. */
+export function periodRealMonth(
+  period:
+    | { year?: number | null; month?: number | null; name?: string | null }
+    | null
+    | undefined,
+): { year: number; month: number } | null {
   const year = Number(period?.year);
   const month = Number(period?.month);
-  if (!Number.isFinite(year) || !Number.isFinite(month)) return false;
+  if (!period?.year || !Number.isFinite(year)) return null;
+  if (Number.isInteger(month) && month >= 1 && month <= 12) {
+    return { year, month };
+  }
+  const found = String(period?.name ?? '').normalize('NFC').match(PERIOD_NAME_MONTH);
+  if (!found) return null;
+  const nameMonth = Number(found[1] ?? found[3]);
+  const nameYear = Number(found[2] ?? found[4]) || year;
+  if (!Number.isInteger(nameMonth) || nameMonth < 1 || nameMonth > 12) return null;
+  return { year: nameYear, month: nameMonth };
+}
+
+export function schoolTeacherSplitApplies(
+  period:
+    | { year?: number | null; month?: number | null; name?: string | null }
+    | null
+    | undefined,
+): boolean {
+  const real = periodRealMonth(period);
+  if (!real) return false;
   return (
-    year * 100 + month >=
+    real.year * 100 + real.month >=
     SCHOOL_TEACHER_SPLIT_FROM.year * 100 + SCHOOL_TEACHER_SPLIT_FROM.month
   );
 }

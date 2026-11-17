@@ -7,6 +7,7 @@ import {
   buildSchoolTeacherItemData,
   schoolTeacherMoneySignature,
   schoolTeacherPaid,
+  periodRealMonth,
   schoolTeacherSplitApplies,
 } from './school-teacher';
 
@@ -17,11 +18,37 @@ describe('Giáo viên trường — kỳ áp dụng', () => {
     [{ year: 2026, month: 12 }, true],
     [{ year: 2027, month: 1 }, true],
     [{ year: 2025, month: 13 }, false],
-    [{ year: 2026, month: 13 }, true],
+    // Tháng ảo (kỳ tạo không chọn tháng): đọc tháng trong tên kỳ.
+    [{ year: 2026, month: 13 }, false],
+    [{ year: 2026, month: 13, name: 'Tháng 10' }, false],
+    [{ year: 2026, month: 13, name: 'THÁNG 10' }, false],
+    [{ year: 2026, month: 13, name: 'Tha\u0301ng 10' }, false],
+    [{ year: 2026, month: 14, name: 'T10/2026' }, false],
+    [{ year: 2026, month: 14, name: 'T09/2026 (bản sao)' }, false],
+    [{ year: 2026, month: 13, name: '10/2026' }, false],
+    [{ year: 2026, month: 13, name: 'Tháng 10/2026' }, false],
+    [{ year: 2026, month: 13, name: 'Tháng 9 lần 2' }, false],
+    [{ year: 2026, month: 13, name: 'LẦN 2' }, false],
+    [{ year: 2026, month: 13, name: 'lần 2 Năm học 2026 - 2027' }, false],
+    [{ year: 2026, month: 13, name: 'Tih Chi Lăng' }, false],
+    [{ year: 2026, month: 13, name: 'Tháng 11' }, true],
+    [{ year: 2026, month: 15, name: 'T12/2026' }, true],
+    [{ year: 2026, month: 13, name: 'Tháng 1/2027' }, true],
+    [{ year: 2027, month: 13, name: 'Tháng 2' }, true],
+    [{ year: 2026, month: 10, name: 'Tháng 12' }, false],
     [null, false],
     [{ year: null, month: 11 }, false],
   ])('%j → %s', (period, expected) => {
     expect(schoolTeacherSplitApplies(period as any)).toBe(expected);
+  });
+
+  it.each([
+    [{ year: 2026, month: 10, name: 'Tháng 9' }, { year: 2026, month: 10 }],
+    [{ year: 2026, month: 13, name: 'Tháng 10 2026' }, { year: 2026, month: 10 }],
+    [{ year: 2026, month: 13, name: 'Tháng 13' }, null],
+    [{ year: 2026, month: 13, name: null }, null],
+  ])('tháng thật %j → %j', (period, expected) => {
+    expect(periodRealMonth(period as any)).toEqual(expected);
   });
 });
 
