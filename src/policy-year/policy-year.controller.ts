@@ -18,6 +18,7 @@ import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import {
     CASHFLOW_READ_ROLES,
+    CASHFLOW_SALES_ADMIN_ROLES,
     CASHFLOW_WRITE_ROLES,
 } from '../school-expenses/cashflow-roles';
 import { PolicyYearService } from './policy-year.service';
@@ -39,11 +40,22 @@ export class PolicyYearController {
         return this.service.upsert(dto);
     }
 
-    @UseGuards(BlockReadOnlyGuard)
-    @Roles(...CASHFLOW_WRITE_ROLES)
+    @Roles(...CASHFLOW_SALES_ADMIN_ROLES)
     @Patch('checklist')
     updateChecklist(@Body() dto: UpdatePolicyYearChecklistDto) {
         return this.service.updateChecklist(dto);
+    }
+
+    @Roles(...CASHFLOW_SALES_ADMIN_ROLES)
+    @Get('checklist')
+    getChecklist(
+        @Query('schoolId') schoolId: string,
+        @Query('schoolYear') schoolYear: string,
+    ) {
+        return this.service.findChecklistForSchoolYear(
+            Number(schoolId),
+            schoolYear,
+        );
     }
 
     @Get()

@@ -193,7 +193,23 @@ export class PolicyYearService {
             entity.teachersDayCompleted = dto.teachersDayCompleted;
         }
 
-        return this.toResponse(await this.repo.save(entity));
+        return this.toChecklistResponse(await this.repo.save(entity));
+    }
+
+    async findChecklistForSchoolYear(schoolId: number, schoolYear: string) {
+        if (!Number.isInteger(schoolId) || schoolId <= 0) {
+            throw new BadRequestException('schoolId không hợp lệ');
+        }
+        if (!/^\d{4}-\d{4}$/.test(schoolYear || '')) {
+            throw new BadRequestException(
+                'schoolYear phải đúng định dạng YYYY-YYYY',
+            );
+        }
+
+        const entity = await this.repo.findOne({
+            where: { schoolId, schoolYear },
+        });
+        return entity ? this.toChecklistResponse(entity) : null;
     }
 
     /** Lấy theo trường + năm học (dùng cho GET /policy-years?schoolId=&schoolYear=). */
@@ -278,9 +294,6 @@ export class PolicyYearService {
             schoolName: entity.schoolName ?? null,
             schoolYear: entity.schoolYear,
             status: entity.status,
-            giftFlowersCompleted: entity.giftFlowersCompleted,
-            openingCeremonyCompleted: entity.openingCeremonyCompleted,
-            teachersDayCompleted: entity.teachersDayCompleted,
             subjects,
             monthlyRows,
             summary: {
@@ -295,6 +308,17 @@ export class PolicyYearService {
                 totalRemaining: entity.totalRemaining,
             },
             createdAt: entity.createdAt,
+            updatedAt: entity.updatedAt,
+        };
+    }
+
+    private toChecklistResponse(entity: PolicyYear) {
+        return {
+            schoolId: entity.schoolId,
+            schoolYear: entity.schoolYear,
+            giftFlowersCompleted: entity.giftFlowersCompleted,
+            openingCeremonyCompleted: entity.openingCeremonyCompleted,
+            teachersDayCompleted: entity.teachersDayCompleted,
             updatedAt: entity.updatedAt,
         };
     }
