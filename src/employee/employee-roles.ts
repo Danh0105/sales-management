@@ -43,7 +43,7 @@ export function isDevAccount(user?: AuthUser): boolean {
  * đăng nhập, và `roles` gửi kèm quyết định người đó thấy được những gì — ai gọi
  * được endpoint này thì tự nâng quyền cho bất kỳ ai được.
  */
-export const EMPLOYEE_ADMIN_ROLES = [HR_ROLE, 'director'];
+export const EMPLOYEE_ADMIN_ROLES = [HR_ROLE, 'director', 'ketoan_truong'];
 
 export function isEmployeeAdmin(user?: AuthUser): boolean {
   return (user?.roles ?? []).some((r) => EMPLOYEE_ADMIN_ROLES.includes(r));
