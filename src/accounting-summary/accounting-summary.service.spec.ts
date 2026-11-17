@@ -80,7 +80,7 @@ describe('AccountingSummaryService', () => {
           outsidePaid: '60.00',
           otherExpense: '20.00',
           companyTeacherExpense: '30.00',
-          annualPolicyExpense: '10.00',
+          annualPolicyExpense: '61.00',
           invoiceTotal: '400.00',
           invoiceIssued: '250.00',
           invoiceNone: '50.00',
@@ -129,7 +129,13 @@ describe('AccountingSummaryService', () => {
       projectedBalanceAfterPolicy: 275,
       cashBalance: 150,
       // Đã xuất 350 + chưa xuất 200 + không xuất HĐ 50 = tổng 600.
-      invoice: { total: 600, issued: 350, notIssued: 200, noInvoice: 50, collected: 450 },
+      invoice: {
+        total: 600,
+        issued: 350,
+        notIssued: 200,
+        noInvoice: 50,
+        collected: 450,
+      },
       subjects: [
         {
           subject: { id: 7, name: 'STEM' },
@@ -140,15 +146,21 @@ describe('AccountingSummaryService', () => {
             paid: 325,
             payable: 75,
           },
-          invoice: { total: 400, issued: 250, notIssued: 100, noInvoice: 50, collected: 300 },
+          invoice: {
+            total: 400,
+            issued: 250,
+            notIssued: 100,
+            noInvoice: 50,
+            collected: 300,
+          },
           breakdown: {
             school: { expected: 240, paid: 200 },
             outside: { expected: 80, paid: 60 },
             schoolTeacher: 60,
             companyTeacher: 30,
-            annualPolicy: 10,
+            annualPolicy: 61,
             other: 20,
-            profit: 160,
+            profit: 109,
           },
         },
       ],
@@ -172,6 +184,14 @@ describe('AccountingSummaryService', () => {
     }
     expect(sql).toContain('sei."rowIndex" = r."rowIndex"');
     expect(sql).toContain('WHERE r."subject_id" = $5');
+    const subjectSql = query.mock.calls[1][0] as string;
+    expect(subjectSql).toContain(
+      "suggest_row.status::text IN ('SPENT', 'REPAIR_ACCEPTED')",
+    );
+    expect(subjectSql).toContain(
+      'COALESCE(payment_order.amount, suggest_row.amount)',
+    );
+    expect(subjectSql).not.toContain('pym.policy_after_tax_amount');
   });
 
   it('trả tổng bằng 0 khi chưa có kỳ thu chi', async () => {

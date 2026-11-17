@@ -355,23 +355,51 @@ export class AccountingSummaryService {
         GROUP BY r."school_expense_id", r."subject_id"
       ),
       annual_policy AS (
-        SELECT
+        -- Cột "CS năm" dùng đúng "Tổng đề xuất đã chi" của màn Chính sách
+        -- năm: SPENT/REPAIR_ACCEPTED, ưu tiên số tiền lệnh chi thực tế.
+        -- Đây là số cấp trường + năm học, nên chỉ gắn vào kỳ mới nhất và môn
+        -- đầu tiên để tổng nhân viên/trường không bị nhân theo số kỳ hoặc môn.
+        SELECT DISTINCT ON (spent.school_id, spent.school_year)
           se_policy.id AS "school_expense_id",
-          pym.subject_id,
-          COALESCE(SUM(pym.policy_after_tax_amount), 0) AS "annualPolicyExpense"
-        FROM school_expenses se_policy
+          (
+            SELECT MIN(subject_anchor.id)
+            FROM subjects subject_anchor
+            WHERE subject_anchor.school_id = spent.school_id
+              AND (
+                subject_anchor.school_year IS NULL
+                OR subject_anchor.school_year = spent.school_year
+              )
+          ) AS subject_id,
+          spent.amount AS "annualPolicyExpense"
+        FROM (
+          SELECT
+            suggest_row.school_id,
+            suggest_row.school_year,
+            COALESCE(SUM(COALESCE(payment_order.amount, suggest_row.amount)), 0)
+              AS amount
+          FROM suggest suggest_row
+          LEFT JOIN suggest_payment_order payment_order
+            ON payment_order."suggestId" = suggest_row.id
+          WHERE suggest_row.type::text = 'EXPENSE_REQUEST'
+            AND suggest_row.status::text IN ('SPENT', 'REPAIR_ACCEPTED')
+            AND suggest_row.school_id IS NOT NULL
+            AND suggest_row.school_year IS NOT NULL
+          GROUP BY suggest_row.school_id, suggest_row.school_year
+        ) spent
+        INNER JOIN school_expenses se_policy
+          ON se_policy.school_id = spent.school_id
         INNER JOIN expense_periods ep_policy ON ep_policy.id = se_policy.period_id
-        INNER JOIN policy_years py
-          ON py.school_id = se_policy.school_id
-         AND py.school_year = CONCAT(
+         AND spent.school_year = CONCAT(
            CASE WHEN ep_policy.month >= 8 THEN ep_policy.year ELSE ep_policy.year - 1 END,
            '-',
            CASE WHEN ep_policy.month >= 8 THEN ep_policy.year + 1 ELSE ep_policy.year END
          )
-        INNER JOIN policy_year_monthly_rows pym
-          ON pym.policy_year_id = py.id
-         AND pym.month = CONCAT(ep_policy.year, '-', LPAD(ep_policy.month::text, 2, '0'))
-        GROUP BY se_policy.id, pym.subject_id
+        ORDER BY
+          spent.school_id,
+          spent.school_year,
+          ep_policy.year DESC,
+          ep_policy.month DESC,
+          se_policy.id DESC
       ),
       invoice AS (
         SELECT
