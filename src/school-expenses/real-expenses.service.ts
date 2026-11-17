@@ -61,7 +61,6 @@ import {
   SCHOOL_TEACHER_SPLIT_FROM,
   schoolTeacherMoneySignature,
   schoolTeacherPaid,
-  schoolTeacherSplitApplies,
 } from '../school-teacher-expense/school-teacher';
 import {
   assertLinkedRowsKept,
@@ -421,7 +420,7 @@ export class RealExpensesService {
       throw new NotFoundException('SchoolExpense not found');
     }
 
-    // Từ kỳ 11/2026: Giáo viên trường tách khỏi Chi Trường sang bảng riêng —
+    // Môn đã có tiền ở bảng Giáo viên trường (xem teacherSplitApplies): tách khỏi Chi Trường —
     // khi client gửi kèm bảng Giáo viên trường, hoặc môn đã có bảng đó. Màn hình
     // bản cũ (chưa có bảng) lưu môn chưa có bảng thì Chi Trường giữ cách tính cũ
     // để không mất tiền giáo viên; môn đã có bảng thì không tính hai lần.
@@ -430,7 +429,7 @@ export class RealExpensesService {
       (await this.teacherSplitApplies(
         this.dataSource.manager,
         schoolExpenseId,
-        schoolExpense.period,
+        Number(body.subjectId),
       )) &&
       (sendsSchoolTeacher ||
         (await this.dataSource.getRepository(SchoolTeacherExpenseItem).count({
@@ -1198,20 +1197,20 @@ export class RealExpensesService {
   }
 
   /**
-   * Bảng thu chi có dùng bảng Giáo viên trường không: theo tháng thật của kỳ
-   * (xem schoolTeacherSplitApplies). Kỳ ảo đã nhập tiền ở bảng Giáo viên trường
-   * trước 17/11/2026 thì giữ bảng đó, không đưa tiền về Chi Trường.
+   * Môn có dùng bảng Giáo viên trường không. 17/11/2026 (user chọn): bỏ tách
+   * theo kỳ — Chi Trường mọi kỳ lấy đơn giá GV từ chính sách (Thông tin cơ sở
+   * vật chất). Chỉ môn đã nhập tiền ở bảng Giáo viên trường giữ bảng đó (Chi
+   * Trường không tính tiền GV lần nữa).
    */
   private async teacherSplitApplies(
     manager: EntityManager,
     schoolExpenseId: number,
-    period: { year?: number | null; month?: number | null; name?: string | null } | null | undefined,
+    subjectId: number,
   ): Promise<boolean> {
-    if (schoolTeacherSplitApplies(period)) return true;
     const [row] = await manager.query<unknown[]>(
       `SELECT 1 FROM school_teacher_expense_items
-       WHERE school_expense_id = $1 AND amount > 0 LIMIT 1`,
-      [schoolExpenseId],
+       WHERE school_expense_id = $1 AND subject_id = $2 AND amount > 0 LIMIT 1`,
+      [schoolExpenseId, subjectId],
     );
     return !!row;
   }
@@ -1266,7 +1265,7 @@ export class RealExpensesService {
       applies: await this.teacherSplitApplies(
         this.dataSource.manager,
         schoolExpenseId,
-        schoolExpense.period,
+        subjectId,
       ),
       splitFrom: SCHOOL_TEACHER_SPLIT_FROM,
       schoolId: schoolExpense.school?.id ?? null,
@@ -1306,9 +1305,9 @@ export class RealExpensesService {
         [schoolExpenseId],
       );
       if (!sheet) throw new NotFoundException('SchoolExpense not found');
-      if (!(await this.teacherSplitApplies(manager, schoolExpenseId, sheet))) {
+      if (!(await this.teacherSplitApplies(manager, schoolExpenseId, subjectId))) {
         throw new BadRequestException(
-          'Kỳ này chưa có bảng Giáo viên trường (áp dụng từ kỳ tháng 11/2026)',
+          'Môn này không dùng bảng Giáo viên trường — đơn giá GV nằm ở Chi Trường',
         );
       }
       const rows = await manager.find(SchoolTeacherExpenseItem, {
