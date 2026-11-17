@@ -4,6 +4,7 @@ import {
     Get,
     Param,
     ParseIntPipe,
+    Patch,
     Post,
     Query,
     UseGuards,
@@ -21,6 +22,7 @@ import {
 } from '../school-expenses/cashflow-roles';
 import { PolicyYearService } from './policy-year.service';
 import { UpsertPolicyYearDto } from './dto/upsert-policy-year.dto';
+import { UpdatePolicyYearChecklistDto } from './dto/update-policy-year-checklist.dto';
 
 @Controller('policy-years')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -35,6 +37,13 @@ export class PolicyYearController {
     @Post('upsert')
     upsert(@Body() dto: UpsertPolicyYearDto) {
         return this.service.upsert(dto);
+    }
+
+    @UseGuards(BlockReadOnlyGuard)
+    @Roles(...CASHFLOW_WRITE_ROLES)
+    @Patch('checklist')
+    updateChecklist(@Body() dto: UpdatePolicyYearChecklistDto) {
+        return this.service.updateChecklist(dto);
     }
 
     @Get()

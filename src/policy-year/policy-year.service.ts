@@ -12,6 +12,7 @@ import { PolicyYearSubject } from './entities/policy-year-subject.entity';
 import { PolicyYearMonthlyRow } from './entities/policy-year-monthly-row.entity';
 import { PolicyYearStatus } from './policy-year.enum';
 import { UpsertPolicyYearDto } from './dto/upsert-policy-year.dto';
+import { UpdatePolicyYearChecklistDto } from './dto/update-policy-year-checklist.dto';
 import { School } from '../school/schools.entity';
 
 @Injectable()
@@ -155,6 +156,46 @@ export class PolicyYearService {
         return this.findOne(savedId);
     }
 
+    async updateChecklist(dto: UpdatePolicyYearChecklistDto) {
+        const [y1, y2] = dto.schoolYear.split('-').map(Number);
+        if (y2 !== y1 + 1) {
+            throw new BadRequestException(
+                'Năm học không hợp lệ: năm sau phải bằng năm trước + 1',
+            );
+        }
+
+        const school = await this.schoolRepo.findOne({
+            where: { id: dto.schoolId },
+        });
+        if (!school) {
+            throw new NotFoundException('Trường không tồn tại');
+        }
+
+        let entity = await this.repo.findOne({
+            where: { schoolId: dto.schoolId, schoolYear: dto.schoolYear },
+        });
+        if (!entity) {
+            entity = this.repo.create({
+                schoolId: dto.schoolId,
+                schoolName: school.name,
+                schoolYear: dto.schoolYear,
+                status: PolicyYearStatus.DRAFT,
+            });
+        }
+
+        if (dto.giftFlowersCompleted !== undefined) {
+            entity.giftFlowersCompleted = dto.giftFlowersCompleted;
+        }
+        if (dto.openingCeremonyCompleted !== undefined) {
+            entity.openingCeremonyCompleted = dto.openingCeremonyCompleted;
+        }
+        if (dto.teachersDayCompleted !== undefined) {
+            entity.teachersDayCompleted = dto.teachersDayCompleted;
+        }
+
+        return this.toResponse(await this.repo.save(entity));
+    }
+
     /** Lấy theo trường + năm học (dùng cho GET /policy-years?schoolId=&schoolYear=). */
     async findForSchoolYear(schoolId: number, schoolYear: string) {
         const entity = await this.loadFull({ schoolId, schoolYear });
@@ -237,6 +278,9 @@ export class PolicyYearService {
             schoolName: entity.schoolName ?? null,
             schoolYear: entity.schoolYear,
             status: entity.status,
+            giftFlowersCompleted: entity.giftFlowersCompleted,
+            openingCeremonyCompleted: entity.openingCeremonyCompleted,
+            teachersDayCompleted: entity.teachersDayCompleted,
             subjects,
             monthlyRows,
             summary: {
