@@ -26,16 +26,15 @@ export class DepartmentService {
         return this.departmentRepo.save(department);
     }
 
+    // Chỉ id/tên/icon — không kèm danh sách nhân viên (từng lộ cả hash mật
+    // khẩu, SĐT, số tài khoản của mọi người qua API này).
     async findAll(): Promise<Department[]> {
-        return this.departmentRepo.find({
-            relations: ['employees'],
-        });
+        return this.departmentRepo.find({ order: { id: 'ASC' } });
     }
 
     async findOne(id: number): Promise<Department> {
         const department = await this.departmentRepo.findOne({
             where: { id },
-            relations: ['employees'],
         });
 
         if (!department) {

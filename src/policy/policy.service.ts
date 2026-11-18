@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 
@@ -290,16 +290,35 @@ export class PolicyService {
 
         // ================= SAVE POLICY =================
 
-        const policy = this.policyRepo.create({
-            subjectId: dto.subjectId,
-            data: dto.data,
-            status: finalStatus,
-            durationMonths:
-                dto.durationMonths ?? 0,
-        });
+        // Mỗi môn chỉ có 1 chính sách — sửa / gửi duyệt lại trên chính bản đó.
+        // Khoá dòng môn học để hai lần bấm gửi gần như cùng lúc không cùng lọt
+        // qua bước kiểm tra (dữ liệu cũ có nhiều cặp PENDING cách nhau 1–2 giây).
+        const saved = await this.dataSource.transaction(async (manager) => {
+            await manager.query(
+                'SELECT id FROM subjects WHERE id = $1 FOR UPDATE',
+                [dto.subjectId],
+            );
 
-        const saved =
-            await this.policyRepo.save(policy);
+            const existing = await manager.findOne(Policy, {
+                where: { subjectId: dto.subjectId },
+            });
+            if (existing) {
+                throw new ConflictException(
+                    'Môn học này đã có chính sách. Mỗi môn chỉ có 1 chính sách — ' +
+                    'hãy mở chính sách hiện có để chỉnh sửa.',
+                );
+            }
+
+            return manager.save(
+                manager.create(Policy, {
+                    subjectId: dto.subjectId,
+                    data: dto.data,
+                    status: finalStatus,
+                    durationMonths:
+                        dto.durationMonths ?? 0,
+                }),
+            );
+        });
 
         // ================= NOTIFICATION =================
 
@@ -315,7 +334,7 @@ export class PolicyService {
                     })
                     .getMany();
 
-            const userIds = employees
+            const candidateUserIds = employees
                 .map((e) => e.id)
                 .filter(
                     (
@@ -323,6 +342,12 @@ export class PolicyService {
                     ): id is number =>
                         id !== undefined,
                 );
+
+            const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                candidateUserIds,
+                dto.employeeInfo?.sub,
+                { kind: 'policy', subjectId: dto.subjectId },
+            );
 
             const tokenEntities =
                 await this.employeeFcmTokenService
@@ -853,13 +878,17 @@ export class PolicyService {
             const compareYear = normalizeYear('2026-2027');
             const isSummer = subject.schoolYear?.includes('Hè');
 
-            // CASE AUTO APPROVED (giữ nguyên logic cũ)
+            // CASE AUTO APPROVED — sửa tại chỗ. Trước đây `save` không kèm id
+            // nên mỗi lần sửa lại sinh một bản mới, rồi chính câu "từ chối các
+            // bản khác" bên dưới đánh REJECTED bản mới đó: 2025-2026 tích gần
+            // 90 bản REJECTED thừa và nội dung sửa không bao giờ được áp.
             if (!isSummer && subjectYear < compareYear) {
-                const saved = await policyRepo.save({
-                    data: dto.data,
-                    subjectId: dto.subjectId,
-                    status: PolicyStatus.DIRECTOR_APPROVED
-                });
+                policy.data = dto.data;
+                policy.status = PolicyStatus.DIRECTOR_APPROVED;
+                if (dto.durationMonths !== undefined) {
+                    policy.durationMonths = dto.durationMonths || 0;
+                }
+                const saved = await policyRepo.save(policy);
 
                 await policyRepo
                     .createQueryBuilder()
@@ -933,9 +962,15 @@ export class PolicyService {
                     })
                     .getMany();
 
-                const userIds = employees
+                const candidateUserIds = employees
                     .map(e => e.id)
                     .filter((id): id is number => id !== undefined);
+
+                const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                    candidateUserIds,
+                    dto.employeeInfo?.sub,
+                    { kind: 'policy', subjectId: dto.subjectId },
+                );
 
                 const tokenEntities = await this.employeeFcmTokenService.getTokens(userIds);
                 const tokens = tokenEntities.map((x) => x.token);
@@ -1468,13 +1503,18 @@ export class PolicyService {
         });
     }
 
-    async getStats(employeeId: number, allStatuses?: boolean) {
+    async getStats(
+        employeeId?: number,
+        allStatuses?: boolean,
+        provinceId?: number,
+    ) {
         const qb = this.policyRepo
             .createQueryBuilder('p')
 
             // ===== JOIN =====
             .innerJoin('p.subject', 'sub')
             .innerJoin('sub.school', 's')
+            .leftJoin('s.employee', 'emp')
             .leftJoin('s.ward', 'w')
             .leftJoin('w.province', 'pr')
 
@@ -1517,15 +1557,23 @@ export class PolicyService {
                 's.class_count AS "classCount"',
                 's.ward_id AS "wardId"',
 
+                // EMPLOYEE
+                'emp.name AS "employeeName"',
+
                 // LOCATION
                 'w.id AS "wardId"',
                 'w.name AS "wardName"',
                 'pr.id AS "provinceId"',
                 'pr.name AS "provinceName"',
-            ])
+            ]);
 
-            // ===== WHERE =====
-            .andWhere('s.employee_id = :employeeId', { employeeId });
+        if (employeeId) {
+            qb.andWhere('s.employee_id = :employeeId', { employeeId });
+        }
+
+        if (provinceId) {
+            qb.andWhere('pr.id = :provinceId', { provinceId });
+        }
 
         if (!allStatuses) {
             qb.andWhere('p.status = :status', { status: 'DIRECTOR_APPROVED' });

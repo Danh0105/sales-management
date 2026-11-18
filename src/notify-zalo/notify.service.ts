@@ -6,6 +6,20 @@ import {
     ZaloTokenService,
 } from '../zalo-token/zalo-token.service';
 
+/**
+ * Zalo báo lỗi nghiệp vụ (chưa quan tâm OA, quá hạn tương tác, OA thiếu gói…)
+ * bằng HTTP 200 + `error` khác 0 — không bắt riêng thì tin hỏng vẫn bị tính là đã gửi.
+ */
+export class ZaloSendRejectedError extends Error {
+    constructor(
+        readonly code: number,
+        detail: string,
+    ) {
+        super(`Zalo từ chối, mã ${code}${detail ? `: ${detail}` : ''}`);
+        this.name = 'ZaloSendRejectedError';
+    }
+}
+
 @Injectable()
 export class NotifyService {
     private readonly logger = new Logger(NotifyService.name);
@@ -58,12 +72,21 @@ export class NotifyService {
                 },
             );
 
+            const code = Number(res.data?.error ?? 0);
+            if (code !== 0) {
+                throw new ZaloSendRejectedError(
+                    code,
+                    String(res.data?.message ?? '').slice(0, 200),
+                );
+            }
+
             // Không log response (id người nhận) — và tuyệt đối không log token.
             return res.data;
         } catch (error) {
             // Lỗi axios mang `config.headers.access_token` — chỉ giữ mã, ném lỗi đã làm sạch.
             const reason =
-                error instanceof ZaloTokenError
+                error instanceof ZaloTokenError ||
+                error instanceof ZaloSendRejectedError
                     ? error.message
                     : describeHttpError(error);
             this.logger.warn(`Zalo send error: ${reason}`);

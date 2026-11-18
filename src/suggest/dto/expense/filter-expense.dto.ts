@@ -27,10 +27,34 @@ export class FilterExpenseDto {
     @IsInt()
     createdBy?: number;
 
+    /**
+     * Đi kèm `createdBy` = chính người đang xem: trả thêm các đề xuất người đó
+     * được Giám đốc chỉ định (bàn giao, hỗ trợ, xử lý nhập kho, nghiệm thu).
+     */
+    @IsOptional()
+    @Transform(({ value }) => value === 'true' || value === true)
+    @IsBoolean()
+    includeAssigned?: boolean;
+
     @IsOptional()
     @Type(() => Number)
     @IsInt()
     schoolId?: number;
+
+    @IsOptional()
+    @Transform(({ value }) => value === 'true' || value === true)
+    @IsBoolean()
+    isMonthlyExpense?: boolean;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    subjectId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    expensePeriodId?: number;
 
     @IsOptional()
     @IsString()

@@ -25,6 +25,7 @@ import {
   RECRUITMENT_VIEW_ROLES,
 } from '../recruitment.roles';
 import { RecruitmentJobService } from '../services/recruitment-job.service';
+import { EMPLOYEE_POSITIONS } from '../../employee/employee-positions';
 import { recruitmentValidationPipe } from './validation';
 
 @ApiTags('Recruitment')
@@ -45,6 +46,11 @@ export class RecruitmentJobsController {
   @Get()
   findAll(@Query() query: QueryJobDto) {
     return this.jobs.findAll(query);
+  }
+
+  @Get('positions')
+  positions() {
+    return EMPLOYEE_POSITIONS;
   }
 
   @Get(':id')

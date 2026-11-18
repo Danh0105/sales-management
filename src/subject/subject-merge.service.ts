@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+    BadRequestException,
+    Injectable,
+    InternalServerErrorException,
+    Logger,
+} from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -67,25 +72,38 @@ export class SubjectMergeService {
      * Cố ý không hard-code danh sách: thêm một khoá ngoại mới mà quên cập nhật
      * danh sách thì lần gộp sau sẽ xoá mất dữ liệu của bảng đó. Hỏi database là
      * cách duy nhất luôn đúng.
+     *
+     * Đọc `pg_constraint` chứ không phải `information_schema`: view
+     * `constraint_column_usage` chỉ hiện cột của bảng mà role hiện tại **sở
+     * hữu**. App chạy bằng `sales_app`, bảng thuộc `sales_owner`, nên
+     * `information_schema` trả rỗng — gộp sẽ xoá môn khi chưa chuyển gì, và
+     * CASCADE mất luôn chính sách / lịch / buổi dạy.
      */
     async referencingTables(manager?: EntityManager): Promise<SubjectReference[]> {
         const runner = manager ?? this.dataSource.manager;
         const rows = await runner.query(`
-            SELECT tc.table_name AS "table",
-                   kcu.column_name AS "column",
-                   rc.delete_rule  AS "deleteRule"
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON kcu.constraint_name = tc.constraint_name
-            JOIN information_schema.constraint_column_usage ccu
-              ON ccu.constraint_name = tc.constraint_name
-            JOIN information_schema.referential_constraints rc
-              ON rc.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND ccu.table_name = 'subjects'
-              AND ccu.column_name = 'id'
-            ORDER BY tc.table_name
+            SELECT t.relname AS "table",
+                   a.attname AS "column",
+                   CASE c.confdeltype
+                        WHEN 'c' THEN 'CASCADE'
+                        WHEN 'n' THEN 'SET NULL'
+                        WHEN 'd' THEN 'SET DEFAULT'
+                        WHEN 'r' THEN 'RESTRICT'
+                        ELSE 'NO ACTION'
+                   END AS "deleteRule"
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_attribute a
+              ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+            WHERE c.contype = 'f'
+              AND c.confrelid = 'subjects'::regclass
+            ORDER BY 1
         `);
+        if (rows.length === 0) {
+            throw new InternalServerErrorException(
+                'Không đọc được các bảng tham chiếu tới môn học — dừng gộp để tránh mất dữ liệu',
+            );
+        }
         return rows as SubjectReference[];
     }
 

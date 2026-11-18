@@ -14,6 +14,15 @@ import { ExpensePeriod } from '../expense-periods/expense-period.entity';
 import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
+import { SchoolExpenseManagementConfirmation } from './entities/school-expense-management-confirmation.entity';
+import { SchoolTeacherExpenseItem } from '../school-teacher-expense/school-teacher-expense-item.entity';
+import { SchoolTeacherPayrollApproval } from '../school-teacher-expense/school-teacher-payroll-approval.entity';
+import { SchoolTeacher } from '../school-teacher-expense/school-teacher.entity';
+import {
+    SchoolTeacherPayrollController,
+    SchoolTeachersController,
+} from '../school-teacher-expense/school-teachers.controller';
+import { SchoolTeachersService } from '../school-teacher-expense/school-teachers.service';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
 import { Subject } from '../subject/subject.entity';
 
@@ -29,15 +38,22 @@ import { Subject } from '../subject/subject.entity';
             ManagementExpenseItem,
             ManagementExpenseOtherCost,
             Subject,
+            SchoolExpenseManagementConfirmation,
+            SchoolTeacherExpenseItem,
+            SchoolTeacherPayrollApproval,
+            SchoolTeacher,
         ]),
     ],
 
     controllers: [
         RealExpensesController,
+        SchoolTeachersController,
+        SchoolTeacherPayrollController,
     ],
 
     providers: [
         RealExpensesService,
+        SchoolTeachersService,
     ],
 
     exports: [

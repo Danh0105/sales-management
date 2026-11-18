@@ -15,6 +15,14 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import { SCHOOL_TEACHER_APPROVE_ROLES } from '../school-teacher-expense/school-teacher';
+import {
+  CASHFLOW_READ_ROLES,
+  CASHFLOW_SALES_ADMIN_ROLES,
+  CASHFLOW_CREATE_ROLES,
+  CASHFLOW_WRITE_ROLES,
+  CASHFLOW_TEACHER_PAY_ROLES,
+} from './cashflow-roles';
 
 type RequestWithUser = Request & { user: AuthUser };
 
@@ -23,31 +31,14 @@ type RequestWithUser = Request & { user: AuthUser };
  * bao gồm cả thao tác ghi (tạo/sửa/xóa/lưu) ở đây.
  * @Roles ở method override @Roles ở class (xem RolesGuard.getAllAndOverride).
  */
-const WRITE_ROLES = [
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-];
-
 /**
- * Sales admin chỉ được xem trang Quản lý thu chi và chỉnh sửa DUY NHẤT bảng
- * "Chi Ngoài" (qua `ManagementExpenseItemsController`) + xác nhận khoá bảng
- * đó — không có trong WRITE_ROLES nên không sửa được các bảng khác ở đây.
+ * Sales Admin được xem toàn bộ trang Quản lý thu chi, chỉ được ghi hai việc:
+ * "Xác nhận đúng BBCS" và tạo bảng chi phí rỗng. Các API ghi khác chỉ dành cho
+ * nhóm kế toán / quản lý trong CASHFLOW_WRITE_ROLES.
  */
-const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-
 @Controller('school-expenses')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-  ...SALESADMIN_ROLES,
-)
+@Roles(...CASHFLOW_READ_ROLES)
 export class RealExpensesController {
   constructor(private readonly realExpensesService: RealExpensesService) {}
 
@@ -62,8 +53,10 @@ export class RealExpensesController {
     );
   }
 
+  // `create` chỉ lấy schoolId + periodId, tổng tiền luôn 0 nên sales admin mở
+  // được bảng để xem mà không ghi được số liệu nào.
   @Post()
-  @Roles(...WRITE_ROLES)
+  @Roles(...CASHFLOW_CREATE_ROLES)
   create(@Body() body: any, @Req() req: RequestWithUser) {
     return this.realExpensesService.create(body, req.user);
   }
@@ -92,7 +85,7 @@ export class RealExpensesController {
   }
 
   @Patch(':id')
-  @Roles(...WRITE_ROLES)
+  @Roles(...CASHFLOW_WRITE_ROLES)
   update(
     @Param('id') id: string,
     @Body() body: any,
@@ -106,13 +99,13 @@ export class RealExpensesController {
   }
 
   @Delete(':id')
-  @Roles(...WRITE_ROLES)
+  @Roles(...CASHFLOW_WRITE_ROLES)
   remove(@Param('id') id: string, @Req() req: RequestWithUser) {
     return this.realExpensesService.remove(Number(id), req.user);
   }
 
   @Post(':id/save-all')
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...CASHFLOW_WRITE_ROLES)
   saveAll(
     @Param('id') id: string,
     @Body() body: any,
@@ -121,6 +114,37 @@ export class RealExpensesController {
     return this.realExpensesService.saveAll(
       Number(id),
       body,
+      req.user,
+    );
+  }
+
+  /**
+   * Bảng Giáo viên trường (lương trả thẳng cho giáo viên của trường, từ kỳ
+   * 11/2026) + dấu "Duyệt lương". Lương từng giáo viên — không gồm Sales Admin.
+   */
+  @Get(':id/school-teacher-items')
+  @Roles(...CASHFLOW_TEACHER_PAY_ROLES)
+  getSchoolTeacherItems(
+    @Param('id') id: string,
+    @Query('subjectId') subjectId: string,
+  ) {
+    return this.realExpensesService.getSchoolTeacherItems(
+      Number(id),
+      Number(subjectId),
+    );
+  }
+
+  /** "Duyệt lương" bảng Giáo viên trường của một môn — chỉ ghi người + thời điểm. */
+  @Post(':id/school-teacher-items/approve')
+  @Roles(...SCHOOL_TEACHER_APPROVE_ROLES)
+  approveSchoolTeacher(
+    @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.realExpensesService.approveSchoolTeacher(
+      Number(id),
+      Number(subjectId),
       req.user,
     );
   }
@@ -141,13 +165,15 @@ export class RealExpensesController {
    * chỉnh sửa (xem ManagementExpenseItemsService).
    */
   @Post(':id/confirm-management-expense')
-  @Roles(...SALESADMIN_ROLES, 'ketoan_truong')
+  @Roles(...CASHFLOW_SALES_ADMIN_ROLES, 'ketoan_truong')
   confirmManagementExpense(
     @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
     @Req() req: RequestWithUser,
   ) {
     return this.realExpensesService.confirmManagementExpense(
       Number(id),
+      Number(subjectId),
       req.user,
     );
   }
@@ -157,10 +183,12 @@ export class RealExpensesController {
   @Roles('ketoan_truong')
   unconfirmManagementExpense(
     @Param('id') id: string,
+    @Body('subjectId') subjectId: number,
     @Req() req: RequestWithUser,
   ) {
     return this.realExpensesService.unconfirmManagementExpense(
       Number(id),
+      Number(subjectId),
       req.user,
     );
   }

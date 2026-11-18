@@ -30,10 +30,18 @@ export class ExpenseNotificationController {
         return req.user['id'];
     }
 
+    private isLongAnDirector(req: Request): boolean {
+        const roles = req.user?.['roles'] ?? [];
+        return roles.includes('director_la') && !roles.includes('director');
+    }
+
     /** Badge cho các tab: { general: {total, unread}, overdue: {total, unread} }. */
     @Get('summary')
     summary(@Req() req: Request) {
-        return this.service.summary(this.getEmployeeId(req));
+        return this.service.summary(
+            this.getEmployeeId(req),
+            this.isLongAnDirector(req),
+        );
     }
 
     /** Gom nhóm theo nhân viên kinh doanh (phân trang theo nhân viên). */
@@ -51,6 +59,7 @@ export class ExpenseNotificationController {
             tab,
             page,
             limit,
+            restrictedLongAnDirector: this.isLongAnDirector(req),
         });
     }
 
@@ -71,6 +80,7 @@ export class ExpenseNotificationController {
             employeeId: employeeId ? Number(employeeId) : undefined,
             page,
             limit,
+            restrictedLongAnDirector: this.isLongAnDirector(req),
         });
     }
 

@@ -1,7 +1,13 @@
-import { HttpException, HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { access, mkdir, rmdir, unlink, writeFile } from 'fs/promises';
+import { rmdir, unlink } from 'fs/promises';
 import { join, resolve, sep } from 'path';
 import sharp from 'sharp';
 import { LessonMediaArchiveService } from './lesson-media-archive.service';
@@ -28,8 +34,6 @@ export class LessonImageStorageService {
 
   constructor(
     private readonly config: ConfigService,
-    // Optional để spec cũ khởi tạo bằng tay không phải truyền; thiếu thì chỉ
-    // mất khả năng tạo thumb cho ảnh đã chuyển sang NAS.
     @Optional() private readonly archive?: LessonMediaArchiveService,
   ) {
     this.directory = resolve(
@@ -71,39 +75,54 @@ export class LessonImageStorageService {
         id: index + 1,
         url:
           base && image.url.startsWith('/') ? `${base}${image.url}` : image.url,
-        ...(video ? { mimeType: image.mimeType, mediaType: 'video' as const } : {}),
+        ...(video
+          ? { mimeType: image.mimeType, mediaType: 'video' as const }
+          : {}),
       };
     });
   }
 
   publicUrl(url: string): string {
-    const base = (this.config.get<string>('PUBLIC_BASE_URL') || '').replace(/\/$/, '');
+    const base = (this.config.get<string>('PUBLIC_BASE_URL') || '').replace(
+      /\/$/,
+      '',
+    );
     return base && url.startsWith('/') ? `${base}${url}` : url;
   }
 
   /** Tạo thumbnail cho dữ liệu cũ theo nhu cầu, tối đa 30 file mỗi request. */
-  async ensureThumbnail(url: string, storedUrl?: string | null): Promise<string> {
+  async ensureThumbnail(
+    url: string,
+    storedUrl?: string | null,
+  ): Promise<string> {
     const fallback = this.thumbnailUrlOf(url);
     const thumbnailUrl = storedUrl || fallback;
     if (!url.startsWith('/uploads/lesson-images/') || !fallback) {
-      throw imageError(HttpStatus.UNPROCESSABLE_ENTITY, 'LESSON_THUMBNAIL_UNAVAILABLE', 'Không thể tạo ảnh thu nhỏ');
+      throw imageError(
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        'LESSON_THUMBNAIL_UNAVAILABLE',
+        'Không thể tạo ảnh thu nhỏ',
+      );
     }
     const name = url.slice('/uploads/lesson-images/'.length);
     // Bản gốc có thể đã được chuyển sang NAS; tra qua tầng lưu trữ để tìm.
     // NAS ngắt thì `locate` trả null ngay, không treo.
-    const source =
-      (await this.archive?.locate(name))?.path ?? resolve(this.directory, name);
-    const targetName = fallback.slice('/uploads/lesson-images/thumb/'.length);
-    const target = resolve(this.directory, 'thumb', targetName);
-    try {
-      await access(target);
-    } catch {
-      await mkdir(resolve(this.directory, 'thumb'), { recursive: true });
-      await sharp(source, { failOn: 'none' })
+    const existing = await this.archive?.locateThumbnail(name);
+    if (!existing) {
+      const source =
+        (await this.archive?.locate(name))?.path ??
+        resolve(this.directory, name);
+      const thumbnail = await sharp(source, { failOn: 'none' })
         .rotate()
-        .resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true })
+        .resize({
+          width: 320,
+          height: 320,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
         .webp({ quality: 76 })
-        .toFile(target);
+        .toBuffer();
+      await this.requireArchive().storeThumbnail(name, thumbnail);
     }
     return this.publicUrl(thumbnailUrl);
   }
@@ -117,13 +136,12 @@ export class LessonImageStorageService {
       const id = randomUUID();
       const name = `${id}.${videoExtension}`;
       try {
-        await mkdir(this.directory, { recursive: true });
-        await writeFile(join(this.directory, name), file.buffer, { flag: 'wx' });
+        await this.requireArchive().store(name, file.buffer);
       } catch {
         throw imageError(
-          HttpStatus.BAD_GATEWAY,
-          'LESSON_MEDIA_STORAGE_ERROR',
-          'Không thể lưu minh chứng báo giảng',
+          HttpStatus.SERVICE_UNAVAILABLE,
+          'LESSON_MEDIA_ARCHIVE_UNAVAILABLE',
+          'Kho lưu trữ minh chứng đang gián đoạn, vui lòng thử lại',
         );
       }
       return {
@@ -147,22 +165,24 @@ export class LessonImageStorageService {
     const output = await this.toWebp(file);
 
     const thumbnail = await sharp(output)
-      .resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true })
+      .resize({
+        width: 320,
+        height: 320,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
       .webp({ quality: 76 })
       .toBuffer();
 
     const id = randomUUID();
     const name = `${id}.webp`;
     try {
-      await mkdir(this.directory, { recursive: true });
-      await mkdir(join(this.directory, 'thumb'), { recursive: true });
-      await writeFile(join(this.directory, name), output, { flag: 'wx' });
-      await writeFile(join(this.directory, 'thumb', name), thumbnail, { flag: 'wx' });
+      await this.requireArchive().store(name, output, thumbnail);
     } catch {
       throw imageError(
-        HttpStatus.BAD_GATEWAY,
-        'LESSON_IMAGE_STORAGE_ERROR',
-        'Không thể lưu ảnh bài dạy',
+        HttpStatus.SERVICE_UNAVAILABLE,
+        'LESSON_MEDIA_ARCHIVE_UNAVAILABLE',
+        'Kho lưu trữ minh chứng đang gián đoạn, vui lòng thử lại',
       );
     }
     return {
@@ -185,7 +205,11 @@ export class LessonImageStorageService {
     await unlink(target).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
     });
-    const thumbnail = resolve(this.directory, 'thumb', name.replace(/\.[^.]+$/, '.webp'));
+    const thumbnail = resolve(
+      this.directory,
+      'thumb',
+      name.replace(/\.[^.]+$/, '.webp'),
+    );
     await unlink(thumbnail).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
     });
@@ -194,6 +218,14 @@ export class LessonImageStorageService {
         if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY') throw error;
       },
     );
+    await this.archive?.removeArchived(name);
+  }
+
+  private requireArchive(): LessonMediaArchiveService {
+    if (!this.archive?.configured) {
+      throw new Error('LESSON_IMAGE_ARCHIVE_DIR is required');
+    }
+    return this.archive;
   }
 
   private thumbnailUrlOf(url: string): string {
@@ -318,7 +350,11 @@ export class LessonImageStorageService {
     if (buffer[0] === 0xff && buffer[1] === 0xd8) {
       return buffer.indexOf(Buffer.from([0xff, 0xd9]), 2) === -1;
     }
-    if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    if (
+      buffer
+        .subarray(0, 8)
+        .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ) {
       return buffer.indexOf(Buffer.from('IEND', 'ascii'), 8) === -1;
     }
     if (buffer.toString('ascii', 0, 4) === 'RIFF') {

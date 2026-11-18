@@ -31,8 +31,19 @@ export interface ZaloOutboundConfig {
   permanentErrors: ReadonlySet<number>;
   /** Mã lỗi Zalo coi là access token hỏng → refresh rồi gửi lại một lần. */
   tokenErrors: ReadonlySet<number>;
+  /**
+   * Mã Zalo nghĩa là OA không có quyền dịch vụ (gói OA) — không phải lỗi của một tin:
+   * tin → DEAD_LETTER, outbound tự dừng khẩn + cảnh báo, không tự mở lại. Mặc định `-224`.
+   */
+  oaBlockingErrors: ReadonlySet<number>;
   /** Zalo từ chối với mã chưa phân loại: thử lại tối đa chừng này lần rồi DEAD_LETTER. */
   maxRejectAttempts: number;
+  /**
+   * `RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true`: chỉ gửi tin có grant dispatch của
+   * SYSTEM OWNER (`recruitment_outbound_dispatch_grants`). Sender luôn bật khi pilot mode
+   * bật, kể cả khi biến này `false` — xem `RecruitmentZaloSender`.
+   */
+  dispatchGrantRequired: boolean;
 }
 
 export const ZALO_OUTBOUND_CONFIG_ERROR =
@@ -62,6 +73,11 @@ export function readZaloOutboundConfig(
       return fallback;
     }
     return value;
+  };
+  const flag = (key: string) => {
+    const raw = text(key);
+    if (raw && raw !== 'true' && raw !== 'false') invalid.push(key);
+    return raw === 'true';
   };
   const codes = (key: string, fallback: string) => {
     const raw = text(key, fallback);
@@ -123,10 +139,16 @@ export function readZaloOutboundConfig(
       120_000,
     ),
     maxTextLength: int('RECRUITMENT_ZALO_MAX_TEXT_LENGTH', 2_000, 1, 10_000),
-    // Chỉ nạp mã đã kiểm với tài liệu Zalo; mặc định rỗng = mọi từ chối thử lại có giới hạn.
-    permanentErrors: codes('RECRUITMENT_ZALO_PERMANENT_ERRORS', ''),
+    // Các mã đã đối chiếu tài liệu Zalo và không thể tự hết bằng retry cùng payload.
+    // Đặc biệt -224 là OA thiếu gói dịch vụ: retry tự động chỉ tiêu quota và gây nhiễu.
+    permanentErrors: codes(
+      'RECRUITMENT_ZALO_PERMANENT_ERRORS',
+      '-205,-209,-210,-212,-213,-221,-223,-224,-227,-230,-232,-233',
+    ),
     tokenErrors: codes('RECRUITMENT_ZALO_TOKEN_ERRORS', '-216'),
+    oaBlockingErrors: codes('RECRUITMENT_ZALO_OA_BLOCKING_ERRORS', '-224'),
     maxRejectAttempts: int('RECRUITMENT_ZALO_MAX_REJECT_ATTEMPTS', 3, 1, 20),
+    dispatchGrantRequired: flag('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED'),
   };
   if (config.retryMaxMs < config.retryBaseMs) {
     invalid.push('RECRUITMENT_ZALO_SENDER_RETRY_MAX_MS');

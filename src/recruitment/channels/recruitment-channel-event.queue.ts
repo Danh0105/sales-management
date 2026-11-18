@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { ChannelEventAiDecision } from '../recruitment.enums';
 
+import type { AgentUsage } from './openclaw-responses.client';
 import { EVENT_TEXT_RETENTION_DAYS } from './recruitment-channel-worker.config';
 
 /** Event đã được claim — đủ để xử lý một lượt, không hơn. */
@@ -16,6 +17,9 @@ export interface ClaimedChannelEvent {
   attemptCount: number;
   /** Version điều khiển lúc lượt AI của event bắt đầu (lần thử trước), `null` nếu chưa. */
   aiControlVersion: number | null;
+  /** Đã mở khả năng gửi request tới provider; không retry mù nếu outcome chưa rõ. */
+  aiProviderDispatchedAt: Date | null;
+  aiReservedTokens: number | null;
 }
 
 interface ClaimRow {
@@ -26,6 +30,8 @@ interface ClaimRow {
   normalized_message_text: string | null;
   attempt_count: number | string;
   ai_control_version: number | string | null;
+  ai_provider_dispatched_at: Date | null;
+  ai_reserved_tokens: number | string | null;
 }
 
 export interface OutboxDraft {
@@ -70,6 +76,7 @@ export class RecruitmentChannelEventQueue {
     owner: string,
     leaseMs: number,
     settleMs = 0,
+    pilotSenders: string[] | null = null,
   ): Promise<ClaimedChannelEvent | null> {
     const heads: Array<{ id: number; sender: string }> =
       await this.dataSource.query(
@@ -82,6 +89,11 @@ export class RecruitmentChannelEventQueue {
              AND e.event_type = 'user_send_text' AND e.external_sender_id IS NOT NULL
              AND (e.status IN ('RECEIVED', 'PROCESSING')
                   OR (e.status = 'FAILED' AND e.next_attempt_at IS NOT NULL))
+             -- Pilot (P3-7.3 / G8): chỉ người gửi có fingerprint pilotFingerprint(oaId, userId)
+             -- trong danh sách; NULL = không lọc. Người khác giữ RECEIVED, không tới OpenClaw.
+             AND ($3::text[] IS NULL
+                  OR substr(encode(sha256(convert_to(e.channel_account_id || ':' || e.external_sender_id, 'UTF8')), 'hex'), 1, 16)
+                     = ANY($3::text[]))
            ORDER BY e.external_sender_id, coalesce(e.provider_created_at, e.received_at), e.id
          ) head
          WHERE (head.status = 'RECEIVED'
@@ -90,11 +102,18 @@ export class RecruitmentChannelEventQueue {
             OR (head.status = 'PROCESSING' AND head.lease_until < now())
          ORDER BY head.ord, head.id
          LIMIT 20`,
-        [oaId, settleMs],
+        [oaId, settleMs, pilotSenders],
       );
 
     for (const head of heads) {
-      const claimed = await this.tryClaim(oaId, head, owner, leaseMs, settleMs);
+      const claimed = await this.tryClaim(
+        oaId,
+        head,
+        owner,
+        leaseMs,
+        settleMs,
+        pilotSenders,
+      );
       if (claimed) return claimed;
     }
     return null;
@@ -106,6 +125,7 @@ export class RecruitmentChannelEventQueue {
     owner: string,
     leaseMs: number,
     settleMs: number,
+    pilotSenders: string[] | null,
   ): Promise<ClaimedChannelEvent | null> {
     return this.dataSource.transaction(async (em) => {
       const [lock]: Array<{ locked: boolean }> = await em.query(
@@ -127,6 +147,9 @@ export class RecruitmentChannelEventQueue {
                 OR (e.status = 'PROCESSING' AND e.lease_until < now()))
            AND (e.status <> 'RECEIVED'
                 OR e.received_at <= now() - $6::int * interval '1 millisecond')
+           AND ($7::text[] IS NULL
+                OR substr(encode(sha256(convert_to(e.channel_account_id || ':' || e.external_sender_id, 'UTF8')), 'hex'), 1, 16)
+                   = ANY($7::text[]))
            AND NOT EXISTS (
              SELECT 1 FROM "recruitment_channel_events" o
              WHERE o.channel = e.channel AND o.channel_account_id = e.channel_account_id
@@ -138,8 +161,9 @@ export class RecruitmentChannelEventQueue {
                         AND (coalesce(o.provider_created_at, o.received_at), o.id)
                           < (coalesce(e.provider_created_at, e.received_at), e.id))))
          RETURNING e.id, e.channel_account_id, e.external_sender_id, e.provider_message_id,
-                   e.normalized_message_text, e.attempt_count, e.ai_control_version`,
-          [head.id, oaId, head.sender, leaseMs, owner, settleMs],
+                   e.normalized_message_text, e.attempt_count, e.ai_control_version,
+                   e.ai_provider_dispatched_at, e.ai_reserved_tokens`,
+          [head.id, oaId, head.sender, leaseMs, owner, settleMs, pilotSenders],
         ),
       );
       const row = rows[0];
@@ -155,28 +179,90 @@ export class RecruitmentChannelEventQueue {
           row.ai_control_version === null
             ? null
             : Number(row.ai_control_version),
+        aiProviderDispatchedAt: row.ai_provider_dispatched_at,
+        aiReservedTokens:
+          row.ai_reserved_tokens === null
+            ? null
+            : Number(row.ai_reserved_tokens),
       };
     });
   }
 
   /**
-   * Ghi bền "lượt AI bắt đầu dưới version điều khiển này" — TRƯỚC khi gọi
-   * OpenClaw (fencing theo lease). `false` = đã mất lease.
+   * Trả event vừa claim về hàng chờ KHÔNG tính là một lần thử (vd. AI vừa tự dừng vì vượt
+   * trần toàn hệ thống — event chờ mở lại). Chỉ khi lượt AI chưa bắt đầu.
    */
-  async markAiStarted(
-    event: ClaimedChannelEvent,
-    owner: string,
-    controlVersion: number,
-  ): Promise<boolean> {
+  async release(event: ClaimedChannelEvent, owner: string): Promise<boolean> {
     const rows = returnedRows(
       await this.dataSource.query(
-        `UPDATE "recruitment_channel_events" SET ai_control_version = $3, updated_at = now()
+        `UPDATE "recruitment_channel_events"
+         SET status = 'RECEIVED', attempt_count = greatest(attempt_count - 1, 0),
+             processing_started_at = NULL, lease_until = NULL, lease_owner = NULL, updated_at = now()
          WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
-         RETURNING id`,
-        [event.id, owner, controlVersion],
+           AND ai_control_version IS NULL RETURNING id`,
+        [event.id, owner],
       ),
     );
     return rows.length > 0;
+  }
+
+  /** Token của lượt AI (theo `usage` OpenClaw) — ghi ngay khi có, kể cả nếu bước sau lỗi. */
+  async recordUsage(eventId: number, usage: AgentUsage): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE "recruitment_channel_events"
+       SET ai_input_tokens = $2, ai_cached_tokens = $3, ai_output_tokens = $4,
+           ai_total_tokens = $5, updated_at = now()
+       WHERE id = $1 AND ai_total_tokens IS NULL`,
+      [eventId, usage.input, usage.cached, usage.output, usage.total],
+    );
+  }
+
+  /**
+   * Commit dấu mốc trước khi mở kết nối OpenClaw. Runtime row FOR SHARE tạo thứ tự
+   * rõ với operator stop/auto-halt FOR UPDATE. Sau mốc này, crash/timeout không được
+   * tự gửi lại request vì provider có thể đã nhận và tính phí.
+   */
+  async markProviderDispatched(
+    event: ClaimedChannelEvent,
+    owner: string,
+  ): Promise<'DISPATCHED' | 'HALTED' | 'LOST' | 'UNCERTAIN'> {
+    return this.dataSource.transaction(async (em) => {
+      const [runtime]: Array<{
+        ai_halted: boolean;
+        worker_halted: boolean;
+        failsafe_halted: boolean;
+      }> = await em.query(
+        `SELECT ai_halted, worker_halted, failsafe_halted
+         FROM "recruitment_runtime_controls" WHERE id = 1 FOR SHARE`,
+      );
+      if (
+        !runtime ||
+        runtime.ai_halted ||
+        runtime.worker_halted ||
+        runtime.failsafe_halted
+      ) {
+        return 'HALTED';
+      }
+      const rows = returnedRows(
+        await em.query(
+          `UPDATE "recruitment_channel_events"
+           SET ai_provider_dispatched_at = clock_timestamp(), updated_at = now()
+           WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2
+             AND ai_control_version IS NOT NULL AND ai_reserved_tokens IS NOT NULL
+             AND ai_provider_dispatched_at IS NULL
+           RETURNING id`,
+          [event.id, owner],
+        ),
+      );
+      if (rows.length) return 'DISPATCHED';
+      const [row]: Array<{ ai_provider_dispatched_at: Date | null }> =
+        await em.query(
+          `SELECT ai_provider_dispatched_at FROM "recruitment_channel_events"
+           WHERE id = $1 AND status = 'PROCESSING' AND lease_owner = $2`,
+          [event.id, owner],
+        );
+      return row?.ai_provider_dispatched_at ? 'UNCERTAIN' : 'LOST';
+    });
   }
 
   /** Gia hạn lease khi lượt còn chạy. `false` = đã mất lease → phải dừng, không ghi kết quả. */
@@ -215,8 +301,29 @@ export class RecruitmentChannelEventQueue {
     discarded: boolean;
   }> {
     return this.dataSource.transaction(async (em) => {
+      const [runtime]: Array<{ ai_halted: boolean; failsafe_halted: boolean }> =
+        await em.query(
+          `SELECT ai_halted, failsafe_halted FROM "recruitment_runtime_controls"
+           WHERE id = 1 FOR SHARE`,
+        );
       if (!(await this.markProcessed(em, event, owner, fence.conversationId))) {
         return { completed: false, outboxId: null, discarded: false };
+      }
+      if (!runtime || runtime.ai_halted || runtime.failsafe_halted) {
+        await this.setDecision(
+          em,
+          event.id,
+          ChannelEventAiDecision.DISCARDED_RUNTIME_HALTED,
+        );
+        if (outbox.recruitmentMessageId) {
+          await em.query(
+            `UPDATE "recruitment_messages"
+             SET metadata = metadata || '{"delivery": "DISCARDED_RUNTIME_HALTED"}'::jsonb
+             WHERE id = $1`,
+            [outbox.recruitmentMessageId],
+          );
+        }
+        return { completed: true, outboxId: null, discarded: true };
       }
       const [control]: Array<{
         control_mode: string;
@@ -250,8 +357,8 @@ export class RecruitmentChannelEventQueue {
       const inserted: Array<{ id: number }> = await em.query(
         `INSERT INTO "recruitment_channel_outbox"
            ("source_event_id", "source_type", "channel", "channel_account_id",
-            "external_recipient_id", "message_text", "recruitment_message_id", "control_version")
-         VALUES ($1, 'AI_REPLY', 'ZALO', $2, $3, $4, $5, $6)
+            "external_recipient_id", "message_text", "recruitment_message_id", "control_version", "status")
+         VALUES ($1, 'AI_REPLY', 'ZALO', $2, $3, $4, $5, $6, 'AWAITING_APPROVAL')
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
@@ -263,6 +370,26 @@ export class RecruitmentChannelEventQueue {
           fence.expectedVersion,
         ],
       );
+      // P3.2: approval + CREATED event commit together with AI outbox.
+      // ON CONFLICT means the existing outbox is reused, not approved again.
+      if (inserted[0]?.id) {
+        const outboxId = Number(inserted[0].id);
+
+        await em.query(
+          `INSERT INTO "recruitment_outbox_approvals"
+             ("outbox_id", "state", "version")
+           VALUES ($1, 'AWAITING_APPROVAL', 0)`,
+          [outboxId],
+        );
+
+        await em.query(
+          `INSERT INTO "recruitment_outbox_approval_events"
+             ("outbox_id", "version", "action")
+           VALUES ($1, 0, 'CREATED')`,
+          [outboxId],
+        );
+      }
+
       await this.setDecision(em, event.id, ChannelEventAiDecision.AI_REPLIED);
       await em.query(
         `UPDATE "recruitment_conversations" SET resume_signal_pending = false

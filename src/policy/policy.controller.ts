@@ -30,6 +30,7 @@ import { PolicyStatsDto } from './dto/policy-stats.dto';
 import { QueryPoliciesDto } from './dto/query-policies.dto';
 import { QueryPoliciesPageDto } from './dto/query-policies-page.dto';
 import {
+    LA_PROVINCE_ID,
     POLICY_VIEW_ALL_ROLES,
     POLICY_VIEW_PROVINCE_ROLES,
     POLICY_VIEW_ROLES,
@@ -37,6 +38,7 @@ import {
 } from './policy-scope';
 import { PolicyStatus } from './policy.enum';
 
+@UseGuards(JwtAuthGuard)
 @Controller('policies')
 export class PolicyController {
     constructor(private readonly service: PolicyService) { }
@@ -160,7 +162,8 @@ export class PolicyController {
     /**
      * Số liệu thống kê chính sách của một nhân viên.
      *
-     * Chỉ các role xem-toàn-bộ / theo-tỉnh được truyền `employeeId` tuỳ ý; còn
+     * Chỉ các role xem-toàn-bộ / theo-tỉnh được truyền `employeeId` tuỳ ý; nếu
+     * bỏ trống thì API trả tổng hợp tất cả nhân viên trong phạm vi được phép. Còn
      * lại (kinh doanh và mọi role nhân viên khác) bị ép về **chính mình** —
      * `employeeId` trên query bị bỏ qua, không tin vào việc FE gửi đúng id.
      *
@@ -172,12 +175,20 @@ export class PolicyController {
     @Get('stats')
     async getStats(@Query() query: PolicyStatsDto, @Req() req: Request) {
         const roles = req.user?.roles ?? [];
-        const canViewOthers = roles.some((role) =>
-            [...POLICY_VIEW_ALL_ROLES, ...POLICY_VIEW_PROVINCE_ROLES].includes(role),
+        const canViewAll = roles.some((role) =>
+            POLICY_VIEW_ALL_ROLES.includes(role),
         );
-        const employeeId = canViewOthers ? query.employeeId : req.user!.id;
+        const canViewProvince = roles.some((role) =>
+            POLICY_VIEW_PROVINCE_ROLES.includes(role),
+        );
+        const employeeId = canViewAll || canViewProvince
+            ? query.employeeId
+            : req.user!.id;
+        const provinceId = canViewProvince && !canViewAll
+            ? LA_PROVINCE_ID
+            : undefined;
 
-        return this.service.getStats(employeeId, query.allStatuses);
+        return this.service.getStats(employeeId, query.allStatuses, provinceId);
     }
     // ================= CREATE =================
     @UseGuards(JwtAuthGuard, BlockReadOnlyGuard)

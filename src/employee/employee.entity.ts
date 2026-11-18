@@ -25,7 +25,10 @@ export class Employee {
   @Column({ nullable: true })
   name?: string;
 
-  @Column({ nullable: true })
+  // Không đọc mặc định: quan hệ `employee` được nạp kèm ở rất nhiều route, chỉ
+  // cần một chỗ quên lọc là hash theo response ra ngoài. Luồng cần so mật khẩu
+  // phải chọn tường minh (xem `EmployeeService.queryWithPassword`).
+  @Column({ nullable: true, select: false })
   password?: string;
 
   @Column({ unique: true, nullable: true })

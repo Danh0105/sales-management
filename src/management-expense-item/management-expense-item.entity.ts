@@ -60,7 +60,7 @@ export class ManagementExpenseItem {
   @Column({
     type: 'decimal',
     precision: 15,
-    scale: 2,
+    scale: 4,
     default: 1,
   })
   monthsCount!: number;
@@ -173,11 +173,26 @@ export class ManagementExpenseItem {
   })
   payer!: string;
 
+  /** Nguồn chi — số hiệu tài khoản trong danh mục Nguồn thu chi (vd "1121"). */
+  @Column({
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  cashAccount!: string | null;
+
   @Column({
     type: 'text',
     nullable: true,
   })
   note!: string;
+
+  /** Nội dung riêng của dòng thêm cho Chi Ngoài; dòng đi kèm Doanh Thu dùng Nội dung của Doanh Thu. */
+  @Column({
+    type: 'text',
+    nullable: true,
+  })
+  content!: string | null;
 
   @OneToMany(
     () => ManagementExpenseOtherCost,

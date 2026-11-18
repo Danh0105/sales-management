@@ -13,17 +13,23 @@ import { ActivityLogService } from '../src/activity-log/activity-log.service';
 import { JwtAuthGuard } from '../src/auth/jwt-auth.guard';
 import { Department } from '../src/department/department.entity';
 import { Employee } from '../src/employee/employee.entity';
+import { Province } from '../src/province/province.entity';
 import { RecruitmentAiIdempotencyKey } from '../src/recruitment/entities/recruitment-ai-idempotency-key.entity';
 import { RecruitmentApplication } from '../src/recruitment/entities/recruitment-application.entity';
 import { RecruitmentCandidate } from '../src/recruitment/entities/recruitment-candidate.entity';
+import { RecruitmentChannelEvent } from '../src/recruitment/entities/recruitment-channel-event.entity';
+import { RecruitmentChannelOutbox } from '../src/recruitment/entities/recruitment-channel-outbox.entity';
 import { RecruitmentConversation } from '../src/recruitment/entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from '../src/recruitment/entities/recruitment-handoff.entity';
+import { RecruitmentHrAlert } from '../src/recruitment/entities/recruitment-hr-alert.entity';
 import { RecruitmentInterviewSlot } from '../src/recruitment/entities/recruitment-interview-slot.entity';
 import { RecruitmentInterview } from '../src/recruitment/entities/recruitment-interview.entity';
 import { RecruitmentJob } from '../src/recruitment/entities/recruitment-job.entity';
 import { RecruitmentMessage } from '../src/recruitment/entities/recruitment-message.entity';
+import { RecruitmentZaloCredential } from '../src/recruitment/entities/recruitment-zalo-credential.entity';
 import { RecruitmentModule } from '../src/recruitment/recruitment.module';
 import { RecruitmentInterviewService } from '../src/recruitment/services/recruitment-interview.service';
+import { Ward } from '../src/ward/ward.entity';
 
 const KEY = 'test-recruitment-ai-key-0123456789abcdef';
 const auth = { Authorization: `Bearer ${KEY}` };
@@ -38,8 +44,14 @@ const ENTITIES = [
   RecruitmentInterview,
   RecruitmentHandoff,
   RecruitmentAiIdempotencyKey,
+  RecruitmentChannelEvent,
+  RecruitmentChannelOutbox,
+  RecruitmentZaloCredential,
+  RecruitmentHrAlert,
   Department,
   Employee,
+  Province,
+  Ward,
 ];
 
 function queryBuilder() {
@@ -73,6 +85,8 @@ function mockRepo() {
     find: jest.fn().mockResolvedValue([]),
     exists: jest.fn().mockResolvedValue(false),
     count: jest.fn().mockResolvedValue(0),
+    countBy: jest.fn().mockResolvedValue(0),
+    findBy: jest.fn().mockResolvedValue([]),
     create: jest.fn((v) => ({ ...v })),
     save: jest.fn(async (v) => ({ id: v.id ?? 1, ...v })),
     update: jest.fn(),
@@ -327,11 +341,9 @@ describe('Recruitment API (e2e contract)', () => {
     });
 
     it('propose interview retry cùng key → service chỉ chạy một lần', async () => {
-      const spy = jest
-        .spyOn(interviews, 'aiPropose')
-        .mockResolvedValue({
-          interview: { id: 70, status: 'PROPOSED' },
-        } as any);
+      const spy = jest.spyOn(interviews, 'aiPropose').mockResolvedValue({
+        interview: { id: 70, status: 'PROPOSED' },
+      } as any);
 
       const send = () =>
         request(app.getHttpServer())

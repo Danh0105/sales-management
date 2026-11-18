@@ -5,19 +5,32 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import sharp from 'sharp';
 import { LessonImageStorageService } from './lesson-image-storage.service';
+import { LessonMediaArchiveService } from './lesson-media-archive.service';
 
 describe('LessonImageStorageService', () => {
   let directory: string;
+  let archiveDirectory: string;
+  let archive: LessonMediaArchiveService;
   let service: LessonImageStorageService;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'lesson-images-'));
-    service = new LessonImageStorageService({
+    archiveDirectory = await mkdtemp(join(tmpdir(), 'lesson-images-nas-'));
+    const config = {
       get: (key: string) =>
-        key === 'LESSON_IMAGE_UPLOAD_DIR' ? directory : '',
-    } as ConfigService);
+        key === 'LESSON_IMAGE_UPLOAD_DIR'
+          ? directory
+          : key === 'LESSON_IMAGE_ARCHIVE_DIR'
+            ? archiveDirectory
+            : '',
+    } as ConfigService;
+    archive = new LessonMediaArchiveService(config);
+    service = new LessonImageStorageService(config, archive);
   });
-  afterEach(() => rm(directory, { recursive: true, force: true }));
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+    await rm(archiveDirectory, { recursive: true, force: true });
+  });
 
   const image = async (format: 'jpeg' | 'png' | 'webp' = 'png') =>
     ({
@@ -35,9 +48,13 @@ describe('LessonImageStorageService', () => {
       const [stored] = await service.storeMany([await image(format)]);
       expect(stored.url).toMatch(/^\/uploads\/lesson-images\/[\w-]+\.webp$/);
       expect(
-        (await sharp(await readFile(join(directory, stored.name))).metadata())
-          .format,
+        (
+          await sharp(
+            await readFile(join(archiveDirectory, stored.name)),
+          ).metadata()
+        ).format,
       ).toBe('webp');
+      expect(await readdir(directory)).toEqual([]);
     },
   );
 
@@ -49,6 +66,7 @@ describe('LessonImageStorageService', () => {
     expect(stored).toHaveLength(2);
     await service.removeMany(stored);
     expect(await readdir(directory)).toEqual([]);
+    expect(await readdir(join(archiveDirectory, 'thumb'))).toEqual([]);
   });
 
   it('lưu và công khai video MP4 làm minh chứng', async () => {
@@ -62,7 +80,8 @@ describe('LessonImageStorageService', () => {
     ]);
 
     expect(stored.name).toMatch(/\.mp4$/);
-    expect(await readFile(join(directory, stored.name))).toEqual(buffer);
+    expect(await readFile(join(archiveDirectory, stored.name))).toEqual(buffer);
+    expect(await readdir(directory)).toEqual([]);
     expect(service.publicItems([stored])).toEqual([
       {
         id: 1,
@@ -116,14 +135,20 @@ describe('LessonImageStorageService', () => {
   });
 
   it('tạo URL tuyệt đối khi có PUBLIC_BASE_URL', async () => {
-    service = new LessonImageStorageService({
+    const config = {
       get: (key: string) =>
         key === 'LESSON_IMAGE_UPLOAD_DIR'
           ? directory
-          : key === 'PUBLIC_BASE_URL'
-            ? 'https://api.example.com/'
-            : '',
-    } as ConfigService);
+          : key === 'LESSON_IMAGE_ARCHIVE_DIR'
+            ? archiveDirectory
+            : key === 'PUBLIC_BASE_URL'
+              ? 'https://api.example.com/'
+              : '',
+    } as ConfigService;
+    service = new LessonImageStorageService(
+      config,
+      new LessonMediaArchiveService(config),
+    );
     expect(
       service.publicItems([
         { url: '/uploads/lesson-images/a.webp', name: 'a.webp' },
@@ -158,20 +183,47 @@ describe('LessonImageStorageService', () => {
       ]),
     ).rejects.toBeInstanceOf(HttpException);
     expect(await readdir(directory)).toEqual([]);
+    expect(await readdir(join(archiveDirectory, 'thumb'))).toEqual([]);
+  });
+
+  it('từ chối submit khi chưa cấu hình NAS, không ghi xuống VPS', async () => {
+    service = new LessonImageStorageService({
+      get: (key: string) =>
+        key === 'LESSON_IMAGE_UPLOAD_DIR' ? directory : '',
+    } as ConfigService);
+
+    await expect(service.storeMany([await image()])).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(await readdir(directory)).toEqual([]);
   });
 });
 
 describe('LessonImageStorageService — ảnh camera Android "khó"', () => {
   let directory: string;
+  let archiveDirectory: string;
   let service: LessonImageStorageService;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'lesson-images-'));
-    service = new LessonImageStorageService({
-      get: (key: string) => (key === 'LESSON_IMAGE_UPLOAD_DIR' ? directory : ''),
-    } as ConfigService);
+    archiveDirectory = await mkdtemp(join(tmpdir(), 'lesson-images-nas-'));
+    const config = {
+      get: (key: string) =>
+        key === 'LESSON_IMAGE_UPLOAD_DIR'
+          ? directory
+          : key === 'LESSON_IMAGE_ARCHIVE_DIR'
+            ? archiveDirectory
+            : '',
+    } as ConfigService;
+    service = new LessonImageStorageService(
+      config,
+      new LessonMediaArchiveService(config),
+    );
   });
-  afterEach(() => rm(directory, { recursive: true, force: true }));
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+    await rm(archiveDirectory, { recursive: true, force: true });
+  });
 
   /** Ảnh đủ lớn để cắt cụt vẫn còn phần đầu hợp lệ. */
   const photo = (options: sharp.JpegOptions = {}) =>
@@ -223,7 +275,10 @@ describe('LessonImageStorageService — ảnh camera Android "khó"', () => {
         .toFormat(format)
         .toBuffer();
       expect(
-        await codeOf({ buffer, mimetype: `image/${format}` } as Express.Multer.File),
+        await codeOf({
+          buffer,
+          mimetype: `image/${format}`,
+        } as Express.Multer.File),
       ).toBe('OK');
     }
   });
@@ -243,7 +298,9 @@ describe('LessonImageStorageService — ảnh camera Android "khó"', () => {
     const warn = jest
       .spyOn((service as any).logger, 'warn')
       .mockImplementation(() => undefined);
-    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+    jest
+      .spyOn((service as any).logger, 'error')
+      .mockImplementation(() => undefined);
 
     const full = await photo();
     await codeOf(upload(full.subarray(0, 500), '20260907_164148.jpg'));

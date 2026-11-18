@@ -30,6 +30,7 @@ import {
   MessageContentType,
   MessageDirection,
   MessageSenderType,
+  RuntimeControlScope,
 } from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import { RecruitmentCandidateService } from '../services/recruitment-candidate.service';
@@ -38,7 +39,17 @@ import {
   invokeOpenClaw,
   type AgentFailureKind,
 } from './openclaw-responses.client';
+import { checkAiReply, type AiReplyViolation } from './ai-reply-policy';
+import {
+  type AiLimitVerdict,
+  RecruitmentAiLimitsService,
+} from './recruitment-ai-limits.service';
+import {
+  type AiSafetyConfig,
+  readAiSafetyConfig,
+} from './recruitment-ai-safety.config';
 import { RecruitmentConversationControlService } from './recruitment-conversation-control.service';
+import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentChannelEventQueue,
@@ -47,6 +58,7 @@ import {
 import {
   isRecruitmentWorkerEnabled,
   MAX_AGENT_ATTEMPTS,
+  MAX_INFRA_ATTEMPTS,
   readRecruitmentWorkerConfig,
   retryDelayMs,
   type RecruitmentWorkerConfig,
@@ -123,12 +135,17 @@ function asCanonicalError(error: unknown): CanonicalError {
  * 4. Một transaction: outbox (`ON CONFLICT (source_event_id) DO NOTHING`) +
  *    `PROCESSED` + xoá nội dung tin khỏi inbox.
  *
- * Ngữ nghĩa: **at-least-once** gọi OpenClaw (chết đúng sau khi OpenClaw trả lời
- * thì lượt sẽ chạy lại), nhưng tác dụng nghiệp vụ và tin đi chỉ một lần — nhờ
- * idempotency của backend, `externalMessageId` và unique outbox.
+ * Ngữ nghĩa P1-FIX: một lần dispatch provider tối đa cho mỗi event. Sau dấu mốc
+ * dispatch, crash/timeout không retry mù vì provider có thể đã nhận và tính phí;
+ * nếu đã có tin canonical thì tái sử dụng, nếu chưa có thì dead-letter để HR đối soát.
+ * Tác dụng nghiệp vụ và tin đi vẫn idempotent nhờ `externalMessageId` và unique outbox.
  *
  * Không gửi tin Zalo (bước sau đọc outbox `PENDING`).
  */
+/** Nội dung thay thế tin AI bị chặn vì có dạng bí mật (P3-7.3 / G8). */
+const REDACTED_SECRET_REPLY =
+  '[Đã ẩn: câu trả lời AI có dạng bí mật — không gửi]';
+
 @Injectable()
 export class RecruitmentChannelWorker
   implements OnApplicationBootstrap, OnModuleDestroy
@@ -145,6 +162,10 @@ export class RecruitmentChannelWorker
   private loops: Promise<void>[] = [];
   private readonly inFlight = new Set<AbortController>();
   private nextJanitorAt = 0;
+  /** Pilot / trần / chính sách câu trả lời (P3-7.3 / G8); `null` khi cấu hình sai (đã chặn lúc boot). */
+  private readonly safety: AiSafetyConfig | null;
+  private lastHalted = false;
+  private readonly stopListening: (() => void) | undefined;
 
   constructor(
     configService: ConfigService,
@@ -158,11 +179,23 @@ export class RecruitmentChannelWorker
     private readonly audit: RecruitmentAuditService,
     private readonly control: RecruitmentConversationControlService,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly runtime?: RecruitmentRuntimeControlService,
+    private readonly limits?: RecruitmentAiLimitsService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isRecruitmentWorkerEnabled(get);
     const read = readRecruitmentWorkerConfig(get);
     this.config = 'config' in read ? read.config : null;
+    const safety = readAiSafetyConfig(get);
+    this.safety = 'config' in safety ? safety.config : null;
+    this.stopListening = this.runtime?.onStop?.((scopes) => {
+      if (
+        scopes.has(RuntimeControlScope.AI) ||
+        scopes.has(RuntimeControlScope.WORKER)
+      ) {
+        for (const controller of this.inFlight) controller.abort();
+      }
+    });
   }
 
   onApplicationBootstrap(): void {
@@ -179,7 +212,8 @@ export class RecruitmentChannelWorker
 
   async onModuleDestroy(): Promise<void> {
     this.running = false;
-    // Lượt đang chạy bị huỷ → ghi lỗi tạm (thử lại ngay ở lần claim sau).
+    this.stopListening?.();
+    // Lượt đang chạy bị huỷ; event đã dispatch không được tự gọi provider lần hai.
     for (const controller of this.inFlight) controller.abort();
     await Promise.allSettled(this.loops);
   }
@@ -191,12 +225,17 @@ export class RecruitmentChannelWorker
           this.nextJanitorAt = Date.now() + config.janitorMs;
           await this.expireRetention();
         }
+        if (await this.halted()) {
+          await sleep(config.pollMs + Math.floor(Math.random() * 250));
+          continue;
+        }
         const owner = `${this.workerId}:${randomUUID().slice(0, 8)}`;
         const event = await this.queue.claimNext(
           config.oaId,
           owner,
           config.leaseMs,
           config.settleMs,
+          this.safety?.pilotSenders ?? null,
         );
         if (!event) {
           await sleep(config.pollMs + Math.floor(Math.random() * 250));
@@ -320,13 +359,32 @@ export class RecruitmentChannelWorker
         : undefined;
       if (turnStarted) {
         storedReply = await this.findStoredReply(event, inbound.conversationId);
-      } else if (
-        !(await this.queue.markAiStarted(event, owner, control.version))
-      ) {
-        this.logger.warn(
-          `worker event=${event.id} lease lost trước khi gọi OpenClaw — bỏ`,
+      } else if (this.limits && this.safety) {
+        const reservation = await this.limits.reserve(
+          event,
+          owner,
+          control.version,
+          this.safety.limits,
         );
-        return;
+        if (reservation.kind === 'LIMIT') {
+          return await this.limitReached(
+            event,
+            owner,
+            inbound,
+            reservation.verdict,
+          );
+        }
+        if (reservation.kind === 'HALTED') {
+          await this.queue.release(event, owner);
+          return;
+        }
+        if (reservation.kind === 'LOST' || reservation.kind === 'UNCERTAIN') {
+          return;
+        }
+        event.aiControlVersion = control.version;
+        event.aiReservedTokens = this.safety.limits.tokenReservationPerTurn;
+      } else {
+        throw new Error('AI_QUOTA_RESERVATION_UNAVAILABLE');
       }
     } catch {
       return this.finishFailure(
@@ -341,6 +399,16 @@ export class RecruitmentChannelWorker
     if (storedReply) {
       // Lượt trước đã xong (tin đi đã nằm trong hội thoại) nhưng chưa kịp ghi kết quả
       // → gửi đúng bản đó, KHÔNG gọi OpenClaw lần hai.
+      const storedViolation = this.violation(storedReply.text, event);
+      if (storedViolation) {
+        return this.blockReply(
+          event,
+          owner,
+          inbound,
+          storedViolation,
+          storedReply.messageId,
+        );
+      }
       const result = await this.queue.complete(
         event,
         owner,
@@ -359,9 +427,67 @@ export class RecruitmentChannelWorker
       return;
     }
 
+    if (event.aiProviderDispatchedAt) {
+      // Worker trước đã có thể gửi request tới provider. Không gọi lần hai khi
+      // chưa biết outcome; HR đối soát tin canonical / chi phí.
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_OUTCOME_UNKNOWN',
+        'infra',
+      );
+    }
+
+    if (event.aiReservedTokens == null) {
+      // Lượt từ bản code cũ chưa có reservation; không được cấp phép provider
+      // chỉ dựa trên ai_control_version. HR đối soát và tạo event mới nếu cần.
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'LEGACY_UNRESERVED_TURN',
+        'rejected',
+      );
+    }
+
+    let dispatch: 'DISPATCHED' | 'HALTED' | 'LOST' | 'UNCERTAIN';
+    try {
+      dispatch = await this.queue.markProviderDispatched(event, owner);
+    } catch {
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_DISPATCH_GATE_FAILED',
+        'infra',
+      );
+    }
+    if (dispatch === 'HALTED') {
+      await this.queue.fail(
+        event,
+        owner,
+        'RUNTIME_HALTED_PRE_DISPATCH',
+        config.retryBaseMs,
+      );
+      return;
+    }
+    if (dispatch === 'LOST') return;
+    if (dispatch === 'UNCERTAIN') {
+      return this.finishFailure(
+        event,
+        owner,
+        config,
+        'PROVIDER_OUTCOME_UNKNOWN',
+        'infra',
+      );
+    }
+    event.aiProviderDispatchedAt = new Date();
+
     const controller = new AbortController();
     this.inFlight.add(controller);
     let leaseLost = false;
+    let watchBusy = false;
     const heartbeat = setInterval(
       () => {
         this.queue
@@ -376,6 +502,19 @@ export class RecruitmentChannelWorker
       },
       Math.max(1000, Math.floor(config.leaseMs / 3)),
     );
+    const stopWatch = setInterval(() => {
+      if (watchBusy) return;
+      watchBusy = true;
+      this.runtime
+        ?.state()
+        .then((state) => {
+          if (state.aiHalted || state.workerHalted) controller.abort();
+        })
+        .catch(() => controller.abort())
+        .finally(() => {
+          watchBusy = false;
+        });
+    }, 500);
 
     try {
       const outcome = await invokeOpenClaw(
@@ -402,7 +541,34 @@ export class RecruitmentChannelWorker
           outcome.kind,
         );
       }
-
+      if (outcome.usage) {
+        try {
+          await this.queue.recordUsage(event.id, outcome.usage);
+        } catch {
+          await this.haltForAccounting('TOKEN_USAGE_STORE_FAILED');
+          throw new Error('TOKEN_USAGE_STORE_FAILED');
+        }
+        if (
+          event.aiReservedTokens != null &&
+          outcome.usage.total > event.aiReservedTokens
+        ) {
+          // Ngân sách tính theo greatest(đặt trước, thực tế) ⇒ phần vượt đã bị trừ đúng và
+          // lượt kế tiếp bị chặn ở reserve() khi hết ngân sách. Không dừng cả hệ thống vì một
+          // lượt dài (ngữ cảnh hội thoại thật tăng ~20k token/lượt); theo dõi qua ai-usage.
+          this.logger.warn(
+            `worker event=${event.id} token vượt đặt trước total=${outcome.usage.total} reserved=${event.aiReservedTokens}`,
+          );
+        }
+      } else {
+        await this.haltForAccounting('TOKEN_USAGE_MISSING');
+        return this.finishFailure(
+          event,
+          owner,
+          config,
+          'TOKEN_USAGE_MISSING',
+          'rejected',
+        );
+      }
       let reply: CanonicalReply;
       try {
         reply = await this.ensureReply(event, subject, inbound, outcome.text);
@@ -414,6 +580,17 @@ export class RecruitmentChannelWorker
           config,
           failure.code,
           failure.kind,
+        );
+      }
+      // Kiểm đúng nội dung SẼ gửi (bản model đã lưu hoặc bản worker lưu).
+      const violation = this.violation(reply.text, event);
+      if (violation) {
+        return this.blockReply(
+          event,
+          owner,
+          inbound,
+          violation,
+          reply.messageId,
         );
       }
 
@@ -435,6 +612,7 @@ export class RecruitmentChannelWorker
       );
     } finally {
       clearInterval(heartbeat);
+      clearInterval(stopWatch);
       this.inFlight.delete(controller);
     }
   }
@@ -517,6 +695,158 @@ export class RecruitmentChannelWorker
   }
 
   /** Tin đi (`msg-reply`) mà một lần thử trước của event đã lưu, nếu có. */
+  /** Dừng khẩn WORKER hoặc AI (P3-7.3 / G8) — không bắt đầu lượt mới; log một lần khi đổi. */
+  private async halted(): Promise<boolean> {
+    if (!this.runtime) return false;
+    const state = await this.runtime.state();
+    const halted = state.workerHalted || state.aiHalted;
+    if (halted !== this.lastHalted) {
+      this.lastHalted = halted;
+      this.logger.warn(
+        halted
+          ? `worker: DỪNG KHẨN (worker=${state.workerHalted} ai=${state.aiHalted}${state.failClosed ? ' fail-closed' : ''}) — không claim tin`
+          : 'worker: mở lại — claim tin bình thường',
+      );
+    }
+    return halted;
+  }
+
+  private violation(text: string, event: ClaimedChannelEvent) {
+    return this.safety
+      ? checkAiReply(text, event.messageText ?? '', this.safety.replyPolicy)
+      : null;
+  }
+
+  private async haltForAccounting(reason: string): Promise<void> {
+    if (!this.runtime) throw new Error('RUNTIME_CONTROL_UNAVAILABLE');
+    await this.runtime.haltAiIfRunning(
+      `AI_LIMIT ${reason}`,
+      SYSTEM_ACTOR,
+      (em, state) =>
+        this.alerts.raise(
+          {
+            type: HrAlertType.AI_LIMIT_REACHED,
+            severity: HrAlertSeverity.HIGH,
+            sourceKey: `ai-limit:${reason}:${(state.updatedAt ?? new Date()).toISOString()}`,
+            details: { limit: reason },
+          },
+          em,
+        ),
+    );
+  }
+
+  /**
+   * Vượt trần (P3-7.3 / G8). Người gửi → không gọi AI, HR trả lời (cảnh báo theo hội thoại /
+   * giờ). Toàn hệ thống → tự DỪNG AI (audit hệ thống) + cảnh báo HR, trả event về hàng chờ để
+   * xử lý sau khi người vận hành mở lại.
+   */
+  private async limitReached(
+    event: ClaimedChannelEvent,
+    owner: string,
+    inbound: CanonicalInbound,
+    verdict: Exclude<AiLimitVerdict, { ok: true }>,
+  ): Promise<void> {
+    const details = {
+      limit: verdict.limit,
+      used: verdict.used,
+      max: verdict.max,
+    };
+    if (verdict.scope === 'GLOBAL') {
+      // Chỉ worker đổi được trạng thái mới cảnh báo — mỗi lần tự dừng đúng 1 cảnh báo (khoá theo
+      // thời điểm chuyển trạng thái, không gộp theo giờ: HR mở lại rồi chạm trần lần nữa vẫn được báo).
+      await this.runtime?.haltAiIfRunning(
+        `AI_LIMIT ${verdict.limit} ${verdict.used}/${verdict.max}`,
+        SYSTEM_ACTOR,
+        (em, state) =>
+          this.alerts.raise(
+            {
+              type: HrAlertType.AI_LIMIT_REACHED,
+              severity: HrAlertSeverity.HIGH,
+              sourceKey: `ai-limit:${verdict.limit}:${(state.updatedAt ?? new Date()).toISOString()}`,
+              details,
+            },
+            em,
+          ),
+      );
+      const released = await this.queue.release(event, owner);
+      this.logger.error(
+        `worker event=${event.id} result=RELEASED ai=HALTED limit=${verdict.limit} used=${verdict.used}/${verdict.max}` +
+          `${released ? '' : ' (lease lost)'}`,
+      );
+      return;
+    }
+    const written = await this.queue.completeWithoutAi(
+      event,
+      owner,
+      inbound.conversationId,
+      ChannelEventAiDecision.SKIPPED_RATE_LIMITED,
+      (em) =>
+        this.alerts.raise(
+          {
+            type: HrAlertType.CANDIDATE_MESSAGE_WAITING,
+            severity: HrAlertSeverity.MEDIUM,
+            sourceKey: `conversation:${inbound.conversationId}:${verdict.limit}:${new Date().toISOString().slice(0, 13)}`,
+            candidateId: inbound.candidateId,
+            conversationId: inbound.conversationId,
+            eventId: event.id,
+            details,
+          },
+          em,
+        ),
+    );
+    this.logger.warn(
+      `worker event=${event.id} result=PROCESSED ai=${ChannelEventAiDecision.SKIPPED_RATE_LIMITED} ` +
+        `limit=${verdict.limit} used=${verdict.used}/${verdict.max} conversation=${inbound.conversationId}` +
+        `${written ? '' : ' (lease lost)'}`,
+    );
+  }
+
+  /**
+   * Câu trả lời vi phạm chính sách (P3-7.3 / G8): KHÔNG xếp hàng gửi; event PROCESSED với
+   * `BLOCKED_BY_POLICY`, cảnh báo HR (chỉ mã quy tắc, không nội dung); tin AI đã lưu
+   * đánh dấu không gửi để HR xem lại.
+   */
+  private async blockReply(
+    event: ClaimedChannelEvent,
+    owner: string,
+    inbound: CanonicalInbound,
+    violation: AiReplyViolation,
+    replyMessageId: number,
+  ): Promise<void> {
+    const written = await this.queue.completeWithoutAi(
+      event,
+      owner,
+      inbound.conversationId,
+      ChannelEventAiDecision.BLOCKED_BY_POLICY,
+      async (em) => {
+        await this.alerts.raise(
+          {
+            type: HrAlertType.AI_POLICY_HANDOFF,
+            severity: HrAlertSeverity.HIGH,
+            sourceKey: `event:${event.id}:reply-policy`,
+            candidateId: inbound.candidateId,
+            conversationId: inbound.conversationId,
+            eventId: event.id,
+            details: { rule: violation },
+          },
+          em,
+        );
+        // Dạng bí mật: không giữ nguyên văn trong hội thoại (HR vẫn thấy có tin bị chặn).
+        await em.query(
+          `UPDATE "recruitment_messages"
+           SET metadata = metadata || '{"delivery": "BLOCKED_BY_POLICY"}'::jsonb,
+               content = CASE WHEN $2::boolean THEN '${REDACTED_SECRET_REPLY}' ELSE content END
+           WHERE id = $1`,
+          [replyMessageId, violation === 'SECRET_LIKE'],
+        );
+      },
+    );
+    this.logger.warn(
+      `worker event=${event.id} result=PROCESSED ai=${ChannelEventAiDecision.BLOCKED_BY_POLICY} rule=${violation} ` +
+        `conversation=${inbound.conversationId}${written ? '' : ' (lease lost)'}`,
+    );
+  }
+
   private async findStoredReply(
     event: ClaimedChannelEvent,
     conversationId: number,
@@ -552,7 +882,9 @@ export class RecruitmentChannelWorker
     kind: AgentFailureKind,
   ): Promise<void> {
     const terminal =
+      event.aiProviderDispatchedAt != null ||
       kind === 'rejected' ||
+      (kind === 'infra' && event.attemptCount >= MAX_INFRA_ATTEMPTS) ||
       (kind === 'agent' && event.attemptCount >= MAX_AGENT_ATTEMPTS);
     const retryInMs = terminal
       ? null

@@ -102,6 +102,12 @@ export class RecruitmentConversationControlService {
     const result = await this.dataSource.transaction(async (em) => {
       const row = await this.load(conversationId, em, true);
       if (row.control_mode === ConversationControlMode.HUMAN_TAKEOVER) {
+        await this.revokeUndispatchedAi(
+          em,
+          conversationId,
+          actor,
+          'CONTROL_HUMAN_TAKEOVER',
+        );
         return { control: this.toControl(row), changed: false };
       }
       await this.setMode(
@@ -110,10 +116,17 @@ export class RecruitmentConversationControlService {
         ConversationControlMode.HUMAN_TAKEOVER,
         actor,
       );
+      const aiOutbound = await this.aiOutbound(em, conversationId);
+      await this.revokeUndispatchedAi(
+        em,
+        conversationId,
+        actor,
+        'CONTROL_HUMAN_TAKEOVER',
+      );
       return {
         control: await this.control(conversationId, em),
         changed: true,
-        aiOutbound: await this.aiOutbound(em, conversationId),
+        aiOutbound,
       };
     });
     if (result.changed) {
@@ -196,13 +209,26 @@ export class RecruitmentConversationControlService {
     const result = await this.dataSource.transaction(async (em) => {
       const row = await this.load(conversationId, em, true);
       if (row.control_mode === ConversationControlMode.CLOSED) {
+        await this.revokeUndispatchedAi(
+          em,
+          conversationId,
+          actor,
+          'CONTROL_CLOSED',
+        );
         return { control: this.toControl(row), changed: false };
       }
       await this.setMode(em, row, ConversationControlMode.CLOSED, actor);
+      const aiOutbound = await this.aiOutbound(em, conversationId);
+      await this.revokeUndispatchedAi(
+        em,
+        conversationId,
+        actor,
+        'CONTROL_CLOSED',
+      );
       return {
         control: await this.control(conversationId, em),
         changed: true,
-        aiOutbound: await this.aiOutbound(em, conversationId),
+        aiOutbound,
       };
     });
     if (result.changed) {
@@ -308,6 +334,12 @@ export class RecruitmentConversationControlService {
         );
         tookOver = true;
         aiOutbound = await this.aiOutbound(em, conversationId);
+        await this.revokeUndispatchedAi(
+          em,
+          conversationId,
+          actor,
+          'CONTROL_HUMAN_TAKEOVER',
+        );
       }
       const [message]: Array<{ id: number }> = await em.query(
         `INSERT INTO "recruitment_messages"
@@ -388,6 +420,132 @@ export class RecruitmentConversationControlService {
    * độ: cửa kiểm của sender cần `FOR SHARE` cùng dòng nên danh sách này chính xác —
    * dòng đã dispatch là đã qua cửa trước thao tác HR, dòng còn lại sẽ bị chặn.
    */
+
+  /**
+   * P3.2 — Called only while this transaction holds the conversation
+   * FOR UPDATE lock. Never revoke an already-dispatched or UNKNOWN row.
+   */
+  private async revokeUndispatchedAi(
+    em: EntityManager,
+    conversationId: number,
+    actor: RecruitmentActor,
+    reason: 'CONTROL_HUMAN_TAKEOVER' | 'CONTROL_CLOSED',
+  ): Promise<number[]> {
+    const rows: Array<{
+      id: number;
+      recruitment_message_id: number;
+      status: string;
+    }> = await em.query(
+      `SELECT o.id, o.recruitment_message_id, o.status
+       FROM "recruitment_channel_outbox" o
+       JOIN "recruitment_messages" m
+         ON m.id = o.recruitment_message_id
+       WHERE m.conversation_id = $1
+         AND o.source_type = 'AI_REPLY'
+         AND o.status IN (
+           'AWAITING_APPROVAL', 'PENDING', 'RETRY', 'SENDING'
+         )
+         AND o.dispatched_at IS NULL
+       ORDER BY o.id
+       FOR UPDATE OF o`,
+      [conversationId],
+    );
+
+    const revoked: number[] = [];
+
+    for (const row of rows) {
+      const id = Number(row.id);
+
+      const changedOutbox: Array<{ id: number }> = await em.query(
+        `WITH changed AS (
+           UPDATE "recruitment_channel_outbox"
+           SET status = 'SUPPRESSED',
+               message_text = NULL,
+               text_redacted_at = now(),
+               last_error_code = $2,
+               lease_until = NULL,
+               next_attempt_at = NULL,
+               updated_at = now()
+           WHERE id = $1
+             AND source_type = 'AI_REPLY'
+             AND dispatched_at IS NULL
+             AND status IN (
+               'AWAITING_APPROVAL', 'PENDING', 'RETRY', 'SENDING'
+             )
+           RETURNING id
+         )
+         SELECT id FROM changed`,
+        [id, reason],
+      );
+
+      if (changedOutbox.length !== 1) {
+        throw new ConflictException('OUTBOX_REVOKE_FAILED');
+      }
+
+      const changedApproval: Array<{ version: number }> = await em.query(
+        `WITH changed AS (
+             UPDATE "recruitment_outbox_approvals"
+             SET state = 'REVOKED',
+                 version = version + 1,
+                 updated_at = now()
+             WHERE outbox_id = $1
+               AND state IN ('AWAITING_APPROVAL', 'APPROVED')
+             RETURNING version
+           )
+           SELECT version FROM changed`,
+        [id],
+      );
+
+      if (changedApproval.length > 1) {
+        throw new ConflictException('APPROVAL_REVOKE_FAILED');
+      }
+
+      if (changedApproval.length === 1) {
+        await em.query(
+          `INSERT INTO "recruitment_outbox_approval_events"
+             (outbox_id, version, action, actor_employee_id, reason)
+           VALUES ($1, $2, 'REVOKED', $3, $4)`,
+          [id, changedApproval[0].version, actor.employeeId, reason],
+        );
+      }
+
+      const changedMessage: Array<{ id: number }> = await em.query(
+        `WITH changed AS (
+           UPDATE "recruitment_messages"
+           SET metadata = coalesce(metadata, '{}'::jsonb) ||
+             jsonb_build_object('delivery', 'SUPPRESSED_CONTROL_CHANGED')
+           WHERE id = $1
+           RETURNING id
+         )
+         SELECT id FROM changed`,
+        [row.recruitment_message_id],
+      );
+
+      if (changedMessage.length !== 1) {
+        throw new ConflictException('MESSAGE_REVOKE_FAILED');
+      }
+
+      await this.audit.recordMandatory(em, {
+        actor,
+        action: changedApproval.length
+          ? 'OUTBOX_APPROVAL_REVOKE'
+          : 'CHANNEL_OUTBOX_SUPPRESSED',
+        entity: 'channel-outbox',
+        entityId: id,
+        before: { status: row.status },
+        after: {
+          status: 'SUPPRESSED',
+          approvalState: changedApproval.length ? 'REVOKED' : null,
+        },
+        context: { reason, conversationId },
+      });
+
+      revoked.push(id);
+    }
+
+    return revoked;
+  }
+
   private async aiOutbound(
     em: EntityManager,
     conversationId: number,
@@ -397,7 +555,7 @@ export class RecruitmentConversationControlService {
        FROM "recruitment_channel_outbox" o
        JOIN "recruitment_messages" m ON m.id = o.recruitment_message_id
        WHERE m.conversation_id = $1 AND o.source_type = 'AI_REPLY'
-         AND o.status IN ('PENDING', 'SENDING', 'RETRY', 'UNKNOWN')
+         AND o.status IN ('AWAITING_APPROVAL', 'PENDING', 'SENDING', 'RETRY', 'UNKNOWN')
        ORDER BY o.id`,
       [conversationId],
     );

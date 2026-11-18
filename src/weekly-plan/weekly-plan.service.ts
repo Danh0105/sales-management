@@ -83,7 +83,7 @@ export class WeeklyPlanService {
                         })
                         .getMany();
 
-                const userIds = employees
+                const candidateUserIds = employees
                     .map((e) => e.id)
                     .filter(
                         (
@@ -91,6 +91,12 @@ export class WeeklyPlanService {
                         ): id is number =>
                             id !== undefined,
                     );
+
+                const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                    candidateUserIds,
+                    dto.employeeId,
+                    { kind: 'report' },
+                );
 
                 const tokenEntities =
                     await this.employeeFcmTokenService.getTokens(
@@ -255,7 +261,7 @@ export class WeeklyPlanService {
                         })
                         .getMany();
 
-                const userIds =
+                const candidateUserIds =
                     employees
                         .map((e) => e.id)
                         .filter(
@@ -264,6 +270,12 @@ export class WeeklyPlanService {
                             ): id is number =>
                                 id !== undefined,
                         );
+
+                const userIds = await this.notificationService.scopeBusinessReceiverIds(
+                    candidateUserIds,
+                    dto.employeeInfo?.sub,
+                    { kind: 'report' },
+                );
 
                 const tokenEntities =
                     await this.employeeFcmTokenService.getTokens(

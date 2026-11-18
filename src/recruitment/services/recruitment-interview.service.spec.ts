@@ -1,4 +1,5 @@
 import { RecruitmentApplication } from '../entities/recruitment-application.entity';
+import { RecruitmentCandidate } from '../entities/recruitment-candidate.entity';
 import { RecruitmentInterview } from '../entities/recruitment-interview.entity';
 import {
   ApplicationStatus,
@@ -18,6 +19,7 @@ function setup(app: Record<string, unknown>) {
   } as any;
   const applicationRepo = {
     findOne: jest.fn().mockResolvedValue(app),
+    findOneOrFail: jest.fn().mockResolvedValue(app),
     save: jest.fn(async (v) => v),
   } as any;
   const candidateRepo = {
@@ -26,6 +28,7 @@ function setup(app: Record<string, unknown>) {
   const repos = new Map<unknown, any>([
     [RecruitmentInterview, interviewRepo],
     [RecruitmentApplication, applicationRepo],
+    [RecruitmentCandidate, candidateRepo],
   ]);
   const em = { getRepository: (e: unknown) => repos.get(e) };
   const dataSource = { transaction: jest.fn(async (cb) => cb(em)) } as any;
@@ -42,7 +45,7 @@ function setup(app: Record<string, unknown>) {
     }),
     release: jest.fn(),
   };
-  const audit = { record: jest.fn() } as any;
+  const audit = { record: jest.fn(), recordMandatory: jest.fn() } as any;
   const service = new RecruitmentInterviewService(
     interviewRepo,
     {} as any,

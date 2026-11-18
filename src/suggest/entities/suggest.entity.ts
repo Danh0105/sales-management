@@ -7,12 +7,17 @@ import { EquipmentSource } from '../enums/equipment-source.enum';
 import { Policy } from '../../policy/entities/policy.entity';
 import { Employee } from '../../employee/employee.entity';
 import { School } from '../../school/schools.entity';
+import { Subject } from '../../subject/subject.entity';
+import { ExpensePeriod } from '../../expense-periods/expense-period.entity';
 import { Ward } from '../../ward/ward.entity';
 import { SuggestPaymentOrder } from './suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './suggest-stock-issue-order.entity';
 import { SuggestStockInOrder } from './suggest-stock-in-order.entity';
 import { SuggestAttachment } from './suggest-attachment.entity';
 import { SuggestAssignment } from './suggest-assignment.entity';
+import { SuggestMonthlyItem } from './suggest-monthly-item.entity';
+import { SuggestPolicySupportItem } from './suggest-policy-support-item.entity';
+import type { CashflowSource } from '../cashflow-sources';
 
 /** Một dòng thiết bị kinh doanh mong muốn khi tạo đề xuất thiết bị. */
 export interface RequestedEquipmentItem {
@@ -28,6 +33,7 @@ export interface RequestedEquipmentItem {
 @Index(['type', 'expectedPaymentDate'])
 @Index('idx_suggest_expense_school_year_status', ['type', 'schoolId', 'schoolYear', 'status'])
 @Index(['type', 'requestKind', 'status'])
+@Index('idx_suggest_monthly_expense_period', ['type', 'isMonthlyExpense', 'expensePeriodId'])
 export class Suggest {
     @PrimaryGeneratedColumn()
     id?: number;
@@ -110,8 +116,8 @@ export class Suggest {
     @Column({ nullable: true })
     reviewedBy?: number;
 
-    @Column({ nullable: true })
-    approvedBy?: number;
+    @Column({ type: 'int', nullable: true })
+    approvedBy?: number | null;
 
     @Column({ type: 'text', nullable: true })
     rejectReason?: string | null;
@@ -171,6 +177,44 @@ export class Suggest {
     @ManyToOne(() => School, { nullable: true, onDelete: 'SET NULL' })
     @JoinColumn({ name: 'school_id' })
     school?: School | null;
+
+    /** Phân biệt đề xuất chi tháng với đề xuất chi phát sinh thông thường. */
+    @Column({ name: 'is_monthly_expense', type: 'boolean', default: false })
+    isMonthlyExpense?: boolean;
+
+    /**
+     * Bảng nguồn của đề xuất chi tháng trong QL thu chi: MANAGEMENT (Chi Ngoài —
+     * "Chi chính sách tháng"), SCHOOL_EXPENSE (Chi Trường),
+     * SCHOOL_TEACHER (Giáo viên trường). Đề xuất chi tháng tạo trước 13/11/2026
+     * để trống = Chi Ngoài. Đề xuất chi Năm luôn trống.
+     */
+    @Column({ type: 'varchar', name: 'cashflow_source', length: 20, nullable: true })
+    cashflowSource?: CashflowSource | null;
+
+    /**
+     * Quy trình duyệt của đề xuất chi tháng. `ACCOUNTANT_CHAIN` (từ 16/11/2026):
+     * Kế toán nhập số liệu → Kế toán trưởng → Giám đốc → Kế toán công nợ lập
+     * lệnh chi → Thủ quỹ → kinh doanh. Trống = luồng cũ (Giám đốc duyệt là hệ
+     * thống tự lập lệnh chi). Chi Năm luôn trống.
+     */
+    @Column({ type: 'varchar', name: 'approval_flow', length: 30, nullable: true })
+    approvalFlow?: string | null;
+
+    /** Môn học áp dụng cho đề xuất chi tháng. */
+    @Column({ type: 'int', name: 'subject_id', nullable: true })
+    subjectId?: number | null;
+
+    @ManyToOne(() => Subject, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'subject_id' })
+    subject?: Subject | null;
+
+    /** Kỳ kế toán áp dụng cho đề xuất chi tháng. */
+    @Column({ type: 'int', name: 'expense_period_id', nullable: true })
+    expensePeriodId?: number | null;
+
+    @ManyToOne(() => ExpensePeriod, { nullable: true, onDelete: 'SET NULL' })
+    @JoinColumn({ name: 'expense_period_id' })
+    expensePeriod?: ExpensePeriod | null;
 
     /** Năm học được chọn chính thức cho đề xuất chi (VD: 2026-2027) */
     @Column({ type: 'varchar', name: 'school_year', length: 20, nullable: true })
@@ -305,4 +349,16 @@ export class Suggest {
     /** Người bàn giao + người hỗ trợ Giám đốc giao khi duyệt (kể cả người đã từ chối). */
     @OneToMany(() => SuggestAssignment, (a) => a.suggest)
     assignments?: SuggestAssignment[];
+
+    /**
+     * Các trường của đề xuất chi tháng (trường + năm học + môn + kỳ). Đề xuất
+     * chi tháng tạo trước khi có bảng này không có dòng nào — đọc từ
+     * `schoolId/subjectId/expensePeriodId` ở trên.
+     */
+    @OneToMany(() => SuggestMonthlyItem, (item) => item.suggest)
+    monthlyItems?: SuggestMonthlyItem[];
+
+    /** Đề xuất chi Năm cho trường: các dòng hỗ trợ trong chính sách đã tích. */
+    @OneToMany(() => SuggestPolicySupportItem, (item) => item.suggest)
+    policySupportItems?: SuggestPolicySupportItem[];
 }

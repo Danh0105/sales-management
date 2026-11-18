@@ -2,7 +2,10 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 
 import { SuggestStatus } from './SuggestStatus.enum';
 import { ExpenseAction } from './enums/expense-action.enum';
-import { ExpenseRole } from './constants/expense-roles';
+import {
+  EXPENSE_REQUESTER_ROLES,
+  ExpenseRole,
+} from './constants/expense-roles';
 import { ExpenseRequestKind } from './enums/expense-request-kind.enum';
 import { EquipmentSource } from './enums/equipment-source.enum';
 
@@ -59,12 +62,28 @@ export type ExpenseAssignee = 'stockInHandler' | 'acceptor';
 /**
  * State machine cho luồng ĐỀ XUẤT CHI:
  *
- * DRAFT → PENDING_APPROVAL → APPROVED → PAYMENT_ORDERED → CASH_RELEASED
+ * Chi Năm: DRAFT → PENDING_APPROVAL → APPROVED → PAYMENT_ORDERED → CASH_RELEASED
  *       → CASH_RECEIVED → SPENT (kết thúc - đã chi)
  *                        ↘ NOT_SPENT → FUND_RETURNED ─┐
  *                                      ↑             │
  *                                      └─ PAYMENT_ORDERED (lập lại lệnh chi)
  * PENDING_APPROVAL → REJECTED (kết thúc - bị từ chối)
+ *
+ * Chi Ngoài / Chi Trường / Chi GV trường từ 16/11/2026 (quy trình Kế toán,
+ * `suggest.approval_flow = ACCOUNTANT_CHAIN`): kinh doanh tạo cho một trường +
+ * một kỳ kế toán → PENDING_ACCOUNTANT (Kế toán nhập số liệu bảng ở QL thu chi,
+ * gửi đi thì chốt số tiền = Còn chi) → PENDING_CHIEF_APPROVAL (Kế toán trưởng)
+ * → PENDING_APPROVAL (Giám đốc) → APPROVED → Kế toán công nợ lập lệnh chi đúng
+ * số đã duyệt → PAYMENT_ORDERED → Thủ quỹ → kinh doanh như Chi Năm.
+ *
+ * Chi tháng cũ (trước 16/11/2026, approval_flow trống) đi tiếp luồng cũ:
+ * PENDING_APPROVAL → PAYMENT_ORDERED → CASH_RELEASED → …
+ *             (Giám đốc duyệt, hệ thống lập lệnh chi = tổng Còn chi Chi Ngoài)
+ *   Sau hoàn quỹ / khi sửa số tiền: Kế toán công nợ lập/sửa lệnh chi →
+ *   PENDING_APPROVAL → Giám đốc duyệt lại. PENDING_ACCOUNTING chỉ còn cho đề
+ *   xuất tạo trước khi bỏ bước Kế toán nhập tiền.
+ *   Chi một phần: CASH_RECEIVED → PARTIALLY_SPENT (kinh doanh chọn trường đã
+ *   chi) → SPENT (Thủ quỹ nhận lại phần dư).
  *
  * Với ĐỀ XUẤT THIẾT BỊ (kind = EQUIPMENT), nhánh sau APPROVED đổi sang phòng
  * kỹ thuật:
@@ -95,6 +114,13 @@ export const EXPENSE_TRANSITIONS: Partial<
     ],
   },
 
+  [ExpenseAction.APPROVE_MONTHLY]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.PAYMENT_ORDERED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
   [ExpenseAction.REJECT]: {
     from: [SuggestStatus.PENDING_APPROVAL],
     to: SuggestStatus.REJECTED,
@@ -103,6 +129,47 @@ export const EXPENSE_TRANSITIONS: Partial<
       ExpenseRole.SALES_ADMIN,
       ExpenseRole.CHIEF_ACCOUNTANT,
     ],
+  },
+
+  [ExpenseAction.REJECT_MONTHLY]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.REJECTED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  // ===== quy trình Kế toán của Chi Ngoài / Chi Trường / Chi GV trường =====
+  // Kế toán trưởng có toàn quyền của Kế toán nên làm được cả bước nhập số
+  // liệu; ràng buộc "hai bước liên tiếp hai người khác nhau" vẫn buộc người
+  // duyệt ở bước sau phải là Kế toán trưởng khác.
+
+  [ExpenseAction.SUBMIT_TO_CHIEF_ACCOUNTANT]: {
+    from: [SuggestStatus.PENDING_ACCOUNTANT],
+    to: SuggestStatus.PENDING_CHIEF_APPROVAL,
+    roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CHIEF_APPROVE]: {
+    from: [SuggestStatus.PENDING_CHIEF_APPROVAL],
+    to: SuggestStatus.PENDING_APPROVAL,
+    roles: [ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CHIEF_REJECT]: {
+    from: [SuggestStatus.PENDING_CHIEF_APPROVAL],
+    to: SuggestStatus.REJECTED,
+    roles: [ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  /** Giám đốc duyệt; lệnh chi do Kế toán công nợ lập ở bước sau (CREATE_PAYMENT_ORDER). */
+  [ExpenseAction.APPROVE_MONTHLY_CHAIN]: {
+    from: [SuggestStatus.PENDING_APPROVAL],
+    to: SuggestStatus.APPROVED,
+    roles: [ExpenseRole.DIRECTOR],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   /**
@@ -116,9 +183,15 @@ export const EXPENSE_TRANSITIONS: Partial<
    * lại thì mọi thống kê tỉ lệ duyệt đều sai.
    */
   [ExpenseAction.WITHDRAW]: {
-    from: [SuggestStatus.DRAFT, SuggestStatus.PENDING_APPROVAL],
+    from: [
+      SuggestStatus.DRAFT,
+      SuggestStatus.PENDING_ACCOUNTING,
+      SuggestStatus.PENDING_ACCOUNTANT,
+      SuggestStatus.PENDING_CHIEF_APPROVAL,
+      SuggestStatus.PENDING_APPROVAL,
+    ],
     to: SuggestStatus.WITHDRAWN,
-    roles: [ExpenseRole.SALES, ExpenseRole.DIRECTOR],
+    roles: [...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR],
     ownerOnly: true,
     overrideRoles: [ExpenseRole.DIRECTOR],
   },
@@ -126,6 +199,13 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CREATE_PAYMENT_ORDER]: {
     from: [SuggestStatus.APPROVED, SuggestStatus.FUND_RETURNED],
     to: SuggestStatus.PAYMENT_ORDERED,
+    roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CREATE_MONTHLY_PAYMENT_ORDER]: {
+    from: [SuggestStatus.PENDING_ACCOUNTING, SuggestStatus.FUND_RETURNED],
+    to: SuggestStatus.PENDING_APPROVAL,
     roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
     kinds: [ExpenseRequestKind.CASH],
   },
@@ -151,6 +231,21 @@ export const EXPENSE_TRANSITIONS: Partial<
     kinds: [ExpenseRequestKind.CASH],
   },
 
+  [ExpenseAction.EDIT_MONTHLY_PAYMENT_ORDER]: {
+    from: [
+      SuggestStatus.PENDING_APPROVAL,
+      SuggestStatus.PAYMENT_ORDERED,
+      SuggestStatus.CASH_RELEASED,
+      SuggestStatus.CASH_RECEIVED,
+      SuggestStatus.SPENT,
+      SuggestStatus.NOT_SPENT,
+      SuggestStatus.FUND_RETURNED,
+    ],
+    to: SuggestStatus.PENDING_APPROVAL,
+    roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
   [ExpenseAction.CONFIRM_CASH_RELEASED]: {
     from: [SuggestStatus.PAYMENT_ORDERED],
     to: SuggestStatus.CASH_RELEASED,
@@ -161,7 +256,7 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_CASH_RECEIVED]: {
     from: [SuggestStatus.CASH_RELEASED],
     to: SuggestStatus.CASH_RECEIVED,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
     kinds: [ExpenseRequestKind.CASH],
   },
@@ -169,15 +264,34 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_SPENT]: {
     from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.SPENT,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
   },
 
   [ExpenseAction.CONFIRM_NOT_SPENT]: {
     from: [SuggestStatus.CASH_RECEIVED, SuggestStatus.EQUIPMENT_RECEIVED],
     to: SuggestStatus.NOT_SPENT,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
+  },
+
+  /**
+   * Chi tháng nhiều trường mà chỉ chi một số trường. Số tiền từng trường lấy
+   * theo Còn chi lúc Giám đốc duyệt (service kiểm), kinh doanh không nhập số.
+   */
+  [ExpenseAction.CONFIRM_PARTIALLY_SPENT]: {
+    from: [SuggestStatus.CASH_RECEIVED],
+    to: SuggestStatus.PARTIALLY_SPENT,
+    roles: [...EXPENSE_REQUESTER_ROLES],
+    ownerOnly: true,
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
+  [ExpenseAction.CONFIRM_REMAINDER_RETURNED]: {
+    from: [SuggestStatus.PARTIALLY_SPENT],
+    to: SuggestStatus.SPENT,
+    roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
+    kinds: [ExpenseRequestKind.CASH],
   },
 
   [ExpenseAction.CONFIRM_FUND_RETURNED]: {
@@ -204,7 +318,7 @@ export const EXPENSE_TRANSITIONS: Partial<
   [ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED]: {
     from: [SuggestStatus.STOCK_ISSUE_ORDERED],
     to: SuggestStatus.EQUIPMENT_RECEIVED,
-    roles: [ExpenseRole.SALES],
+    roles: [...EXPENSE_REQUESTER_ROLES],
     ownerOnly: true,
     kinds: [ExpenseRequestKind.EQUIPMENT],
   },
@@ -405,6 +519,7 @@ export function expenseActorForStatus(
   status: SuggestStatus,
   kind: ExpenseRequestKind = ExpenseRequestKind.CASH,
   equipmentSource?: EquipmentSource | null,
+  isMonthlyExpense = false,
 ): { roles: string[]; owner: boolean; assignee?: ExpenseAssignee } | null {
   // Thiết bị từ nhà cung cấp: hai bước sau duyệt thuộc về người được chỉ
   // định, không thuộc role nào — nơi gọi tự tra id người được chỉ định.
@@ -426,20 +541,37 @@ export function expenseActorForStatus(
     kind === ExpenseRequestKind.REPAIR;
 
   switch (status) {
+    case SuggestStatus.PENDING_ACCOUNTANT:
+      return {
+        roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        owner: false,
+      };
+
+    case SuggestStatus.PENDING_CHIEF_APPROVAL:
+      return { roles: [ExpenseRole.CHIEF_ACCOUNTANT], owner: false };
+
+    case SuggestStatus.PENDING_ACCOUNTING:
+      return {
+        roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        owner: false,
+      };
+
     case SuggestStatus.CASH_RELEASED:
     case SuggestStatus.CASH_RECEIVED:
     case SuggestStatus.STOCK_ISSUE_ORDERED:
     case SuggestStatus.EQUIPMENT_RECEIVED:
-      return { roles: [ExpenseRole.SALES], owner: true };
+      return { roles: [...EXPENSE_REQUESTER_ROLES], owner: true };
 
     // Giám đốc, Sales Admin lẫn Kế toán trưởng đều duyệt được bước này.
     case SuggestStatus.PENDING_APPROVAL:
       return {
-        roles: [
-          ExpenseRole.DIRECTOR,
-          ExpenseRole.SALES_ADMIN,
-          ExpenseRole.CHIEF_ACCOUNTANT,
-        ],
+        roles: isMonthlyExpense
+          ? [ExpenseRole.DIRECTOR]
+          : [
+              ExpenseRole.DIRECTOR,
+              ExpenseRole.SALES_ADMIN,
+              ExpenseRole.CHIEF_ACCOUNTANT,
+            ],
         owner: false,
       };
 
@@ -474,6 +606,7 @@ export function expenseActorForStatus(
       };
 
     case SuggestStatus.PAYMENT_ORDERED:
+    case SuggestStatus.PARTIALLY_SPENT:
       return {
         roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
         owner: false,

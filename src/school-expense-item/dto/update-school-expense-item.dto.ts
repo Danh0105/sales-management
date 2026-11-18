@@ -6,6 +6,7 @@ import {
   IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { INVOICE_CASH_ACCOUNT_CODES } from '../../revenue-item/invoice-cash-account';
 
 export class UpdateSchoolExpenseItemDto {
   @IsOptional()
@@ -60,6 +61,11 @@ export class UpdateSchoolExpenseItemDto {
   @IsOptional()
   @IsIn(['in_contract', 'not_in_contract', ''])
   paymentType?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(INVOICE_CASH_ACCOUNT_CODES)
+  cashAccount?: string;
 
   @IsOptional()
   @IsString()

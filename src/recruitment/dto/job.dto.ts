@@ -2,8 +2,11 @@ import { PartialType } from '@nestjs/mapped-types';
 import { Transform, TransformFnParams, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
+  IsDateString,
+  IsEmail,
   IsEnum,
   IsInt,
   IsNumber,
@@ -14,10 +17,18 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 
-import { EmploymentType, RecruitmentJobStatus } from '../recruitment.enums';
+import {
+  EmploymentType,
+  RecruitmentEducationLevel,
+  RecruitmentExperienceLevel,
+  RecruitmentJobStatus,
+  RecruitmentSalaryStructure,
+  RecruitmentSeniority,
+} from '../recruitment.enums';
 import { PaginationQueryDto, Trim, TrimEach } from './common.dto';
 
 const MAX_MONEY = 1_000_000_000_000;
@@ -27,6 +38,42 @@ function UpperTrim(): PropertyDecorator {
     const value: unknown = params.value;
     return typeof value === 'string' ? value.trim().toUpperCase() : value;
   });
+}
+
+function NormalizePhone(): PropertyDecorator {
+  return Transform((params: TransformFnParams): unknown => {
+    const value: unknown = params.value;
+    return typeof value === 'string' ? value.replace(/[\s.()-]/g, '') : value;
+  });
+}
+
+function NormalizePhones(): PropertyDecorator {
+  return Transform((params: TransformFnParams): unknown => {
+    const value: unknown = params.value;
+    return Array.isArray(value)
+      ? value.map((item) =>
+          typeof item === 'string' ? item.replace(/[\s.()-]/g, '') : item,
+        )
+      : value;
+  });
+}
+
+export class RecruitmentWorkLocationDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  provinceId!: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  wardId!: number;
+
+  @Trim()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(500)
+  address!: string;
 }
 
 /**
@@ -79,6 +126,13 @@ export class ScreeningCriteriaDto {
 }
 
 export class CreateJobDto {
+  // Optional ở DTO để PATCH vị trí cũ vẫn tương thích; create bắt buộc ở service.
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(50)
+  positionRole?: string;
+
   /** Mã vị trí do HR đặt, vd. `SALES-CM-01`. Lưu chữ hoa. */
   @UpperTrim()
   @IsString()
@@ -103,6 +157,31 @@ export class CreateJobDto {
   @IsInt()
   @Min(1)
   departmentId?: number;
+
+  /**
+   * Danh mục ngành nghề riêng chưa tồn tại; giai đoạn này tái sử dụng danh mục
+   * phòng ban đã được quản trị trong hệ thống, tối đa ba lựa chọn.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ArrayUnique()
+  @Type(() => Number)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  industryIds?: number[];
+
+  @IsOptional()
+  @IsEnum(RecruitmentSeniority)
+  seniority?: RecruitmentSeniority;
+
+  @IsOptional()
+  @IsEnum(RecruitmentExperienceLevel)
+  experienceLevel?: RecruitmentExperienceLevel;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  applicationDeadline?: string;
 
   @IsOptional()
   @Trim()
@@ -136,6 +215,14 @@ export class CreateJobDto {
   salaryMax?: number;
 
   @IsOptional()
+  @IsBoolean()
+  salaryNegotiable?: boolean;
+
+  @IsOptional()
+  @IsEnum(RecruitmentSalaryStructure)
+  salaryStructure?: RecruitmentSalaryStructure;
+
+  @IsOptional()
   @UpperTrim()
   @Matches(/^[A-Z]{3}$/, { message: 'currency là mã ISO 3 chữ cái, vd. VND' })
   currency?: string;
@@ -151,6 +238,63 @@ export class CreateJobDto {
   @IsString()
   @MaxLength(20000)
   responsibilities?: string;
+
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(20000)
+  benefits?: string;
+
+  @IsOptional()
+  @IsEnum(RecruitmentEducationLevel)
+  educationLevel?: RecruitmentEducationLevel;
+
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(100)
+  probationPeriod?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @ValidateNested({ each: true })
+  @Type(() => RecruitmentWorkLocationDto)
+  workLocations?: RecruitmentWorkLocationDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  allowApplicationsWithoutCv?: boolean;
+
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(255)
+  contactName?: string;
+
+  @IsOptional()
+  @Trim()
+  @IsEmail()
+  @MaxLength(255)
+  contactEmail?: string;
+
+  @IsOptional()
+  @NormalizePhone()
+  @Matches(/^(?:\+84|0)\d{9,10}$/, {
+    message: 'contactPhone phải là số điện thoại Việt Nam hợp lệ',
+  })
+  contactPhone?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @ArrayUnique()
+  @NormalizePhones()
+  @Matches(/^(?:\+84|0)\d{9,10}$/, {
+    each: true,
+    message: 'additionalPhones phải là số điện thoại Việt Nam hợp lệ',
+  })
+  additionalPhones?: string[];
 
   @IsOptional()
   @IsObject()

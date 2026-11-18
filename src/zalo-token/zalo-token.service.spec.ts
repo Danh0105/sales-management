@@ -171,4 +171,21 @@ describe('NotifyService — không log token / response', () => {
     expect(logs.join('\n')).toBe('Zalo send error: HTTP 500 -32');
     expect(logs.join('\n')).not.toContain(NEW_ACCESS);
   });
+
+  it('HTTP 200 nhưng body báo lỗi (vd. chưa quan tâm OA) → tính là gửi hỏng, log mã lỗi', async () => {
+    post.mockResolvedValue({ data: { error: -213, message: 'User has not followed OA' } });
+    const error = await new NotifyService(tokens).sendMessage('u-123456', 'Cảnh báo').catch((e) => e);
+    expect(error).toBeInstanceOf(ZaloTokenError);
+    expect(error.message).toContain('mã -213');
+    expect(logs.join('\n')).toBe('Zalo send error: Zalo từ chối, mã -213: User has not followed OA');
+    expect(logs.join('\n')).not.toContain('u-123456');
+  });
+
+  it('sendToMany đếm cả tin bị Zalo từ chối trong body là lỗi', async () => {
+    post
+      .mockResolvedValueOnce({ data: { error: 0 } })
+      .mockResolvedValueOnce({ data: { error: -213, message: 'x' } });
+    const result = await new NotifyService(tokens).sendToMany(['u-1', 'u-2'], 'Cảnh báo');
+    expect(result).toEqual({ sent: 1, failed: 1 });
+  });
 });

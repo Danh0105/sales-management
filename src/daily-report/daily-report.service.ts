@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DailyReport } from './entities/daily-report.entity';
 import { DataSource, In, Repository } from 'typeorm';
 import { CreateReportDto } from './dto/create-report.dto';
+import { UpdateReportDto } from './dto/update-report.dto';
 import { Task } from './entities/task.entity';
 import { startOfWeek, endOfWeek, format } from 'date-fns';
 import { FcmService } from '../fcm/fcm.service';
@@ -14,6 +15,7 @@ import { ReportGateway } from './report.gateway';
 import { NotificationType } from '../notifications/enums/notification-type.enum';
 import { ReportMessage, ReportMessageSenderRole } from './entities/report-message.entity';
 import { CreateReportMessageDto } from './dto/create-report-message';
+import { DailyReportProvinceService } from './daily-report-province.service';
 
 @Injectable()
 export class DailyReportService {
@@ -34,12 +36,17 @@ export class DailyReportService {
         private readonly dataSource: DataSource,
         private readonly reportGateway:
             ReportGateway,
+        private readonly reportProvince: DailyReportProvinceService,
     ) { }
 
     async create(
         dto: CreateReportDto,
         user?: Employee,
     ) {
+        const resolvedLocation = await this.reportProvince.resolve(
+            dto.employeeId,
+            dto,
+        );
         let receiverIds: number[] = [];
         let tokens: string[] = [];
         let message = '';
@@ -78,6 +85,8 @@ export class DailyReportService {
                             {
                                 date: dto.date,
                                 employee,
+                                provinceId: resolvedLocation.provinceId,
+                                schoolId: resolvedLocation.schoolId,
                             },
                         );
 
@@ -126,6 +135,15 @@ export class DailyReportService {
                             ): id is number =>
                                 !!id,
                         );
+
+                    receiverIds = await this.notificationService.scopeBusinessReceiverIds(
+                        receiverIds,
+                        dto.employeeId,
+                        {
+                            kind: 'report',
+                            provinceId: resolvedLocation.provinceId ?? undefined,
+                        },
+                    );
 
                     // ============================================
                     // FCM TOKENS
@@ -268,46 +286,67 @@ export class DailyReportService {
             tasks: savedTasks,
         };
     }
-    async update(id: number, dto: CreateReportDto) {
+    async update(id: number, dto: UpdateReportDto, user: Employee) {
         const report = await this.reportRepo.findOne({
             where: { id },
-            relations: ['tasks'],
+            relations: ['tasks', 'employee'],
         });
 
         if (!report) {
             throw new NotFoundException('Report not found');
         }
+        this.assertCanMutate(user, Number(report.employee.id));
 
 
         if (dto.date) {
             report.date = dto.date;
         }
 
+        const resolvedLocation = await this.reportProvince.resolve(
+            Number(report.employee.id),
+            {
+                ...dto,
+                tasks: dto.tasks ?? report.tasks,
+                schoolId: Object.prototype.hasOwnProperty.call(dto, 'schoolId')
+                    ? dto.schoolId ?? undefined
+                    : report.schoolId ?? undefined,
+                provinceId: Object.prototype.hasOwnProperty.call(dto, 'provinceId')
+                    ? dto.provinceId ?? undefined
+                    : report.provinceId ?? undefined,
+            },
+        );
+        report.provinceId = resolvedLocation.provinceId;
+        report.schoolId = resolvedLocation.schoolId;
+
         // save report trước
         const savedReport = await this.reportRepo.save(report);
 
         // ❌ XÓA TASK CŨ
-        if (report.tasks && report.tasks.length > 0) {
+        if (dto.tasks && report.tasks && report.tasks.length > 0) {
             await this.taskRepo.remove(report.tasks);
         }
 
         // ✅ TẠO TASK MỚI
-        const newTasks = dto.tasks.map((t) =>
+        const newTasks = (dto.tasks ?? []).map((t) =>
             this.taskRepo.create({
                 ...t,
                 report: savedReport,
             }),
         );
 
-        await this.taskRepo.save(newTasks);
+        if (newTasks.length) await this.taskRepo.save(newTasks);
 
         return savedReport;
     }
-    async findAll() {
-        return this.reportRepo.find({
-            relations: ['tasks'],
-            order: { date: 'DESC' },
-        });
+    async findAll(provinceId?: number) {
+        const query = this.reportRepo
+            .createQueryBuilder('report')
+            .leftJoinAndSelect('report.tasks', 'tasks')
+            .orderBy('report.date', 'DESC');
+        if (provinceId) {
+            query.andWhere('report.province_id = :provinceId', { provinceId });
+        }
+        return query.getMany();
     }
 
     async findOne(id: number) {
@@ -317,11 +356,17 @@ export class DailyReportService {
         });
     }
 
-    async remove(id: number) {
+    async remove(id: number, user: Employee) {
+        const report = await this.reportRepo.findOne({
+            where: { id },
+            relations: ['employee'],
+        });
+        if (!report) throw new NotFoundException('Report not found');
+        this.assertCanMutate(user, Number(report.employee.id));
         return this.reportRepo.delete(id);
     }
 
-    async findByEmployee(employeeId: number) {
+    async findByEmployee(employeeId: number, provinceId?: number) {
         const employee = await this.employeeRepo.findOne({
             where: { id: employeeId },
         });
@@ -330,22 +375,18 @@ export class DailyReportService {
             throw new NotFoundException('Employee not found');
         }
 
-        return this.reportRepo.find({
-            where: {
-                employee: { id: employeeId },
-            },
-            relations: ['tasks'],
-            order: { date: 'DESC' },
-        });
+        const query = this.reportRepo
+            .createQueryBuilder('report')
+            .leftJoinAndSelect('report.tasks', 'tasks')
+            .where('report."employeeId" = :employeeId', { employeeId })
+            .orderBy('report.date', 'DESC');
+        if (provinceId) {
+            query.andWhere('report.province_id = :provinceId', { provinceId });
+        }
+        return query.getMany();
     }
-    async findByEmployeeGroupByWeek(employeeId: number) {
-        const reports = await this.reportRepo.find({
-            where: {
-                employee: { id: employeeId },
-            },
-            relations: ['tasks'],
-            order: { date: 'DESC' },
-        });
+    async findByEmployeeGroupByWeek(employeeId: number, provinceId?: number) {
+        const reports = await this.findByEmployee(employeeId, provinceId);
 
         const grouped = {};
 
@@ -368,29 +409,45 @@ export class DailyReportService {
 
         return Object.values(grouped);
     }
-    async findEmployeesReportedToday() {
+    async findEmployeesReportedToday(provinceId?: number) {
         const today = new Date().toISOString().split('T')[0];
 
-        return this.reportRepo
+        const query = this.reportRepo
             .createQueryBuilder('report')
             .leftJoin('report.employee', 'employee')
             .select(['employee.id', 'employee.name'])
             .distinct(true)
-            .where('report.date = :today', { today })
-            .getRawMany();
+            .where('report.date = :today', { today });
+
+        if (provinceId) {
+            query.andWhere('report.province_id = :provinceId', { provinceId });
+        }
+
+        return query.getRawMany();
     }
-    async removeTask(taskId: number) {
+    async removeTask(taskId: number, user: Employee) {
         const task = await this.taskRepo.findOne({
             where: { id: taskId },
+            relations: ['report', 'report.employee'],
         });
 
         if (!task) {
             throw new NotFoundException('Task not found');
         }
+        this.assertCanMutate(user, Number(task.report.employee.id));
 
         await this.taskRepo.remove(task);
 
         return { message: 'Deleted successfully' };
+    }
+
+    private assertCanMutate(user: Employee, ownerId: number): void {
+        const canManage = user.roles?.some((role) =>
+            ['director', 'director_la', 'saleadmin', 'salesadmin', 'salesadmin_la']
+                .includes(role),
+        );
+        if (user.id === ownerId || canManage) return;
+        throw new ForbiddenException('Bạn không có quyền sửa hoặc xoá báo cáo này');
     }
     async createMessage(
         dto: CreateReportMessageDto,
@@ -475,15 +532,19 @@ export class DailyReportService {
                                 })
                                 .getMany();
 
-                        receiverIds = managers
-                            .map((e) => e.id)
-                            .filter(
-                                (
-                                    id,
-                                ): id is number =>
-                                    !!id &&
-                                    id !== sender.id,
-                            );
+                        receiverIds = await this.notificationService.scopeBusinessReceiverIds(
+                            managers
+                                .map((e) => e.id)
+                                .filter(
+                                    (
+                                        id,
+                                    ): id is number =>
+                                        !!id &&
+                                        id !== sender.id,
+                                ),
+                            sender.id,
+                            { kind: 'report', reportId: report.id },
+                        );
 
                         notificationMessage =
                             `${sender.name} đã nhắn tin trong báo cáo công việc`;

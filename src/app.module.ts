@@ -43,11 +43,17 @@ import { TimetableImportModule } from './timetable-import/timetable-import.modul
 import { VirtualTryOnModule } from './virtual-tryon/virtual-tryon.module';
 import { SchoolLocationModule } from './school-location/school-location.module';
 import { ActivityLogModule } from './activity-log/activity-log.module';
+import { LongAnDirectorModule } from './long-an-director/long-an-director.module';
 import { WarehouseModule } from './warehouse/warehouse.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { HrModule } from './hr/hr.module';
 import { RecruitmentModule } from './recruitment/recruitment.module';
+import { CashflowReportModule } from './cashflow-report/cashflow-report.module';
+import { FinancialRequestModule } from './financial-request/financial-request.module';
+import { OtherCashflowModule } from './other-cashflow/other-cashflow.module';
+import { AccountingSummaryModule } from './accounting-summary/accounting-summary.module';
 import { resolveDatabaseOptions } from './database/database-options';
+import { RealtimeAuthModule } from './realtime/realtime-auth.module';
 
 @Module({
   imports: [
@@ -64,6 +70,8 @@ import { resolveDatabaseOptions } from './database/database-options';
       envFilePath: '.env',
     }),
     ActivityLogModule,
+    LongAnDirectorModule,
+    RealtimeAuthModule,
     EmployeeModule,
     AuthModule,
     SchoolsModule,
@@ -105,6 +113,10 @@ import { resolveDatabaseOptions } from './database/database-options';
     PayrollModule,
     HrModule,
     RecruitmentModule,
+    CashflowReportModule,
+    FinancialRequestModule,
+    OtherCashflowModule,
+    AccountingSummaryModule,
   ],
 })
 export class AppModule {}

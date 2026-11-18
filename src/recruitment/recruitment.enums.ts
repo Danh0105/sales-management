@@ -17,6 +17,47 @@ export enum EmploymentType {
   CONTRACT = 'CONTRACT',
   INTERNSHIP = 'INTERNSHIP',
   COLLABORATOR = 'COLLABORATOR',
+  SEASONAL = 'SEASONAL',
+  REMOTE = 'REMOTE',
+  HYBRID = 'HYBRID',
+}
+
+/** Các giá trị cấu hình tin tuyển dụng, không phải kết quả sàng lọc ứng viên. */
+export enum RecruitmentSeniority {
+  INTERN = 'INTERN',
+  STAFF = 'STAFF',
+  SPECIALIST = 'SPECIALIST',
+  TEAM_LEAD = 'TEAM_LEAD',
+  DEPARTMENT_HEAD = 'DEPARTMENT_HEAD',
+  MANAGER = 'MANAGER',
+  DIRECTOR = 'DIRECTOR',
+}
+
+export enum RecruitmentExperienceLevel {
+  NONE = 'NONE',
+  UNDER_ONE_YEAR = 'UNDER_ONE_YEAR',
+  ONE_YEAR = 'ONE_YEAR',
+  TWO_YEARS = 'TWO_YEARS',
+  THREE_YEARS = 'THREE_YEARS',
+  THREE_TO_FIVE_YEARS = 'THREE_TO_FIVE_YEARS',
+  OVER_FIVE_YEARS = 'OVER_FIVE_YEARS',
+}
+
+export enum RecruitmentSalaryStructure {
+  FIXED = 'FIXED',
+  BASE_KPI = 'BASE_KPI',
+  BASE_COMMISSION = 'BASE_COMMISSION',
+  SALES_BASED = 'SALES_BASED',
+  NEGOTIABLE = 'NEGOTIABLE',
+}
+
+export enum RecruitmentEducationLevel {
+  NONE = 'NONE',
+  HIGH_SCHOOL = 'HIGH_SCHOOL',
+  VOCATIONAL = 'VOCATIONAL',
+  COLLEGE = 'COLLEGE',
+  UNIVERSITY = 'UNIVERSITY',
+  POSTGRADUATE = 'POSTGRADUATE',
 }
 
 export enum CandidateSource {
@@ -176,6 +217,15 @@ export enum ChannelEventStatus {
 }
 
 /**
+ * Lý do người vận hành loại một event inbox khỏi xử lý nghiệp vụ — ghi vào `failure_code`
+ * của event `IGNORED` (phân biệt với `IGNORED` do loại event không hỗ trợ: `failure_code` NULL).
+ */
+export enum ChannelEventExcludeReason {
+  /** Tin thử nội bộ (vd. gửi trong lúc nghiệm thu webhook, trước khi bật worker). */
+  TEST_MESSAGE = 'TEST_MESSAGE',
+}
+
+/**
  * Tin trả lời chờ gửi ra kênh (worker P3-4 tạo `PENDING`, sender P3-5 gửi).
  *
  * - `SENDING`: đã claim; `dispatched_at` có giá trị = request có thể đã tới Zalo.
@@ -188,6 +238,7 @@ export enum ChannelEventStatus {
  *   mở kết nối; không gửi lại, không chặn hàng (P3-6.5).
  */
 export enum ChannelOutboxStatus {
+  AWAITING_APPROVAL = 'AWAITING_APPROVAL',
   PENDING = 'PENDING',
   SENDING = 'SENDING',
   SENT = 'SENT',
@@ -238,6 +289,22 @@ export enum ChannelEventAiDecision {
   SKIPPED_CLOSED = 'SKIPPED_CLOSED',
   /** HR đổi chế độ điều khiển trong lúc OpenClaw đang chạy — bỏ câu trả lời của AI. */
   DISCARDED_CONTROL_CHANGED = 'DISCARDED_CONTROL_CHANGED',
+  /** Người gửi vượt trần lượt AI (giờ / ngày) — không gọi AI, HR trả lời. */
+  SKIPPED_RATE_LIMITED = 'SKIPPED_RATE_LIMITED',
+  /** Câu trả lời của AI vi phạm chính sách (lộ dữ liệu / dấu hiệu nội bộ) — không gửi. */
+  BLOCKED_BY_POLICY = 'BLOCKED_BY_POLICY',
+  /** Emergency stop đã commit trong lúc lượt AI chạy — bỏ tin, không tạo outbox. */
+  DISCARDED_RUNTIME_HALTED = 'DISCARDED_RUNTIME_HALTED',
+}
+
+/** Phạm vi dừng khẩn (bảng `recruitment_runtime_controls`). */
+export enum RuntimeControlScope {
+  /** API `/recruitment/ai/*` → 503 `AI_HALTED`; worker không bắt đầu lượt mới. */
+  AI = 'AI',
+  /** Worker không claim event mới. */
+  WORKER = 'WORKER',
+  /** Sender không mở kết nối gửi tin (tin giữ nguyên chờ). */
+  OUTBOUND = 'OUTBOUND',
 }
 
 export enum HrAlertType {
@@ -249,6 +316,13 @@ export enum HrAlertType {
   CHANNEL_EVENT_DEAD_LETTER = 'CHANNEL_EVENT_DEAD_LETTER',
   REFRESH_OUTCOME_UNKNOWN = 'REFRESH_OUTCOME_UNKNOWN',
   REPEATED_AI_FAILURE = 'REPEATED_AI_FAILURE',
+  /** Vượt trần lượt / token toàn hệ thống — AI đã tự dừng, cần người vận hành. */
+  AI_LIMIT_REACHED = 'AI_LIMIT_REACHED',
+  /**
+   * Zalo từ chối vì quyền dịch vụ của OA (vd. -224: OA cần nâng cấp gói) — outbound đã tự
+   * DỪNG KHẨN; chỉ mở lại thủ công sau khi SYSTEM OWNER xác nhận gói OA.
+   */
+  OUTBOUND_PROVIDER_BLOCKED = 'OUTBOUND_PROVIDER_BLOCKED',
 }
 
 export enum HrAlertSeverity {

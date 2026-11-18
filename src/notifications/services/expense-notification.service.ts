@@ -39,6 +39,7 @@ export class ExpenseNotificationService {
             scope: ExpenseNotiScope;
             tab?: 'unread' | 'read';
             employeeId?: number;
+            restrictedLongAnDirector?: boolean;
         },
     ) {
         qb.where('n."receiverId" = :receiverId', { receiverId: opts.receiverId })
@@ -60,12 +61,15 @@ export class ExpenseNotificationService {
             });
         }
 
+        // Giám đốc Long An không có chức năng Đề xuất chi.
+        if (opts.restrictedLongAnDirector) qb.andWhere('1 = 0');
+
         return qb;
     }
 
     /** Đếm cho badge tab: tổng & chưa đọc theo từng scope. */
-    async summary(receiverId: number) {
-        const rows = await this.repo
+    async summary(receiverId: number, restrictedLongAnDirector = false) {
+        const qb = this.repo
             .createQueryBuilder('n')
             .select(
                 `CASE WHEN n.meta->>'kind' = :ovk THEN 'overdue' ELSE 'general' END`,
@@ -76,7 +80,11 @@ export class ExpenseNotificationService {
             .where('n."receiverId" = :receiverId', { receiverId })
             .andWhere('n.type = :type', { type: NotificationType.SUGGEST })
             .andWhere(`n.meta->>'suggestType' = :st`, { st: EXPENSE_SUGGEST_TYPE })
-            .setParameter('ovk', OVERDUE_KIND)
+            .setParameter('ovk', OVERDUE_KIND);
+
+        if (restrictedLongAnDirector) qb.andWhere('1 = 0');
+
+        const rows = await qb
             .groupBy('scope')
             .getRawMany<{ scope: string; total: string; unread: string }>();
 
@@ -98,6 +106,7 @@ export class ExpenseNotificationService {
         tab?: 'unread' | 'read';
         page?: number;
         limit?: number;
+        restrictedLongAnDirector?: boolean;
     }) {
         const scope = this.normalizeScope(opts.scope);
         const page = opts.page && opts.page > 0 ? opts.page : 1;
@@ -107,6 +116,7 @@ export class ExpenseNotificationService {
             receiverId: opts.receiverId,
             scope,
             tab: opts.tab,
+            restrictedLongAnDirector: opts.restrictedLongAnDirector,
         })
             .andWhere(`n.meta->>'employeeId' IS NOT NULL`)
             .leftJoin('employee', 'e', `e.id = (n.meta->>'employeeId')::int`)
@@ -138,6 +148,7 @@ export class ExpenseNotificationService {
             receiverId: opts.receiverId,
             scope,
             tab: opts.tab,
+            restrictedLongAnDirector: opts.restrictedLongAnDirector,
         })
             .andWhere(`n.meta->>'employeeId' IS NOT NULL`)
             .select(`COUNT(DISTINCT (n.meta->>'employeeId'))`, 'cnt')
@@ -170,6 +181,7 @@ export class ExpenseNotificationService {
         employeeId?: number;
         page?: number;
         limit?: number;
+        restrictedLongAnDirector?: boolean;
     }) {
         const scope = this.normalizeScope(opts.scope);
         const page = opts.page && opts.page > 0 ? opts.page : 1;
@@ -182,6 +194,7 @@ export class ExpenseNotificationService {
                 scope,
                 tab: opts.tab,
                 employeeId: opts.employeeId,
+                restrictedLongAnDirector: opts.restrictedLongAnDirector,
             },
         )
             .orderBy('n."createdAt"', 'DESC')

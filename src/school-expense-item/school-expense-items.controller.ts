@@ -15,23 +15,16 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  CASHFLOW_READ_ROLES,
+  CASHFLOW_WRITE_ROLES,
+} from '../school-expenses/cashflow-roles';
 
 type RequestWithUser = Request & { user: AuthUser };
 
-const WRITE_ROLES = [
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-];
-// Sales admin chỉ được xem (đọc) — chỉnh sửa duy nhất bảng "Chi Ngoài" qua
-// ManagementExpenseItemsController.
-const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-
 @Controller('school-expense-items')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(...WRITE_ROLES)
+@Roles(...CASHFLOW_WRITE_ROLES)
 export class SchoolExpenseItemsController {
   constructor(
     private readonly schoolExpenseItemsService: SchoolExpenseItemsService,
@@ -43,15 +36,15 @@ export class SchoolExpenseItemsController {
   }
 
   @Get()
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...CASHFLOW_READ_ROLES)
   findAll(@Query() query: any) {
     return this.schoolExpenseItemsService.findAll(query);
   }
 
   @Get(':id')
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...CASHFLOW_READ_ROLES)
   findOne(@Param('id') id: string) {
-    return this.schoolExpenseItemsService.findOne(Number(id));
+    return this.schoolExpenseItemsService.findOneView(Number(id));
   }
 
   @Patch(':id')

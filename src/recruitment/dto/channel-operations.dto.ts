@@ -1,5 +1,9 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  ArrayUnique,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -14,9 +18,11 @@ import {
 
 import {
   ApplicationStatus,
+  ChannelEventExcludeReason,
   ChannelOutboxStatus,
   HrAlertStatus,
   HrAlertType,
+  RuntimeControlScope,
 } from '../recruitment.enums';
 
 /** HR gửi tin cho ứng viên qua kênh (Zalo OA tuyển dụng). */
@@ -55,11 +61,40 @@ export class MarkOutboxSentDto {
   providerMessageId?: string;
 }
 
+/** R1 — loại event inbox khỏi xử lý nghiệp vụ; lý do bắt buộc, chỉ giá trị đã định nghĩa. */
+export class ExcludeChannelEventDto {
+  @IsEnum(ChannelEventExcludeReason)
+  reason!: ChannelEventExcludeReason;
+}
+
+/** P3-7.3 / G8 — dừng khẩn / mở lại: phạm vi + lý do (ghi audit). */
+export class RuntimeControlChangeDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
+  @ArrayUnique()
+  @IsEnum(RuntimeControlScope, { each: true })
+  scopes!: RuntimeControlScope[];
+
+  @IsString()
+  @MinLength(5)
+  @MaxLength(200)
+  reason!: string;
+}
+
 export class RetryOutboxDto {
   /** Bắt buộc `true`: người vận hành chấp nhận khả năng ứng viên nhận trùng tin. */
   @IsOptional()
   @IsBoolean()
   confirmDuplicateRisk?: boolean;
+}
+
+/** HR huỷ tin HR đang chờ gửi — lý do bắt buộc (ghi audit). */
+export class CancelHrMessageDto {
+  @IsString()
+  @MinLength(10)
+  @MaxLength(300)
+  reason!: string;
 }
 
 export class OutboxQueryDto {

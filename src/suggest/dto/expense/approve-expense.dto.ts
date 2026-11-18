@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
   IsArray,
   IsEnum,
   IsInt,
@@ -17,7 +18,9 @@ import { StockInItemDto } from './create-stock-in-receipt.dto';
 /**
  * Giám đốc/Sales Admin có thể chốt lại số tiền, loại đề xuất (tiền/thiết bị/
  * sửa chữa) và chỉ định nhân viên phòng kỹ thuật phụ trách ngay khi duyệt.
- * Loại đề xuất là bắt buộc vì nhân viên không còn tự phân loại lúc tạo.
+ * Loại đề xuất là bắt buộc với đề xuất chi Năm vì nhân viên không tự phân
+ * loại lúc tạo. Đề xuất chi tháng đã cố định là CASH từ bước Kế toán công nợ,
+ * nên Giám đốc chỉ cần xác nhận duyệt.
  */
 export class ApproveExpenseDto {
   @IsOptional()
@@ -25,8 +28,9 @@ export class ApproveExpenseDto {
   @Min(0, { message: 'Số tiền không được âm' })
   amount?: number;
 
+  @IsOptional()
   @IsEnum(ExpenseRequestKind)
-  requestKind!: ExpenseRequestKind;
+  requestKind?: ExpenseRequestKind;
 
   /**
    * Người bàn giao (nhân viên phòng kỹ thuật). Chỉ có ý nghĩa khi requestKind
@@ -50,6 +54,19 @@ export class ApproveExpenseDto {
   @IsOptional()
   @IsString()
   note?: string;
+
+  /**
+   * Chi tháng nhiều trường: các dòng (trường · môn · kỳ) Giám đốc duyệt. Bỏ
+   * trống = duyệt tất cả. Dòng bỏ ra không tính vào lệnh chi; khi bỏ dòng phải
+   * có ghi chú lý do.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Phải duyệt ít nhất một trường' })
+  @Type(() => Number)
+  @IsInt({ each: true })
+  @IsPositive({ each: true })
+  approvedItemIds?: number[];
 
   /**
    * Nguồn thiết bị khi requestKind = EQUIPMENT: có sẵn trong kho (mặc định)

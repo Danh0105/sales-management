@@ -385,6 +385,14 @@ export class TeachingSession {
   @Column({ name: 'actual_student_count', type: 'int', nullable: true })
   actualStudentCount?: number | null;
 
+  /** Tổng sĩ số lớp khi báo giảng (Mini App mới); null với báo giảng cũ. */
+  @Column({ name: 'total_student_count', type: 'int', nullable: true })
+  totalStudentCount?: number | null;
+
+  /** Họ tên học sinh vắng khi báo giảng (Mini App mới); null với báo giảng cũ. */
+  @Column({ name: 'absent_student_names', type: 'jsonb', nullable: true })
+  absentStudentNames?: string[] | null;
+
   /** Tách khỏi checkoutAt: chấm công và báo giảng là hai thao tác độc lập. */
   @Column({ name: 'lesson_submitted_at', type: 'timestamp', nullable: true })
   lessonSubmittedAt?: Date | null;

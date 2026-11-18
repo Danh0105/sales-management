@@ -15,12 +15,22 @@ import { Subject } from '../subject/subject.entity';
 import { SchoolExpense } from '../school-expenses/entities/school-expenses.entity';
 import { SchoolExpenseHistory } from '../school-expenses/entities/school-expense-history.entity';
 import {
+  assertManagementPaidWithinOutside,
   assertNotFinalized,
   buildManagementExpenseItemData,
   computeOtherCostRows,
   normalizeSharedFields,
+  recomputeManagementOutside,
 } from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import { isManagementConfirmed } from '../school-expenses/management-confirmations';
+import {
+  keepLinkedPaymentFields,
+  linkedRowDeleteError,
+  loadLinkedManagementRows,
+  loadSuggestPayments,
+  withSuggestPayments,
+} from './suggest-payments';
 
 @Injectable()
 export class ManagementExpenseItemsService {
@@ -40,14 +50,48 @@ export class ManagementExpenseItemsService {
     private readonly dataSource: DataSource,
   ) {}
 
+  /** Cùng quy tắc với lưu toàn bộ: tổng Đã chi của môn không vượt tổng Chi ngoài. */
+  private async assertPaidWithinOutside(
+    schoolExpenseId: number,
+    subjectId: number,
+    next: { paidAmount: number; totalOutside: number },
+    excludeId?: number,
+  ) {
+    const rows = await this.managementExpenseItemRepository.find({
+      where: {
+        schoolExpense: { id: schoolExpenseId },
+        subject: { id: subjectId },
+      },
+      relations: { otherCosts: true },
+    });
+
+    let oldPaid = 0;
+    let newPaid = next.paidAmount;
+    let totalOutside = next.totalOutside;
+    for (const row of rows) {
+      const paid = Number(row.paidAmount ?? 0);
+      oldPaid += paid;
+      if (row.id === excludeId) continue;
+      newPaid += paid;
+      totalOutside += recomputeManagementOutside(row);
+    }
+
+    assertManagementPaidWithinOutside({ oldPaid, newPaid, totalOutside });
+  }
+
   /**
-   * Bảng "Chi Ngoài" bị khoá sau khi sales admin xác nhận
-   * (`SchoolExpense.managementExpenseConfirmed`) — chỉ kế toán trưởng còn sửa
-   * được sau khi khoá.
+   * Bảng "Chi Ngoài" của một môn bị khoá sau khi sales admin "Xác nhận đúng
+   * BBCS" môn đó — chỉ kế toán trưởng còn sửa được sau khi khoá.
    */
-  private assertNotLocked(schoolExpense: SchoolExpense, user?: AuthUser) {
+  private async assertNotLocked(
+    schoolExpense: SchoolExpense,
+    subjectId: number | null | undefined,
+    user?: AuthUser,
+  ) {
     assertNotFinalized(schoolExpense);
-    if (!schoolExpense.managementExpenseConfirmed) return;
+    if (!(await isManagementConfirmed(this.dataSource.manager, schoolExpense.id, subjectId))) {
+      return;
+    }
     const isChiefAccountant = (user?.roles ?? []).includes('ketoan_truong');
     if (!isChiefAccountant) {
       throw new ForbiddenException(
@@ -132,7 +176,7 @@ export class ManagementExpenseItemsService {
       throw new BadRequestException('Subject does not belong to school');
     }
 
-    this.assertNotLocked(schoolExpense, user);
+    await this.assertNotLocked(schoolExpense, subject.id, user);
 
     const shared = normalizeSharedFields(body);
     const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
@@ -141,17 +185,21 @@ export class ManagementExpenseItemsService {
         shared,
       );
 
+    const data = buildManagementExpenseItemData(
+      body,
+      0,
+      body,
+      totalOtherCostAmount,
+      totalOtherTaxAmount,
+    );
+
+    await this.assertPaidWithinOutside(body.schoolExpenseId, body.subjectId, data);
+
     const savedId = await this.dataSource.transaction(async (manager) => {
       const entity = manager.create(ManagementExpenseItem, {
         schoolExpense,
         subject,
-        ...buildManagementExpenseItemData(
-          body,
-          0,
-          body,
-          totalOtherCostAmount,
-          totalOtherTaxAmount,
-        ),
+        ...data,
       });
 
       const saved = await manager.save(entity);
@@ -211,7 +259,11 @@ export class ManagementExpenseItemsService {
     }
 
     const items = await qb.getMany();
-    return items.map((i) => this.withOtherCosts(i));
+    const payments = await loadSuggestPayments(
+      this.dataSource.manager,
+      items.map((item) => item.id),
+    );
+    return items.map((i) => withSuggestPayments(this.withOtherCosts(i), payments));
   }
 
   // FIND ONE
@@ -222,7 +274,10 @@ export class ManagementExpenseItemsService {
       throw new NotFoundException('ManagementExpenseItem not found');
     }
 
-    return this.withOtherCosts(data);
+    return withSuggestPayments(
+      this.withOtherCosts(data),
+      await loadSuggestPayments(this.dataSource.manager, [data.id]),
+    );
   }
 
   // UPDATE
@@ -244,7 +299,7 @@ export class ManagementExpenseItemsService {
 
     const oldData = { ...data };
 
-    this.assertNotLocked(data.schoolExpense, user);
+    await this.assertNotLocked(data.schoolExpense, data.subject?.id, user);
 
     if (body.subjectId && Number(body.subjectId) !== data.subject?.id) {
       const subject = await this.subjectRepository.findOne({
@@ -278,6 +333,7 @@ export class ManagementExpenseItemsService {
       expenseDate: data.expenseDate,
       paidAmount: data.paidAmount,
       payer: data.payer,
+      cashAccount: data.cashAccount,
       note: data.note,
       ...body,
     };
@@ -298,15 +354,27 @@ export class ManagementExpenseItemsService {
     const { rows: otherCostRows, totalOtherCostAmount, totalOtherTaxAmount } =
       computeOtherCostRows(rawOtherCosts, shared);
 
+    const built = buildManagementExpenseItemData(
+      merged,
+      shared.rowIndex,
+      merged,
+      totalOtherCostAmount,
+      totalOtherTaxAmount,
+    );
+    // Dòng có tiền từ đề xuất chi: Ngày chi / Nguồn chi / Đã chi giữ nguyên.
+    const linkedRow = (
+      await loadLinkedManagementRows(this.dataSource.manager, { itemIds: [id] })
+    ).get(id);
     Object.assign(
       data,
-      buildManagementExpenseItemData(
-        merged,
-        shared.rowIndex,
-        merged,
-        totalOtherCostAmount,
-        totalOtherTaxAmount,
-      ),
+      linkedRow ? keepLinkedPaymentFields(built, linkedRow, built.totalOutside) : built,
+    );
+
+    await this.assertPaidWithinOutside(
+      data.schoolExpense.id,
+      data.subject.id,
+      { paidAmount: Number(data.paidAmount), totalOutside: Number(data.totalOutside) },
+      id,
     );
 
     const savedId = await this.dataSource.transaction(async (manager) => {
@@ -358,7 +426,12 @@ export class ManagementExpenseItemsService {
       throw new NotFoundException('ManagementExpenseItem not found');
     }
 
-    this.assertNotLocked(data.schoolExpense, user);
+    await this.assertNotLocked(data.schoolExpense, data.subject?.id, user);
+
+    const linkedRow = (
+      await loadLinkedManagementRows(this.dataSource.manager, { itemIds: [id] })
+    ).get(id);
+    if (linkedRow) throw linkedRowDeleteError(linkedRow.payments);
 
     await this.historyRepository.save({
       schoolExpenseId: data.schoolExpense?.id,

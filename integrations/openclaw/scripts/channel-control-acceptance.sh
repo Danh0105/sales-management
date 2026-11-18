@@ -302,14 +302,16 @@ wait_sql 30 "select failure_code is not null from recruitment_channel_events whe
 EV_D2=$(ev "p36-$RUN_ID-d2" id)
 wait_sql 10 "select count(*) = 1 from recruitment_hr_alerts where type = 'CHANNEL_EVENT_DEAD_LETTER' and source_key = 'event:$EV_D2'" || true
 timeout 3 tail -f /dev/null || true
-same "15. tin dead-letter (lỗi AI 3 lần) → đúng 1 cảnh báo CHANNEL_EVENT_DEAD_LETTER" "$(ev "p36-$RUN_ID-d2" "status || '/' || failure_code")|$(alerts_for CHANNEL_EVENT_DEAD_LETTER "event:$EV_D2")" "FAILED/AGENT_ERROR_TEXT|1"
+same "15. lỗi AI sau dispatch → dead-letter, đúng 1 cảnh báo CHANNEL_EVENT_DEAD_LETTER" "$(ev "p36-$RUN_ID-d2" "status || '/' || failure_code")|$(alerts_for CHANNEL_EVENT_DEAD_LETTER "event:$EV_D2")" "FAILED/AGENT_ERROR_TEXT|1"
 E="c${RUN_ID}e"
 mock "{mode:'quota',times:3,then:{mode:'ok'}}"
 send_in "p36-$RUN_ID-e1" "$E" "Chào"
-wait_sql 30 "select count(*) >= 1 from recruitment_hr_alerts where type = 'REPEATED_AI_FAILURE' and source_key like 'ai:$OA:%' and created_at >= '$T0'" || true
-wait_event "p36-$RUN_ID-e1" 30
-same "OpenAI hết quota lặp lại (≥3 lần) → cảnh báo REPEATED_AI_FAILURE (gộp theo OA/giờ); tin vẫn xử lý được sau đó" \
-  "$(sql "select count(*) >= 1 from recruitment_hr_alerts where type = 'REPEATED_AI_FAILURE' and source_key like 'ai:$OA:%'")|$(ev "p36-$RUN_ID-e1" "status || '/' || attempt_count")" "t|PROCESSED/4"
+wait_sql 30 "select status = 'FAILED' and failure_code = 'PROVIDER_QUOTA' from recruitment_channel_events where provider_message_id = 'p36-$RUN_ID-e1'" || true
+EV_E1=$(ev "p36-$RUN_ID-e1" id)
+same "OpenAI quota lỗi sau dispatch → dead-letter, không retry mù và cảnh báo HR đúng 1 lần" \
+  "$(ev "p36-$RUN_ID-e1" "status || '/' || attempt_count || '/' || (next_attempt_at is null)")|$(mock_calls "p36-$RUN_ID-e1")|$(alerts_for CHANNEL_EVENT_DEAD_LETTER "event:$EV_E1")" \
+  "FAILED/1/true|1|1"
+mock "{mode:'ok'}"
 VER=$(sql "select version from recruitment_zalo_credentials where oa_id = '$OA'")
 fz /__oauth-mode "{mode:'hang'}"
 fz /__expire

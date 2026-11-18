@@ -3,8 +3,9 @@ import { Transform } from 'class-transformer';
 import { IsBoolean, IsNumber, IsOptional } from 'class-validator';
 
 export class PolicyStatsDto {
+    @IsOptional()
     @IsNumber()
-    employeeId!: number;
+    employeeId?: number;
 
     /**
      * Mặc định chỉ trả chính sách đã được giám đốc duyệt (dùng cho các trang

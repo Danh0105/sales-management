@@ -1,11 +1,12 @@
 // dto/create-suggest.dto.ts
-import { IsArray, IsBoolean, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString, IsDateString, IsEnum, IsNumber, IsInt, Min, MaxLength, Matches, ValidateNested, ArrayMinSize } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
-import { RequestedEquipmentItemDto, parseJsonArray, parseBoolean } from './expense/create-expense-request.dto';
+import { CASHFLOW_SOURCES, type CashflowSource } from '../cashflow-sources';
+import { MonthlyExpenseItemDto, PolicySupportItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
     @IsString()
@@ -86,6 +87,43 @@ export class CreateSuggestDto {
     @Type(() => Number)
     @IsInt()
     schoolId?: number;
+
+    /** Đề xuất chi tháng; chỉ dùng khi type = EXPENSE_REQUEST. */
+    @IsOptional()
+    @Transform(parseBoolean)
+    @IsBoolean()
+    isMonthlyExpense?: boolean;
+
+    /** Bảng nguồn của đề xuất chi tháng — xem `CreateExpenseRequestDto.cashflowSource`. */
+    @IsOptional()
+    @IsIn(CASHFLOW_SOURCES as unknown as string[], {
+        message: 'Loại đề xuất chi tháng không hợp lệ',
+    })
+    cashflowSource?: CashflowSource;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    subjectId?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    expensePeriodId?: number;
+
+    /** Dòng chính sách đã tích — xem `CreateExpenseRequestDto.policySupportItems`. */
+    @IsOptional()
+    @Transform(({ value }) => parseJsonArrayOf(PolicySupportItemDto)({ value }))
+    @IsArray()
+    @ValidateNested({ each: true })
+    policySupportItems?: PolicySupportItemDto[];
+
+    /** Các trường của đề xuất chi tháng — xem `CreateExpenseRequestDto.monthlyItems`. */
+    @IsOptional()
+    @Transform(({ value }) => parseJsonArrayOf(MonthlyExpenseItemDto)({ value }))
+    @IsArray()
+    @ValidateNested({ each: true })
+    monthlyItems?: MonthlyExpenseItemDto[];
 
     /** Năm học liên quan; bắt buộc ở endpoint expense-requests */
     @IsOptional()

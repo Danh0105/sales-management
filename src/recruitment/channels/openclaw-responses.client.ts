@@ -20,15 +20,30 @@ export interface OpenClawClientConfig {
 }
 
 /**
- * - `infra`: gateway/mạng/xác thực — thử lại tới hết hạn giữ nội dung.
- * - `provider`: OpenAI giới hạn tốc độ / hết quota — thử lại, giãn cách dài hơn.
- * - `agent`: lượt chạy xong nhưng kết quả không dùng được — thử lại có giới hạn.
- * - `rejected`: gateway từ chối request (4xx) — thử lại vô ích.
+ * Phân loại nguyên nhân để log/HR xử lý. Worker chỉ tự retry trước mốc provider
+ * dispatch; sau mốc đó, mọi lỗi/timeout đều là outcome có thể đã xảy ra.
+ * - `infra`: gateway/mạng/xác thực.
+ * - `provider`: OpenAI giới hạn tốc độ / hết quota.
+ * - `agent`: lượt chạy xong nhưng kết quả không dùng được.
+ * - `rejected`: gateway từ chối request (4xx).
  */
 export type AgentFailureKind = 'infra' | 'provider' | 'agent' | 'rejected';
 
+/** Token của lượt theo `usage` (định dạng OpenAI Responses) — input gồm cả phần cache. */
+export interface AgentUsage {
+  input: number;
+  cached: number;
+  output: number;
+  total: number;
+}
+
 export type AgentOutcome =
-  | { ok: true; text: string; responseId: string | null }
+  | {
+      ok: true;
+      text: string;
+      responseId: string | null;
+      usage: AgentUsage | null;
+    }
   | {
       ok: false;
       code: string;
@@ -169,6 +184,29 @@ export function classifyOpenClawResponse(
     ok: true,
     text,
     responseId: typeof record.id === 'string' ? record.id : null,
+    usage: usageOf(record.usage),
+  };
+}
+
+/** `usage` của gateway (`toOpenAiResponsesUsage`); thiếu / sai kiểu → `null` để worker fail-closed. */
+export function usageOf(value: unknown): AgentUsage | null {
+  if (!isRecord(value)) return null;
+  const count = (v: unknown) =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0
+      ? Math.round(v)
+      : null;
+  const input = count(value.input_tokens);
+  const output = count(value.output_tokens);
+  const total = count(value.total_tokens);
+  if (input === null || output === null) return null;
+  const details = isRecord(value.input_tokens_details)
+    ? value.input_tokens_details
+    : {};
+  return {
+    input,
+    cached: count(details.cached_tokens) ?? 0,
+    output,
+    total: total ?? input + output,
   };
 }
 

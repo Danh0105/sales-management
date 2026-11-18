@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
+import { INVOICE_CASH_ACCOUNT_CODES } from '../revenue-item/invoice-cash-account';
 import {
   normalizeRevenueInvoiceStatus,
   normalizeRevenueInvoiceType,
@@ -44,7 +45,8 @@ const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 /**
  * Chuẩn hóa + validate + tính amount cho mảng "Chi khác" của 1 dòng.
- * - amount = unitPrice * studentCount * monthsCount (BE tự tính).
+ * - amount = unitPrice * billingQuantity (BE tự tính).
+ * - billingQuantity = (studentCount > 0 ? studentCount : totalPeriods) * monthsCount.
  * - Chấp nhận alias `id` → policyOtherCostId với ID số nguyên hợp lệ.
  * - Bỏ qua `id` tạm dạng timestamp của FE (không phải ID chính sách).
  * - Cấm: unitPrice âm, amount âm, NaN/Infinity, tên trống khi không có policyOtherCostId,
@@ -52,7 +54,11 @@ const POSTGRES_INTEGER_MAX = 2_147_483_647;
  */
 export function computeOtherCostRows(
   rawList: any[],
-  shared: { studentCount: number; monthsCount: number },
+  shared: {
+    totalPeriods: number;
+    studentCount: number;
+    monthsCount: number;
+  },
 ): {
   rows: NormalizedOtherCost[];
   totalOtherCostAmount: number;
@@ -60,6 +66,7 @@ export function computeOtherCostRows(
 } {
   const rows: NormalizedOtherCost[] = [];
   const seenPolicyIds = new Set<number>();
+  const quantity = revenueBillingQuantity(shared);
 
   for (const raw of rawList ?? []) {
     const hasExplicitPolicyId =
@@ -129,8 +136,8 @@ export function computeOtherCostRows(
       throw new BadRequestException('otherCosts.tax không được âm');
     }
 
-    const amount = unitPrice * shared.studentCount * shared.monthsCount;
-    const taxAmount = tax * shared.studentCount * shared.monthsCount;
+    const amount = unitPrice * quantity;
+    const taxAmount = tax * quantity;
     if (!Number.isFinite(amount) || amount < 0) {
       throw new BadRequestException('otherCosts.amount không hợp lệ');
     }
@@ -161,6 +168,63 @@ export function normalizePaymentMethod(value: unknown): string | null {
   }
 
   throw new BadRequestException('Invalid paymentMethod');
+}
+
+/**
+ * Số hiệu tài khoản trong danh mục Nguồn thu chi — "Khoản thu/chi" (Hóa Đơn),
+ * "Nguồn chi" (Chi Ngoài).
+ */
+export function normalizeCashAccount(
+  value: unknown,
+  field: string,
+): string | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const code = String(value).trim();
+
+  if (INVOICE_CASH_ACCOUNT_CODES.includes(code)) {
+    return code;
+  }
+
+  throw new BadRequestException(`Invalid ${field}`);
+}
+
+/** Hướng của khoản ở cột "Khoản thu/chi" (Hóa Đơn): 'IN' thu vào, 'OUT' chi ra. */
+export function normalizeCashDirection(value: unknown): 'IN' | 'OUT' | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  if (value === 'IN' || value === 'OUT') {
+    return value;
+  }
+
+  throw new BadRequestException('Invalid invoiceCashDirection');
+}
+
+/**
+ * Số tiền thu/chi do kế toán nhập (vd "Số tiền" của Hóa Đơn): để trống → null
+ * (chưa nhập, khác 0); không âm; tối đa 2 chữ số thập phân như cột numeric(15,2).
+ */
+export function normalizeCashAmount(
+  value: unknown,
+  field: string,
+): number | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const amount = toStrictNumber(value, field);
+
+  assertNonNegative({ [field]: amount });
+
+  if (Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6) {
+    throw new BadRequestException(`${field} tối đa 2 chữ số thập phân`);
+  }
+
+  return amount;
 }
 
 /** Hình thức chi của dòng Chi trường. */
@@ -273,6 +337,20 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
       String(item?.invoiceUnit ?? '')
         .trim()
         .slice(0, 50) || null,
+    invoicePaymentDate: item?.invoicePaymentDate || null,
+    invoiceCashAccount: normalizeCashAccount(
+      item?.invoiceCashAccount,
+      'invoiceCashAccount',
+    ),
+    invoiceCashDirection: normalizeCashDirection(item?.invoiceCashDirection),
+    invoiceCashAmount: normalizeCashAmount(
+      item?.invoiceCashAmount,
+      'invoiceCashAmount',
+    ),
+    invoiceNote:
+      String(item?.invoiceNote ?? '')
+        .trim()
+        .slice(0, 500) || null,
     invoiceLocked: item?.invoiceLocked === true,
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),
@@ -285,6 +363,12 @@ export function buildSchoolExpenseItemData(
   item: any,
   index = 0,
   sharedItem = item,
+  /**
+   * Khi tiền giáo viên được theo dõi ở bảng riêng, Chi Trường không cộng lại
+   * khoản này. Đơn giá vẫn phải giữ đúng chính sách để cột ĐG giáo viên không
+   * bị biến thành 0.
+   */
+  options: { teacherSplit?: boolean } = {},
 ) {
   const shared = normalizeSharedFields(sharedItem, index);
   const giaovien = toNumber(item?.giaovien ?? item?.teacherUnitPrice, 0);
@@ -299,7 +383,9 @@ export function buildSchoolExpenseItemData(
     paidAmount,
   });
 
-  const teacherAmount = shared.studentCount * shared.monthsCount * giaovien;
+  const teacherAmount = options.teacherSplit
+    ? 0
+    : shared.studentCount * shared.monthsCount * giaovien;
   const taxAmount = shared.studentCount * shared.monthsCount * thue;
   const csvcAmount = csvc * shared.monthsCount * shared.studentCount;
   const schoolExpenseAmount = teacherAmount + taxAmount + csvcAmount;
@@ -317,6 +403,7 @@ export function buildSchoolExpenseItemData(
     paidAmount,
     remaining: schoolExpenseAmount - paidAmount,
     paymentType: normalizeSchoolPaymentType(item?.paymentType),
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
     payer: item?.payer || null,
     note: item?.note || null,
   };
@@ -338,7 +425,6 @@ export function buildManagementExpenseItemData(
     item?.invoiceAmount ?? item?.contractAmount,
     0,
   );
-  const paidAmount = toNumber(item?.paidAmount, 0);
 
   assertNonNegative({
     ql1UnitPrice,
@@ -346,13 +432,15 @@ export function buildManagementExpenseItemData(
     ql1Tax,
     ql2Tax,
     invoiceAmount,
-    paidAmount,
   });
 
-  const ql1Amount = ql1UnitPrice * shared.studentCount * shared.monthsCount;
-  const ql2Amount = ql2UnitPrice * shared.studentCount * shared.monthsCount;
-  const ql1TaxAmount = ql1Tax * shared.studentCount * shared.monthsCount;
-  const ql2TaxAmount = ql2Tax * shared.studentCount * shared.monthsCount;
+  // Chi QL tính theo cùng số lượng với doanh thu: có HS thì theo HS,
+  // không thì theo số tiết (× số tháng).
+  const quantity = revenueBillingQuantity(shared);
+  const ql1Amount = ql1UnitPrice * quantity;
+  const ql2Amount = ql2UnitPrice * quantity;
+  const ql1TaxAmount = ql1Tax * quantity;
+  const ql2TaxAmount = ql2Tax * quantity;
 
   // totalTaxAmount = thuế QL1 + QL2 + toàn bộ thuế Chi khác.
   const totalTaxAmount = ql1TaxAmount + ql2TaxAmount + totalOtherTaxAmount;
@@ -376,9 +464,153 @@ export function buildManagementExpenseItemData(
     totalTaxAmount,
     totalOutside,
     collectedDate: item?.collectedDate || null,
-    expenseDate: item?.expenseDate || null,
     contractAmount: invoiceAmount,
     invoiceAmount,
+    content: normalizeManagementContent(item?.content),
+    ...buildManagementPaymentData(item, totalOutside),
+  };
+}
+
+function normalizeManagementContent(content: unknown): string | null {
+  if (typeof content !== 'string') return null;
+  return content.trim().slice(0, 500) || null;
+}
+
+/**
+ * Nội dung của dòng thêm riêng (sau dòng Doanh Thu cuối) khi bảng đã khoá. Dòng đi
+ * kèm Doanh Thu dùng Nội dung của Doanh Thu; client không gửi thì giữ nguyên.
+ */
+export function buildStandaloneContentData(
+  item: any,
+  rowIndex: number,
+  revenueCount: number,
+) {
+  if (rowIndex < revenueCount || item?.content === undefined) return {};
+  return { content: normalizeManagementContent(item.content) };
+}
+
+/**
+ * Tổng Chi ngoài của dòng đã lưu, tính lại từ đơn giá như màn hình: `totalOutside`
+ * đã lưu có thể theo công thức cũ. `sharedItem` là dòng Doanh Thu cùng vị trí nếu có.
+ */
+export function recomputeManagementOutside(row: any, sharedItem: any = row) {
+  const shared = normalizeSharedFields(sharedItem, row.rowIndex);
+  const { totalOtherCostAmount, totalOtherTaxAmount } = computeOtherCostRows(
+    (row.otherCosts ?? []).map((cost: any) => ({
+      policyOtherCostId: cost.policyOtherCostId,
+      name: cost.name,
+      unitPrice: cost.unitPrice,
+      tax: cost.tax,
+    })),
+    shared,
+  );
+  return buildManagementExpenseItemData(
+    { ...row, cashAccount: undefined, paidAmount: 0 },
+    row.rowIndex,
+    shared,
+    totalOtherCostAmount,
+    totalOtherTaxAmount,
+  ).totalOutside;
+}
+
+/**
+ * Dòng thêm khi bảng Chi Ngoài đã khoá BBCS: chỉ có Nội dung + cột chi. Bỏ qua mọi
+ * số lượng / đơn giá client gửi lên nên dòng này không làm đổi tổng Chi ngoài.
+ */
+export function buildLockedManagementRowData(item: any, rowIndex: number) {
+  return buildManagementExpenseItemData(
+    {
+      content: item?.content,
+      paidAmount: item?.paidAmount,
+      expenseDate: item?.expenseDate,
+      cashAccount: item?.cashAccount,
+      payer: item?.payer,
+      note: item?.note,
+    },
+    rowIndex,
+    { rowIndex, totalPeriods: 0, studentCount: 0, monthsCount: 0 },
+  );
+}
+
+/** Dòng client đánh dấu là thêm khi bảng đã khoá; bỏ dòng không có gì để lưu. */
+export function pickLockedManagementRows(items: unknown): any[] {
+  return (Array.isArray(items) ? items : []).filter(
+    (item: any) =>
+      item?.addedWhileLocked === true &&
+      !item?.id &&
+      (normalizeManagementContent(item?.content) || toNumber(item?.paidAmount, 0) > 0),
+  );
+}
+
+/**
+ * Tổng Đã chi không được vượt tổng Chi ngoài, tức tổng Còn chi không âm. Chỉ chặn
+ * khi Đã chi tăng, để bảng cũ đã vượt vẫn lưu được phần khác.
+ */
+export function assertManagementPaidWithinOutside(totals: {
+  oldPaid: number;
+  newPaid: number;
+  totalOutside: number;
+}) {
+  const { oldPaid, newPaid, totalOutside } = totals;
+  if (newPaid <= oldPaid + 0.01 || newPaid <= totalOutside + 0.01) return;
+
+  const format = (value: number) => Math.round(value).toLocaleString('vi-VN');
+  throw new BadRequestException(
+    `Đã chi vượt tổng Còn chi: tổng Chi ngoài ${format(totalOutside)}, tổng Đã chi ${format(newPaid)}`,
+  );
+}
+
+/**
+ * Bảng "Chi Ngoài" đã xác nhận BBCS: ngoài kế toán trưởng, các role này vẫn
+ * nhập được phần chi (xem `buildManagementPaymentData`).
+ */
+export const LOCKED_MANAGEMENT_PAYMENT_ROLES = [
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+];
+
+export function canEditLockedManagementPayments(roles?: string[] | null) {
+  return (roles ?? []).some((r) => LOCKED_MANAGEMENT_PAYMENT_ROLES.includes(r));
+}
+
+/**
+ * Ngày chi + Nguồn chi vẫn sửa được khi "Chi Ngoài" đã khoá BBCS (trợ lý GĐ,
+ * giám đốc) và khi kỳ đã "Kết thúc" (Chi Trường + Chi Ngoài) — mọi role ghi
+ * thu chi, trừ sales admin.
+ */
+export const LOCKED_DATE_SOURCE_ROLES = [
+  'ketoan_truong',
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+  'troly_gd',
+  'director',
+];
+
+export function canEditLockedDateSource(roles?: string[] | null) {
+  return (roles ?? []).some((r) => LOCKED_DATE_SOURCE_ROLES.includes(r));
+}
+
+/** Ngày chi + Nguồn chi của một dòng Chi Trường / Chi Ngoài. */
+export function buildPaymentDateSourceData(item: any) {
+  return {
+    expenseDate: item?.expenseDate || null,
+    cashAccount: normalizeCashAccount(item?.cashAccount, 'cashAccount'),
+  };
+}
+
+/**
+ * Cột chi của một dòng "Chi Ngoài": Ngày chi, Nguồn chi, Đã chi, Người chi,
+ * Ghi chú (+ Còn lại = Chi ngoài − Đã chi).
+ */
+export function buildManagementPaymentData(item: any, totalOutside: number) {
+  const paidAmount = toNumber(item?.paidAmount, 0);
+
+  assertNonNegative({ paidAmount });
+
+  return {
+    ...buildPaymentDateSourceData(item),
     paidAmount,
     remaining: totalOutside - paidAmount,
     payer: item?.payer || null,

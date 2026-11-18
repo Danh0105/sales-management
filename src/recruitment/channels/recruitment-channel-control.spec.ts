@@ -55,7 +55,10 @@ function controlRow(patch: Record<string, unknown> = {}) {
 }
 
 function controlService(db: ReturnType<typeof fakeDb>) {
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordMandatory: jest.fn().mockResolvedValue(undefined),
+  };
   const applications = { resumeAi: jest.fn().mockResolvedValue({}) };
   const service = new RecruitmentConversationControlService(
     db.dataSource as any,
@@ -147,6 +150,17 @@ describe('RecruitmentConversationControlService — thao tác HR', () => {
           return [];
         },
       ],
+      // P3.2: thu hồi tin AI chưa dispatch (khoá FOR UPDATE OF o) — chỉ 71, 72; 70 đã gửi.
+      [
+        /FOR UPDATE OF o/,
+        () => [
+          { id: 71, recruitment_message_id: 801, status: 'AWAITING_APPROVAL' },
+          { id: 72, recruitment_message_id: 802, status: 'PENDING' },
+        ],
+      ],
+      [/UPDATE "recruitment_channel_outbox"/, (p) => [{ id: p[0] }]],
+      [/UPDATE "recruitment_outbox_approvals"/, () => [{ version: 1 }]],
+      [/UPDATE "recruitment_messages"/, (p) => [{ id: p[0] }]],
       [
         /FROM "recruitment_channel_outbox" o/,
         () => [
@@ -163,6 +177,36 @@ describe('RecruitmentConversationControlService — thao tác HR', () => {
       version: 4,
       aiOutbound: { alreadyDispatched: [70], willBeSuppressed: [71, 72] },
     });
+    // Thu hồi chạy SAU khi đổi chế độ, trong cùng transaction; ghi sự kiện REVOKED + audit bắt buộc.
+    const modeAt = db.calls.findIndex((c) =>
+      /control_version = control_version \+ 1/.test(c.sql),
+    );
+    const revokeAt = db.calls.findIndex((c) => /FOR UPDATE OF o/.test(c.sql));
+    expect(revokeAt).toBeGreaterThan(modeAt);
+    expect(
+      db.ran(/UPDATE "recruitment_channel_outbox"/).map((c) => c.params),
+    ).toEqual([
+      [71, 'CONTROL_HUMAN_TAKEOVER'],
+      [72, 'CONTROL_HUMAN_TAKEOVER'],
+    ]);
+    expect(
+      db.ran(/INSERT INTO "recruitment_outbox_approval_events"/).map(
+        (c) => c.params,
+      ),
+    ).toEqual([
+      [71, 1, 42, 'CONTROL_HUMAN_TAKEOVER'],
+      [72, 1, 42, 'CONTROL_HUMAN_TAKEOVER'],
+    ]);
+    expect(audit.recordMandatory).toHaveBeenCalledTimes(2);
+    expect(audit.recordMandatory).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actor: HR,
+        action: 'OUTBOX_APPROVAL_REVOKE',
+        entityId: 71,
+        after: { status: 'SUPPRESSED', approvalState: 'REVOKED' },
+      }),
+    );
     // Tin AI còn trong outbox: đọc trong CÙNG transaction giữ FOR UPDATE, sau khi đổi chế độ.
     const order = db.calls.map((c) =>
       /FOR UPDATE OF c/.test(c.sql)
@@ -313,6 +357,16 @@ describe('RecruitmentConversationControlService.sendHumanMessage', () => {
       [/INSERT INTO "recruitment_messages"/, () => [{ id: 501 }]],
       [/INSERT INTO "recruitment_channel_outbox"/, () => [{ id: 601 }]],
       [/SELECT control_version FROM/, () => [{ control_version: 4 }]],
+      // P3.2: tự tiếp quản cũng thu hồi tin AI chưa gửi (600), trước khi tạo tin HR.
+      [
+        /FOR UPDATE OF o/,
+        () => [
+          { id: 600, recruitment_message_id: 590, status: 'AWAITING_APPROVAL' },
+        ],
+      ],
+      [/UPDATE "recruitment_channel_outbox"/, (p) => [{ id: p[0] }]],
+      [/UPDATE "recruitment_outbox_approvals"/, () => [{ version: 1 }]],
+      [/UPDATE "recruitment_messages"/, (p) => [{ id: p[0] }]],
       [
         /FROM "recruitment_channel_outbox" o/,
         () => [{ id: 600, dispatched: false }],
@@ -361,6 +415,22 @@ describe('RecruitmentConversationControlService.sendHumanMessage', () => {
       expect.objectContaining({
         action: 'CONVERSATION_HR_MESSAGE',
         context: { messageId: 501, outboxId: 601, length: TEXT.length },
+      }),
+    );
+    // Chỉ tin AI 600 bị thu hồi, và trước khi tạo tin HR — tin HR 601 không bị đụng.
+    expect(
+      db.ran(/UPDATE "recruitment_channel_outbox"/).map((c) => c.params),
+    ).toEqual([[600, 'CONTROL_HUMAN_TAKEOVER']]);
+    expect(
+      db.calls.findIndex((c) => /FOR UPDATE OF o/.test(c.sql)),
+    ).toBeLessThan(
+      db.calls.findIndex((c) => /INSERT INTO "recruitment_messages"/.test(c.sql)),
+    );
+    expect(audit.recordMandatory).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'OUTBOX_APPROVAL_REVOKE',
+        entityId: 600,
       }),
     );
   });

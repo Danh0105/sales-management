@@ -7,6 +7,7 @@ describe('NotificationService.getNotificationStats', () => {
       select: jest.fn(),
       addSelect: jest.fn(),
       where: jest.fn(),
+      andWhere: jest.fn(),
       groupBy: jest.fn(),
       addGroupBy: jest.fn(),
       getRawMany: jest.fn().mockResolvedValue([]),
@@ -15,6 +16,7 @@ describe('NotificationService.getNotificationStats', () => {
       'select',
       'addSelect',
       'where',
+      'andWhere',
       'groupBy',
       'addGroupBy',
     ]) {
@@ -23,7 +25,7 @@ describe('NotificationService.getNotificationStats', () => {
     const service = new NotificationService(
       { createQueryBuilder: jest.fn().mockReturnValue(qb) } as any,
       {} as any,
-      {} as any,
+      { findOne: jest.fn().mockResolvedValue(null) } as any,
       {} as any,
     );
 

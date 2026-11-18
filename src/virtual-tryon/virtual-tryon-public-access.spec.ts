@@ -89,6 +89,15 @@ describe('Thử đồ ảo — truy cập công khai bằng token', () => {
 
     expect(item.publicToken).toBeUndefined();
   });
+
+  it('người đã đăng nhập không thể xoá job của tài khoản khác', async () => {
+    const service = makeService({ createdBy: 7, publicToken: null });
+
+    await expect(
+      service.remove(1, { viewerId: 8, canViewAll: false }),
+    ).rejects.toThrow(NotFoundException);
+    expect((service as any).jobRepo.delete).not.toHaveBeenCalled();
+  });
 });
 
 describe('Thử đồ ảo — giới hạn theo IP', () => {

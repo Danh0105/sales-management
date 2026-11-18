@@ -4,16 +4,27 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Department } from '../department/department.entity';
 import { Employee } from '../employee/employee.entity';
+import { Province } from '../province/province.entity';
+import { Ward } from '../ward/ward.entity';
 import { RecruitmentAiAuthGuard } from './ai/recruitment-ai-auth.guard';
 import { RecruitmentAiIdempotencyInterceptor } from './ai/recruitment-ai-idempotency.interceptor';
 import { RecruitmentAiOwnershipService } from './ai/recruitment-ai-ownership.service';
 import { RecruitmentAiRateLimitGuard } from './ai/recruitment-ai-rate-limit.guard';
+import { RecruitmentAiRuntimeGuard } from './ai/recruitment-ai-runtime.guard';
+import { RecruitmentAiLimitsService } from './channels/recruitment-ai-limits.service';
+import { assertAiSafetyConfig } from './channels/recruitment-ai-safety.config';
+import { assertOutboundSafetyConfig } from './channels/recruitment-outbound-safety.config';
+import { RecruitmentRuntimeControlService } from './channels/recruitment-runtime-control.service';
 import { assertRecruitmentAiConfig } from './ai/recruitment-ai-subject';
 import { RecruitmentChannelEventQueue } from './channels/recruitment-channel-event.queue';
 import { RecruitmentChannelOutboxQueue } from './channels/recruitment-channel-outbox.queue';
 import { RecruitmentConversationControlService } from './channels/recruitment-conversation-control.service';
 import { RecruitmentHrAlertService } from './channels/recruitment-hr-alert.service';
+import { RecruitmentChannelEventOperationsService } from './channels/recruitment-channel-event-operations.service';
 import { RecruitmentOutboxOperationsService } from './channels/recruitment-outbox-operations.service';
+import { RecruitmentOutboxApprovalService } from './channels/recruitment-outbox-approval.service';
+import { RecruitmentHrConsoleService } from './channels/recruitment-hr-console.service';
+import { RecruitmentOutboxApprovalExpiryService } from './channels/recruitment-outbox-approval-expiry.service';
 import { assertRecruitmentWorkerConfig } from './channels/recruitment-channel-worker.config';
 import { RecruitmentChannelWorker } from './channels/recruitment-channel-worker.service';
 import { RecruitmentZaloWebhookController } from './channels/recruitment-zalo-webhook.controller';
@@ -48,6 +59,7 @@ import { RecruitmentChannelQuarantine } from './entities/recruitment-channel-qua
 import { RecruitmentConversation } from './entities/recruitment-conversation.entity';
 import { RecruitmentHandoff } from './entities/recruitment-handoff.entity';
 import { RecruitmentHrAlert } from './entities/recruitment-hr-alert.entity';
+import { RecruitmentRuntimeControl } from './entities/recruitment-runtime-control.entity';
 import { RecruitmentInterviewSlot } from './entities/recruitment-interview-slot.entity';
 import { RecruitmentInterview } from './entities/recruitment-interview.entity';
 import { RecruitmentJob } from './entities/recruitment-job.entity';
@@ -98,8 +110,11 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
       RecruitmentChannelQuarantine,
       RecruitmentZaloCredential,
       RecruitmentHrAlert,
+      RecruitmentRuntimeControl,
       Department,
       Employee,
+      Province,
+      Ward,
     ]),
   ],
   controllers: [
@@ -129,6 +144,9 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     { provide: INTERVIEW_SLOT_PROVIDER, useClass: DbInterviewSlotProvider },
     RecruitmentAiAuthGuard,
     RecruitmentAiRateLimitGuard,
+    RecruitmentAiRuntimeGuard,
+    RecruitmentRuntimeControlService,
+    RecruitmentAiLimitsService,
     RecruitmentAiIdempotencyInterceptor,
     RecruitmentAiOwnershipService,
     RecruitmentZaloWebhookService,
@@ -141,6 +159,10 @@ import { RecruitmentScreeningService } from './services/recruitment-screening.se
     RecruitmentHrAlertService,
     RecruitmentConversationControlService,
     RecruitmentOutboxOperationsService,
+    RecruitmentOutboxApprovalService,
+    RecruitmentOutboxApprovalExpiryService,
+    RecruitmentHrConsoleService,
+    RecruitmentChannelEventOperationsService,
   ],
 })
 export class RecruitmentModule implements OnModuleInit {
@@ -152,5 +174,7 @@ export class RecruitmentModule implements OnModuleInit {
     assertRecruitmentZaloConfig(get);
     assertRecruitmentWorkerConfig(get);
     assertZaloOutboundConfig(get);
+    assertAiSafetyConfig(get);
+    assertOutboundSafetyConfig(get);
   }
 }

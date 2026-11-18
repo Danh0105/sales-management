@@ -26,6 +26,7 @@ import {
   RequireIdempotencyKey,
 } from '../ai/recruitment-ai-idempotency.interceptor';
 import { RecruitmentAiRateLimitGuard } from '../ai/recruitment-ai-rate-limit.guard';
+import { RecruitmentAiRuntimeGuard } from '../ai/recruitment-ai-runtime.guard';
 import {
   AiDeletionRequestDto,
   AiFindOrCreateApplicationDto,
@@ -69,7 +70,11 @@ import { recruitmentValidationPipe } from './validation';
 @ApiBearerAuth()
 @ApiHeader({ name: 'Idempotency-Key', required: false })
 @Controller('recruitment/ai')
-@UseGuards(RecruitmentAiAuthGuard, RecruitmentAiRateLimitGuard)
+@UseGuards(
+  RecruitmentAiAuthGuard,
+  RecruitmentAiRuntimeGuard,
+  RecruitmentAiRateLimitGuard,
+)
 @UseInterceptors(RecruitmentAiIdempotencyInterceptor)
 @UsePipes(recruitmentValidationPipe())
 export class RecruitmentAiController {

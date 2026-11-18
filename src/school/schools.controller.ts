@@ -22,7 +22,10 @@ import { CreateSchoolDto } from './dto/create-school.dto';
 import { UpdateSchoolDto } from './dto/update-school.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ResolveGoogleMapsDto } from './dto/resolve-google-maps.dto';
+import { LA_PROVINCE_ID } from '../policy/policy-scope';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
+@UseGuards(JwtAuthGuard)
 @Controller('schools')
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class SchoolsController {
@@ -87,8 +90,11 @@ export class SchoolsController {
         return this.service.findByWard(+wardId);
     }
     @Get('by-employee/:employeeId')
-    findByEmployee(@Param('employeeId') employeeId: string) {
-        return this.service.findByEmployee(+employeeId);
+    findByEmployee(@Param('employeeId') employeeId: string, @Req() req: any) {
+        return this.service.findByEmployee(
+            +employeeId,
+            isRestrictedLongAnDirector(req.user?.roles) ? LA_PROVINCE_ID : undefined,
+        );
     }
     @Get('by-employee-name/:name')
     findByEmployeeName(@Param('name') name: string) {

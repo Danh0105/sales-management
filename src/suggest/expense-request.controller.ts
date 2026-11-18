@@ -24,7 +24,10 @@ import { extname } from 'path';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
-import { ExpenseRole } from './constants/expense-roles';
+import {
+    EXPENSE_REQUESTER_ROLES,
+    ExpenseRole,
+} from './constants/expense-roles';
 import { SuggestType } from './enums/suggest-type.enum';
 
 import { SuggestService, UploadedAttachment } from './suggest.service';
@@ -34,11 +37,16 @@ import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
 import { WithdrawExpenseDto } from './dto/expense/withdraw-expense.dto';
 import { SaleAdminReviewExpenseDto } from './dto/expense/sale-admin-review-expense.dto';
 import { ConfirmNoteDto } from './dto/expense/confirm-note.dto';
+import { CASHFLOW_READ_ROLES } from '../school-expenses/cashflow-roles';
 import { ConfirmCashReleasedDto } from './dto/expense/confirm-cash-released.dto';
 import { ConfirmNotSpentDto } from './dto/expense/confirm-not-spent.dto';
+import { ConfirmPartiallySpentDto } from './dto/expense/confirm-partially-spent.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
+import { CashflowItemsQueryDto, CashflowSheetQueryDto } from './dto/expense/cashflow-items-query.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
+import { ChainNoteDto, ChainRejectDto } from './dto/expense/accountant-chain.dto';
+import { PolicySupportQueryDto } from './dto/expense/policy-support-query.dto';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
 import { ReassignRepairDto } from './dto/expense/reassign-repair.dto';
@@ -91,7 +99,7 @@ export class ExpenseRequestController {
     // ================= SALES =================
 
     @Post()
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(singleUpload)
     create(
         @Body() dto: CreateExpenseRequestDto,
@@ -113,7 +121,7 @@ export class ExpenseRequestController {
      * `SuggestService.updateExpense`).
      */
     @Patch(':id')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(singleUpload)
     update(
         @Param('id', ParseIntPipe) id: number,
@@ -127,7 +135,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/cash-received')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     cashReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -137,7 +145,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/confirm-spent')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     @UseInterceptors(multiUpload)
     confirmSpent(
         @Param('id', ParseIntPipe) id: number,
@@ -153,8 +161,27 @@ export class ExpenseRequestController {
         );
     }
 
+    /** Chi tháng nhiều trường: chọn trường đã chi, phần dư hoàn quỹ. */
+    @Post(':id/confirm-partially-spent')
+    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @UseInterceptors(multiUpload)
+    confirmPartiallySpent(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmPartiallySpentDto,
+        @UploadedFiles() files: Express.Multer.File[],
+        @Req() req: any,
+    ) {
+        return this.service.confirmPartiallySpent(
+            id,
+            req.user,
+            dto.spentItemIds,
+            dto.reason,
+            toAttachments(files),
+        );
+    }
+
     @Post(':id/confirm-not-spent')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     confirmNotSpent(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNotSpentDto,
@@ -193,6 +220,39 @@ export class ExpenseRequestController {
         return this.service.approveExpense(id, req.user, dto);
     }
 
+    // ===== Quy trình Kế toán: Chi Ngoài / Chi Trường / Chi GV trường =====
+
+    /** Kế toán nhập xong số liệu bảng ở QL thu chi: chốt số tiền, gửi Kế toán trưởng. */
+    @Post(':id/submit-to-chief')
+    @Roles(ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT)
+    submitToChief(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.submitToChiefAccountant(id, req.user, dto.note);
+    }
+
+    @Post(':id/chief-approve')
+    @Roles(ExpenseRole.CHIEF_ACCOUNTANT)
+    chiefApprove(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.chiefApproveExpense(id, req.user, dto.note);
+    }
+
+    @Post(':id/chief-reject')
+    @Roles(ExpenseRole.CHIEF_ACCOUNTANT)
+    chiefReject(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ChainRejectDto,
+        @Req() req: any,
+    ) {
+        return this.service.chiefRejectExpense(id, req.user, dto.reason);
+    }
+
     @Post(':id/reject')
     @Roles(ExpenseRole.DIRECTOR, ExpenseRole.SALES_ADMIN, ExpenseRole.CHIEF_ACCOUNTANT)
     reject(
@@ -209,7 +269,7 @@ export class ExpenseRequestController {
      * riêng role DIRECTOR — xem `overrideRoles` trong expense-flow.state-machine.ts).
      */
     @Post(':id/withdraw')
-    @Roles(ExpenseRole.SALES, ExpenseRole.DIRECTOR)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR)
     withdraw(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: WithdrawExpenseDto,
@@ -268,7 +328,7 @@ export class ExpenseRequestController {
 
     /** Kinh doanh xác nhận đã nhận thiết bị (nhánh đề xuất thiết bị) */
     @Post(':id/equipment-received')
-    @Roles(ExpenseRole.SALES)
+    @Roles(...EXPENSE_REQUESTER_ROLES)
     equipmentReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -425,7 +485,18 @@ export class ExpenseRequestController {
             dto.note,
             toAttachments(files),
             dto.fundSource,
+            dto.cashAccount,
         );
+    }
+
+    @Post(':id/remainder-returned')
+    @Roles(ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT)
+    remainderReturned(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: ConfirmNoteDto,
+        @Req() req: any,
+    ) {
+        return this.service.confirmRemainderReturned(id, req.user, dto.note);
     }
 
     @Post(':id/fund-returned')
@@ -486,6 +557,48 @@ export class ExpenseRequestController {
         @Req() req: any,
     ) {
         return this.service.findAllExpenseGroupedByEmployee(filter, req.user);
+    }
+
+    /**
+     * Màn tạo đề xuất Chi Ngoài / Chi Trường / Chi GV trường: khoản còn phải chi
+     * ở các trường mình phụ trách (kèm khoản đã chi đủ / đang đề xuất để hiện
+     * trạng thái). Khai báo trước `:id`.
+     */
+    /**
+     * Hỗ trợ tiền mặt / thiết bị trong chính sách đã duyệt của trường — màn tạo
+     * Đề xuất chi Năm cho trường. Khai báo trước `:id`.
+     */
+    @Get('policy-support')
+    policySupport(@Query() query: PolicySupportQueryDto, @Req() req: any) {
+        return this.service.getPolicySupport(req.user, query);
+    }
+
+    /**
+     * Màn tạo Chi Ngoài / Chi Trường / Chi GV trường: toàn bộ số liệu Kế toán
+     * đã nhập ở bảng của trường trong kỳ. Khai báo trước `:id`.
+     */
+    @Get('cashflow-sheet')
+    cashflowSheet(@Query() query: CashflowSheetQueryDto, @Req() req: any) {
+        return this.service.getCashflowSheet(req.user, query);
+    }
+
+    @Get('cashflow-items')
+    @Roles(...EXPENSE_REQUESTER_ROLES)
+    cashflowItems(@Query() query: CashflowItemsQueryDto, @Req() req: any) {
+        return this.service.listCashflowItems(req.user, query);
+    }
+
+    /** Khoản của một đề xuất chi tháng với số hiện tại ở QL thu chi — cùng quyền xem đề xuất. */
+    @Get(':id/cashflow-items')
+    expenseCashflowItems(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+        return this.service.getExpenseCashflowItems(id, req.user);
+    }
+
+    /** Bảng Chi Ngoài chỉ đọc cho màn duyệt — cùng quyền đọc với Quản lý thu chi. */
+    @Get(':id/management-expense')
+    @Roles(...CASHFLOW_READ_ROLES)
+    managementExpense(@Param('id', ParseIntPipe) id: number) {
+        return this.service.getExpenseManagementView(id);
     }
 
     @Get(':id')

@@ -21,6 +21,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { AvatarUploadFilter } from '../teaching/avatar-upload.filter';
 import { EmployeeService } from './employee.service';
+import { EMPLOYEE_POSITIONS } from './employee-positions';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { CreateFaceDto } from './dto/create-face.dto';
@@ -37,6 +38,7 @@ import {
   EMPLOYEE_ADMIN_ROLES,
   isEmployeeAdmin,
 } from './employee-roles';
+import { isRestrictedLongAnDirector } from '../long-an-director/long-an-scope.service';
 
 /**
  * Toàn bộ controller nằm sau `JwtAuthGuard`. Trước đây phần lớn endpoint ở đây
@@ -49,6 +51,15 @@ import {
 @UseGuards(JwtAuthGuard, RolesGuard)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class EmployeeController {
+  /** Giám đốc Long An xem hồ sơ người khác: không kèm ngân hàng và dữ liệu nội bộ. */
+  private withoutPrivateFields(employee: any, id: number, req: Request) {
+    if (!employee || !isRestrictedLongAnDirector(req.user?.roles) || id === req.user?.id) {
+      return employee;
+    }
+    const { id: employeeId, name, email, phone, roles } = employee;
+    return { id: employeeId, name, email, phone, roles };
+  }
+
   constructor(
     private readonly service: EmployeeService,
     private readonly employeeRegionService: EmployeeRegionService,
@@ -81,9 +92,15 @@ export class EmployeeController {
     return this.service.findSalesEmployees(req.user!);
   }
 
+  @Get('positions')
+  @Roles(...EMPLOYEE_ADMIN_ROLES, 'troly_gd')
+  positions() {
+    return EMPLOYEE_POSITIONS;
+  }
+
   @Get('/getbyid/:id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.service.findOne(id);
+  async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
+    return this.withoutPrivateFields(await this.service.findOne(id), id, req);
   }
 
   @Roles(...EMPLOYEE_ADMIN_ROLES)
@@ -153,8 +170,8 @@ export class EmployeeController {
   }
 
   @Get(':id')
-  async getEmployee(@Param('id', ParseIntPipe) id: number) {
-    return this.service.findById(id);
+  async getEmployee(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
+    return this.withoutPrivateFields(await this.service.findById(id), id, req);
   }
 
   /**

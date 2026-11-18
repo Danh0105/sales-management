@@ -40,6 +40,7 @@ import {
     CreateTeachingSessionDto,
     DeclineTeachingSessionDto,
     QueryAttendanceSummaryDto,
+    QueryMyAttendanceSummaryDto,
     QueryTravelReviewDto,
     QueryTeachingSessionsDto,
     NotifyTeachingScheduleDto,
@@ -138,6 +139,19 @@ export class TeachingSessionController {
     @Get('me')
     findMine(@Query() query: QueryTeachingSessionsDto, @Req() req: Request) {
         return this.service.findMine(req.user!.id, query);
+    }
+
+    /**
+     * Tổng hợp chấm công + quãng đường của chính giáo viên đang đăng nhập.
+     * teacherId lấy từ token.
+     */
+    @Roles(...TEACHER_ROLES)
+    @Get('me/attendance-summary')
+    myAttendanceSummary(
+        @Query() query: QueryMyAttendanceSummaryDto,
+        @Req() req: Request,
+    ) {
+        return this.service.myAttendanceSummary(req.user!.id, query);
     }
 
     @Roles(...TEACHER_ROLES)
@@ -325,6 +339,8 @@ export class TeachingSessionController {
             lessonName: { type: 'string', minLength: 1, maxLength: 255 },
             lessonEvaluation: { type: 'string', minLength: 1, maxLength: 2000 },
             actualStudentCount: { type: 'integer', minimum: 0 },
+            totalStudentCount: { type: 'integer', minimum: 0 },
+            absentStudentNames: { type: 'string', description: 'JSON array họ tên học sinh vắng', example: '["Nguyễn Văn A"]' },
             images: { type: 'array', maxItems: 10, items: { type: 'string', format: 'binary' } },
         },
     } })

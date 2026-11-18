@@ -229,6 +229,35 @@ export class CheckoutTeachingSessionDto {
 }
 
 /**
+ * Danh sách chuỗi từ multipart: chuỗi JSON ('["A","B"]'), mảng (key gửi lặp lại)
+ * hoặc một chuỗi đơn. Trim từng phần tử, bỏ phần tử rỗng. JSON hỏng hoặc không
+ * phải mảng thì trả nguyên giá trị để class-validator báo 400 (không ném lỗi ở
+ * đây, kẻo thành 500).
+ */
+const multipartStringList = ({ value }: { value: unknown }) => {
+  if (value === undefined || value === null) return undefined;
+  let list: unknown = value;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return undefined;
+    // Tên học sinh không bắt đầu bằng [ hay { — coi là JSON.
+    if (text.startsWith('[') || text.startsWith('{')) {
+      try {
+        list = JSON.parse(text);
+      } catch {
+        return value;
+      }
+    } else {
+      list = [text];
+    }
+  }
+  if (!Array.isArray(list)) return list;
+  return list
+    .map((item) => (typeof item === 'string' ? item.trim() : item))
+    .filter((item) => item !== '');
+};
+
+/**
  * Nộp nội dung bài dạy không cần GPS — cho tiết giữa/tiết đầu của một block
  * nhiều tiết liên tiếp cùng trường (tiết đó không phải check-in/check-out
  * riêng, nhưng vẫn phải ghi nội dung bài dạy như mọi tiết khác).
@@ -250,6 +279,26 @@ export class SubmitLessonDto {
   @IsInt()
   @Min(0)
   actualStudentCount!: number;
+
+  /**
+   * Tổng sĩ số lớp (Mini App mới). Có thì server tự tính sĩ số thực tế = tổng −
+   * số học sinh vắng; bản Mini App cũ không gửi trường này.
+   */
+  @IsOptional()
+  @Transform(optionalMultipartNumber)
+  @IsInt()
+  @Min(0)
+  @Max(1000)
+  totalStudentCount?: number;
+
+  /** Họ tên học sinh vắng — chuỗi JSON mảng trong multipart, có thể là "[]". */
+  @IsOptional()
+  @Transform(multipartStringList)
+  @IsArray()
+  @ArrayMaxSize(1000)
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  absentStudentNames?: string[];
 }
 
 export class ApplyTeachingSessionDto {
@@ -526,6 +575,15 @@ export class QueryTravelReviewDto {
   @IsInt()
   @Min(1)
   teacherId?: number;
+}
+
+/** Tổng hợp chấm công + quãng đường của chính giáo viên đang đăng nhập. */
+export class QueryMyAttendanceSummaryDto {
+  @IsCalendarDate()
+  fromDate!: string;
+
+  @IsCalendarDate()
+  toDate!: string;
 }
 
 export class QueryAttendanceSummaryDto {

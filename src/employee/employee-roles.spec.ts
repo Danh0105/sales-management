@@ -11,6 +11,7 @@ describe('Quyền trên /employees', () => {
     expect(isEmployeeAdmin({ id: 5, roles: [ACADEMIC_ROLE] })).toBe(false);
     expect(isEmployeeAdmin({ id: 9, roles: [HR_ROLE] })).toBe(true);
     expect(isEmployeeAdmin({ id: 1, roles: ['director'] })).toBe(true);
+    expect(isEmployeeAdmin({ id: 2, roles: ['ketoan_truong'] })).toBe(true);
   });
 
   it('chỉ thao tác được trên chính mình', () => {

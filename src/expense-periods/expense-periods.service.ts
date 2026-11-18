@@ -14,6 +14,8 @@ import { RevenueItem } from '../revenue-item/revenue-item.entity';
 import { SchoolExpenseItem } from '../school-expense-item/school-expense-item.entity';
 import { ManagementExpenseItem } from '../management-expense-item/management-expense-item.entity';
 import { ManagementExpenseOtherCost } from '../management-expense-item/management-expense-other-cost.entity';
+import { loadSuggestPayments } from '../management-expense-item/suggest-payments';
+import { SchoolTeacherExpenseItem } from '../school-teacher-expense/school-teacher-expense-item.entity';
 
 @Injectable()
 export class ExpensePeriodsService {
@@ -346,17 +348,36 @@ export class ExpensePeriodsService {
                     );
                 }
 
+                // Như Chi Ngoài: Đã chi do Đề xuất Chi Trường ghi vào thuộc kỳ gốc.
+                const schoolSuggestPaid = await loadSuggestPayments(
+                    manager,
+                    (sourceExpense.schoolExpenseItems || []).map((item) => item.id),
+                    'SCHOOL_EXPENSE',
+                );
                 for (const item of sourceExpense.schoolExpenseItems || []) {
                     const { id: _itemId, schoolExpense: _se, ...rest } = item;
+                    const fromSuggest = schoolSuggestPaid.get(item.id)?.total ?? 0;
                     await manager.save(
                         manager.create(SchoolExpenseItem, {
                             ...rest,
+                            ...(fromSuggest > 0
+                                ? {
+                                      paidAmount: Number(rest.paidAmount ?? 0) - fromSuggest,
+                                      remaining: Number(rest.remaining ?? 0) + fromSuggest,
+                                  }
+                                : {}),
                             schoolExpense: newSchoolExpense,
                             subject: item.subject,
                         }),
                     );
                 }
 
+                // Đã chi do đề xuất chi ghi vào thuộc kỳ gốc (tiền đã xuất cho kỳ
+                // đó) — bản sao không mang theo, kẻo sổ thu chi tính thêm lần nữa.
+                const suggestPaid = await loadSuggestPayments(
+                    manager,
+                    (sourceExpense.managementExpenseItems || []).map((item) => item.id),
+                );
                 for (const item of sourceExpense.managementExpenseItems || []) {
                     const {
                         id: _itemId,
@@ -364,10 +385,17 @@ export class ExpensePeriodsService {
                         otherCosts,
                         ...rest
                     } = item;
+                    const fromSuggest = suggestPaid.get(item.id)?.total ?? 0;
 
                     const newItem = await manager.save(
                         manager.create(ManagementExpenseItem, {
                             ...rest,
+                            ...(fromSuggest > 0
+                                ? {
+                                      paidAmount: Number(rest.paidAmount ?? 0) - fromSuggest,
+                                      remaining: Number(rest.remaining ?? 0) + fromSuggest,
+                                  }
+                                : {}),
                             schoolExpense: newSchoolExpense,
                             subject: item.subject,
                         }),
@@ -388,6 +416,28 @@ export class ExpensePeriodsService {
                             }),
                         );
                     }
+                }
+
+                // Giáo viên trường: chép số liệu, bỏ Ngày chi / Nguồn chi (lương kỳ
+                // gốc đã trả — chép theo thì sổ thu chi tính hai lần) và dấu duyệt.
+                const teacherRows = await manager.find(SchoolTeacherExpenseItem, {
+                    where: { schoolExpenseId: _oldId },
+                });
+                for (const row of teacherRows) {
+                    const {
+                        id: _teacherId,
+                        schoolExpense: _tse,
+                        subject: _tsub,
+                        createdAt: _created,
+                        updatedAt: _updated,
+                        ...teacherRest
+                    } = row;
+                    await manager.insert(SchoolTeacherExpenseItem, {
+                        ...teacherRest,
+                        schoolExpenseId: newSchoolExpense.id,
+                        expenseDate: null,
+                        cashAccount: null,
+                    });
                 }
             }
 

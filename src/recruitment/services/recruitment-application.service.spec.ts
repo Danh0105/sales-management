@@ -53,7 +53,7 @@ function setup() {
     reserve: jest.fn(),
     listAvailable: jest.fn(),
   };
-  const audit = { record: jest.fn() } as any;
+  const audit = { record: jest.fn(), recordMandatory: jest.fn() } as any;
 
   candidateRepo.findOne.mockResolvedValue({
     id: 7,
@@ -153,14 +153,12 @@ describe('RecruitmentApplicationService', () => {
 
   it('AI find-or-create: race 23505 → trả hồ sơ request kia vừa tạo', async () => {
     const { service, applicationRepo } = setup();
-    applicationRepo.findOne
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: 44,
-        candidateId: 7,
-        jobId: 3,
-        status: ApplicationStatus.NEW,
-      });
+    applicationRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: 44,
+      candidateId: 7,
+      jobId: 3,
+      status: ApplicationStatus.NEW,
+    });
     applicationRepo.save.mockRejectedValueOnce({ code: '23505' });
 
     const result = await service.aiFindOrCreate({ candidateId: 7, jobId: 3 });
@@ -181,6 +179,23 @@ describe('RecruitmentApplicationService', () => {
     });
   });
 
+  it('vị trí tắt ứng tuyển không CV → backend yêu cầu bổ sung CV', async () => {
+    const { service, jobRepo, applicationRepo } = setup();
+    jobRepo.findOne.mockResolvedValue({
+      id: 3,
+      status: RecruitmentJobStatus.ACTIVE,
+      allowApplicationsWithoutCv: false,
+    });
+    applicationRepo.findOne.mockResolvedValueOnce(null);
+
+    await expect(
+      service.aiFindOrCreate({ candidateId: 7, jobId: 3 }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'CV_REQUIRED' }),
+    });
+    expect(applicationRepo.save).not.toHaveBeenCalled();
+  });
+
   it('HR chuyển trạng thái hợp lệ (INTERVIEW → OFFER), ghi người duyệt + audit', async () => {
     const { service, applicationRepo, audit } = setup();
     const app = {
@@ -199,7 +214,8 @@ describe('RecruitmentApplicationService', () => {
         reviewedBy: 2,
       }),
     );
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.recordMandatory).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         action: 'APPLICATION_STATUS_CHANGE',
         context: expect.objectContaining({ from: 'INTERVIEW', to: 'OFFER' }),

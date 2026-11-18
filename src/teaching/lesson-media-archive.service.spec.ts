@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from 'fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { LessonMediaArchiveService } from './lesson-media-archive.service';
@@ -28,14 +28,116 @@ describe('LessonMediaArchiveService', () => {
   it('ưu tiên bản local', async () => {
     await writeFile(join(local, NAME), 'x');
     await writeFile(join(archive, NAME), 'y');
-    const s = make({ LESSON_IMAGE_UPLOAD_DIR: local, LESSON_IMAGE_ARCHIVE_DIR: archive });
-    expect(await s.locate(NAME)).toEqual({ path: join(local, NAME), tier: 'local' });
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+    });
+    expect(await s.locate(NAME)).toEqual({
+      path: join(local, NAME),
+      tier: 'local',
+    });
   });
 
   it('rơi xuống NAS khi local không có', async () => {
     await writeFile(join(archive, NAME), 'y');
-    const s = make({ LESSON_IMAGE_UPLOAD_DIR: local, LESSON_IMAGE_ARCHIVE_DIR: archive });
-    expect(await s.locate(NAME)).toEqual({ path: join(archive, NAME), tier: 'archive' });
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+    });
+    expect(await s.locate(NAME)).toEqual({
+      path: join(archive, NAME),
+      tier: 'archive',
+    });
+  });
+
+  it('ghi bản gốc và thumbnail thẳng lên NAS, không ghi local', async () => {
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+    });
+
+    await s.store(NAME, Buffer.from('original'), Buffer.from('thumbnail'));
+
+    expect(await readFile(join(archive, NAME), 'utf8')).toBe('original');
+    expect(await readFile(join(archive, 'thumb', NAME), 'utf8')).toBe(
+      'thumbnail',
+    );
+    expect(await readdir(local)).toEqual(['thumb']);
+
+    await s.removeArchived(NAME);
+    expect(await readdir(archive)).toEqual(['thumb']);
+    expect(await readdir(join(archive, 'thumb'))).toEqual([]);
+  });
+
+  it('từ chối ghi khi chưa cấu hình NAS', async () => {
+    const s = make({ LESSON_IMAGE_UPLOAD_DIR: local });
+    await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow(
+      'Chưa cấu hình kho NAS',
+    );
+    expect(await readdir(local)).toEqual(['thumb']);
+  });
+
+  it('fail closed khi path cấu hình chỉ là ổ local, không phải network mount', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const s = make({
+        LESSON_IMAGE_UPLOAD_DIR: local,
+        LESSON_IMAGE_ARCHIVE_DIR: archive,
+      });
+      await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow(
+        'không nằm trên NAS',
+      );
+      expect(await readdir(archive)).toEqual([]);
+      expect(await readdir(local)).toEqual(['thumb']);
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it('thư mục NAS chưa tồn tại vẫn do mountinfo quyết, không lộ lỗi ENOENT', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const s = make({
+        LESSON_IMAGE_UPLOAD_DIR: local,
+        LESSON_IMAGE_ARCHIVE_DIR: join(archive, 'chua-co'),
+      });
+      await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow(
+        'không nằm trên NAS',
+      );
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it('ghi file lớn được nới hạn theo dung lượng, không ngắt breaker', async () => {
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+      LESSON_IMAGE_ARCHIVE_TIMEOUT_MS: '20',
+    });
+    // 1 MB ở 4 MB/s được thêm ~250ms; ghi mất 100ms > hạn thăm dò 20ms.
+    jest
+      .spyOn(s as never, 'writeToArchive')
+      .mockImplementation(() => new Promise((done) => setTimeout(done, 100)));
+
+    await s.store(NAME, Buffer.alloc(1024 * 1024));
+    expect(s.archiveAvailable()).toBe(true);
+  });
+
+  it('ghi quá cả hạn đã nới → ngắt breaker', async () => {
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+      LESSON_IMAGE_ARCHIVE_TIMEOUT_MS: '20',
+    });
+    jest
+      .spyOn(s as never, 'writeToArchive')
+      .mockImplementation(() => new Promise(() => {}));
+
+    await expect(s.store(NAME, Buffer.from('x'))).rejects.toThrow('quá');
+    expect(s.archiveAvailable()).toBe(false);
   });
 
   it('không cấu hình NAS thì chỉ tra local', async () => {
@@ -45,7 +147,10 @@ describe('LessonMediaArchiveService', () => {
   });
 
   it('chặn path traversal', async () => {
-    const s = make({ LESSON_IMAGE_UPLOAD_DIR: local, LESSON_IMAGE_ARCHIVE_DIR: archive });
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+    });
     expect(await s.locate('../../etc/passwd')).toBeNull();
     expect(await s.locate('a.webp')).toBeNull();
     expect(await s.locateThumbnail('../x.webp')).toBeNull();
@@ -75,12 +180,20 @@ describe('LessonMediaArchiveService', () => {
     expect(hang.mock.calls.length).toBe(calls + 1);
   });
 
-  it('thumbnail luôn tra ở local', async () => {
+  it('thumbnail ưu tiên local và rơi xuống NAS', async () => {
     await writeFile(join(local, 'thumb', NAME), 't');
-    const s = make({ LESSON_IMAGE_UPLOAD_DIR: local, LESSON_IMAGE_ARCHIVE_DIR: archive });
+    const s = make({
+      LESSON_IMAGE_UPLOAD_DIR: local,
+      LESSON_IMAGE_ARCHIVE_DIR: archive,
+    });
     expect(await s.locateThumbnail(NAME)).toBe(join(local, 'thumb', NAME));
     expect(await s.locateThumbnail(NAME.replace('.webp', '.mp4'))).toBe(
       join(local, 'thumb', NAME),
     );
+
+    await rm(join(local, 'thumb', NAME));
+    await mkdir(join(archive, 'thumb'));
+    await writeFile(join(archive, 'thumb', NAME), 'nas-thumb');
+    expect(await s.locateThumbnail(NAME)).toBe(join(archive, 'thumb', NAME));
   });
 });

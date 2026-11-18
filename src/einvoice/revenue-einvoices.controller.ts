@@ -13,27 +13,21 @@ import { RolesGuard } from '../auth/role-guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthUser } from '../type/auth-user.type';
 import { RevenueEInvoicesService } from './revenue-einvoices.service';
+import {
+  CASHFLOW_READ_ROLES,
+  CASHFLOW_WRITE_ROLES,
+} from '../school-expenses/cashflow-roles';
 
 type RequestWithUser = Request & { user: AuthUser };
 
-/** Cùng nhóm được ghi dữ liệu thu chi (xem RealExpensesController). */
-const WRITE_ROLES = [
-  'accountant',
-  'ketoan_congno',
-  'ketoan_truong',
-  'troly_gd',
-  'director',
-];
-const SALESADMIN_ROLES = ['saleadmin', 'salesadmin', 'salesadmin_la'];
-
 @Controller('school-expenses/:id/subjects/:subjectId/einvoices')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(...WRITE_ROLES)
+@Roles(...CASHFLOW_WRITE_ROLES)
 export class RevenueEInvoicesController {
   constructor(private readonly service: RevenueEInvoicesService) {}
 
   @Get()
-  @Roles(...WRITE_ROLES, ...SALESADMIN_ROLES)
+  @Roles(...CASHFLOW_READ_ROLES)
   list(
     @Param('id', ParseIntPipe) id: number,
     @Param('subjectId', ParseIntPipe) subjectId: number,

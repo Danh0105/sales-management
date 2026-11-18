@@ -24,6 +24,7 @@ import { Roles } from '../auth/roles.decorator';
 /** Vai trò được quản lý danh mục môn học. */
 const CATALOG_ADMIN_ROLES = ['saleadmin', 'salesadmin_la'];
 
+@UseGuards(JwtAuthGuard)
 @Controller('subject-catalogs')
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class SubjectCatalogsController {

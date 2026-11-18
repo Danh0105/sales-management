@@ -1,5 +1,7 @@
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { FaceController } from './face.controller';
+import { RolesGuard } from './role-guard';
+import { EMPLOYEE_ADMIN_ROLES } from '../employee/employee-roles';
 
 /**
  * Chốt **ai gọi được route nào** của FaceID.
@@ -35,18 +37,13 @@ describe('FaceController — phân quyền route', () => {
     ]);
   });
 
-  /**
-   * ⚠️ LỖ HỔNG ĐÃ BIẾT, TEST NÀY ĐANG CHỐT HIỆN TRẠNG CHỨ KHÔNG PHẢI CHỐT ĐÚNG.
-   *
-   * `registerByFace` **tạo mới một bản ghi Employee** với `roles: ['employee']`
-   * rồi trả về JWT. Không có guard nghĩa là bất kỳ ai gọi được API đều tự tạo
-   * được tài khoản thật và đăng nhập.
-   *
-   * Khi vá: thêm `@UseGuards(JwtAuthGuard, RolesGuard)` + `@Roles(...)` cho
-   * route, rồi đổi kỳ vọng dưới đây thành `[JwtAuthGuard.name, RolesGuard.name]`.
-   * Test đỏ ở đây là dấu hiệu TỐT — nghĩa là lỗ hổng vừa được bịt.
-   */
-  it('POST /face/register hiện KHÔNG có guard (lỗ hổng, chưa vá)', () => {
-    expect(guardsOf(FaceController.prototype.registerByFace)).toEqual([]);
+  it('POST /face/register bắt buộc đăng nhập và quyền quản trị nhân viên', () => {
+    expect(guardsOf(FaceController.prototype.registerByFace)).toEqual([
+      JwtAuthGuard.name,
+      RolesGuard.name,
+    ]);
+    expect(
+      Reflect.getMetadata('roles', FaceController.prototype.registerByFace),
+    ).toEqual(EMPLOYEE_ADMIN_ROLES);
   });
 });

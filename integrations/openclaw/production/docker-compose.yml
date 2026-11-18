@@ -1,0 +1,57 @@
+# Gateway OpenClaw PRODUCTION cho AI Recruiter (G8 / bước A3).
+#
+#   docker compose -f integrations/openclaw/production/docker-compose.yml \
+#     --env-file /opt/kido-recruiter-prod/.env <lệnh>
+#
+# Chỉ có gateway (+ CLI một lần). Không có DB/API: plugin gọi API production 3010 qua cổng
+# bridge 172.31.250.1. Đường này chỉ mở khi người vận hành áp 2 luật ufw trên interface
+# `br-kido-prod` (cho phép đúng 172.31.250.1:3010, chặn mọi cổng host khác) — xem README.md.
+# Chưa áp ⇒ default deny của ufw chặn 3010 ⇒ fail-closed.
+#
+# Khác staging:
+#   - bridge riêng tên cố định `br-kido-prod`, subnet 172.31.250.0/29 (không trùng dải Docker /
+#     Tailscale đang dùng); KHÔNG network_mode: host (gateway sẽ thấy mọi dịch vụ loopback);
+#   - Control UI chỉ ở 127.0.0.1:18790 (staging giữ 18789), không publish ra interface khác;
+#   - KHÔNG có RECRUITMENT_AI_API_KEY (key chung, không subject): phiên kênh Zalo dùng key kênh +
+#     subject, phiên khác bị plugin từ chối;
+#   - plugin/skills/workspace là bản chụp của commit phát hành trong /opt/kido-recruiter-prod/build,
+#     không mount thẳng từ worktree git.
+name: kido-recruiter-prod
+
+services:
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    restart: unless-stopped
+    environment: &openclaw-env
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY (project OpenAI production riêng, có budget)}
+      RECRUITMENT_CHANNEL_API_KEY: ${RECRUITMENT_CHANNEL_API_KEY:?set RECRUITMENT_CHANNEL_API_KEY}
+      TZ: Asia/Ho_Chi_Minh
+    volumes: &openclaw-volumes
+      - ${KIDO_RECRUITER_PROD_DIR:-/opt/kido-recruiter-prod}/openclaw-state:/home/node/.openclaw
+      - ${KIDO_RECRUITER_PROD_DIR:-/opt/kido-recruiter-prod}/build/plugin-build:/opt/kido/plugins/kido-recruitment:ro
+      - ${KIDO_RECRUITER_PROD_DIR:-/opt/kido-recruiter-prod}/build/skills:/opt/kido/skills:ro
+      - ${KIDO_RECRUITER_PROD_DIR:-/opt/kido-recruiter-prod}/build/workspace:/opt/kido/workspace:ro
+    ports:
+      - "127.0.0.1:18790:18789"
+    networks: [prod_net]
+
+  # CLI một lần: docker compose ... --profile cli run --rm openclaw-cli <lệnh>
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw@sha256:d0ded1dd76939b2bf4d67ef2d13247b8b160aa5666331d4a0b0e58811182cbb8}
+    profiles: [cli]
+    entrypoint: ["openclaw"]
+    environment: *openclaw-env
+    volumes: *openclaw-volumes
+    networks: [prod_net]
+
+networks:
+  # Cần ra Internet (OpenAI) nên không `internal`. Tên interface cố định để luật ufw bám theo.
+  prod_net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-kido-prod
+    ipam:
+      config:
+        - subnet: 172.31.250.0/29
+          gateway: 172.31.250.1

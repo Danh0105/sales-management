@@ -8,6 +8,9 @@ import {
 
 import { FaceService } from './face.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { RolesGuard } from './role-guard';
+import { Roles } from './roles.decorator';
+import { EMPLOYEE_ADMIN_ROLES } from '../employee/employee-roles';
 
 @Controller('face')
 export class FaceController {
@@ -37,6 +40,8 @@ export class FaceController {
     // =====================================================
     // 📌 REGISTER FACE
     // =====================================================
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(...EMPLOYEE_ADMIN_ROLES)
     @Post('register')
     async registerByFace(
 

@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 
+import { ActivityLog } from '../activity-log/activity-log.entity';
 import { ActivityLogService } from '../activity-log/activity-log.service';
 import { capPayload } from '../activity-log/activity-log.util';
 import { RecruitmentActorType } from './recruitment.enums';
@@ -24,7 +26,8 @@ export type RecruitmentAuditEntity =
   | 'channel-events'
   | 'channel-outbox'
   | 'channel-quarantine'
-  | 'hr-alerts';
+  | 'hr-alerts'
+  | 'runtime-controls';
 
 export type RecruitmentAuditAction =
   | 'JOB_CREATE'
@@ -37,6 +40,7 @@ export type RecruitmentAuditAction =
   | 'CANDIDATE_DELETION_REQUEST'
   | 'APPLICATION_CREATE'
   | 'APPLICATION_STATUS_CHANGE'
+  | 'APPLICATION_ACCOUNT_CREATE'
   | 'APPLICATION_SCREEN'
   | 'APPLICATION_RESUME_AI'
   | 'HANDOFF_CREATE'
@@ -51,12 +55,16 @@ export type RecruitmentAuditAction =
   | 'AI_SUBJECT_DENIED'
   /** Tin ứng viên không xử lý được (lỗi cuối hoặc quá hạn giữ) — HR cần xem. */
   | 'CHANNEL_EVENT_DEAD_LETTER'
+  /** P3-7.3 R1 — người vận hành loại event inbox khỏi xử lý (vd. tin thử); không ghi nội dung. */
+  | 'CHANNEL_EVENT_EXCLUDE'
   /** Tin trả lời không gửi được ra Zalo — HR cần xem. */
   | 'CHANNEL_OUTBOX_DEAD_LETTER'
   /** Tin trả lời có thể đã tới Zalo nhưng không rõ — cần đối soát, không tự gửi lại. */
   | 'CHANNEL_OUTBOX_UNKNOWN'
   /** Tin AI bị chặn trước khi gửi vì HR đã đổi điều khiển hội thoại (P3-6.5). */
   | 'CHANNEL_OUTBOX_SUPPRESSED'
+  /** Tin HR chờ gửi quá TTL → không gửi nữa (DEAD_LETTER), HR được cảnh báo. */
+  | 'CHANNEL_OUTBOX_HR_MESSAGE_EXPIRED'
   /** P3-7.2A — xác minh hồi tố request webhook đã cách ly (chỉ số lượng). */
   | 'CHANNEL_QUARANTINE_VERIFY'
   /** P3-6 — HR điều khiển hội thoại kênh. */
@@ -68,7 +76,29 @@ export type RecruitmentAuditAction =
   | 'OUTBOX_MARK_SENT'
   | 'OUTBOX_RETRY'
   | 'OUTBOX_DEAD_LETTER'
-  | 'HR_ALERT_ACKNOWLEDGE';
+  /** HR huỷ tin HR đang chờ gửi (PENDING/RETRY) — không bao giờ gửi lại. */
+  | 'OUTBOX_HR_CANCEL'
+  | 'OUTBOX_APPROVE'
+  | 'OUTBOX_EDIT_AND_APPROVE'
+  | 'OUTBOX_REJECT'
+  | 'OUTBOX_APPROVAL_REVOKE'
+  | 'OUTBOX_APPROVAL_EXPIRE'
+  | 'HR_ALERT_ACKNOWLEDGE'
+  /** P3-7.3 / G8 — dừng khẩn / mở lại AI, worker, outbound (người vận hành hoặc hệ thống tự dừng). */
+  | 'RUNTIME_STOP'
+  | 'RUNTIME_RESUME';
+
+export interface RecruitmentAuditParams {
+  actor: RecruitmentActor;
+  action: RecruitmentAuditAction;
+  entity: RecruitmentAuditEntity;
+  entityId: number;
+  before?: unknown;
+  after?: unknown;
+  context?: Record<string, unknown>;
+  /** `false` cho thao tác bị từ chối (vd. `AI_SUBJECT_DENIED`). */
+  success?: boolean;
+}
 
 /**
  * Ghi nhật ký nghiệp vụ Tuyển dụng vào `activity_log` có sẵn — không dựng
@@ -88,21 +118,27 @@ export type RecruitmentAuditAction =
 export class RecruitmentAuditService {
   constructor(private readonly activityLog: ActivityLogService) {}
 
-  async record(params: {
-    actor: RecruitmentActor;
-    action: RecruitmentAuditAction;
-    entity: RecruitmentAuditEntity;
-    entityId: number;
-    before?: unknown;
-    after?: unknown;
-    context?: Record<string, unknown>;
-    /** `false` cho thao tác bị từ chối (vd. `AI_SUBJECT_DENIED`). */
-    success?: boolean;
-  }): Promise<void> {
+  async record(params: RecruitmentAuditParams): Promise<void> {
+    await this.activityLog.record(this.entry(params));
+  }
+
+  /**
+   * Audit bắt buộc cho Recruitment Operations. Khác `record()` best-effort dùng
+   * chung toàn hệ thống, lời gọi này INSERT thẳng qua EntityManager của transaction
+   * nghiệp vụ và **không nuốt lỗi**. Vì vậy state + audit cùng commit hoặc cùng rollback.
+   */
+  async recordMandatory(
+    em: EntityManager,
+    params: RecruitmentAuditParams,
+  ): Promise<void> {
+    await em.insert(ActivityLog, this.entry(params));
+  }
+
+  private entry(params: RecruitmentAuditParams): Partial<ActivityLog> {
     const { actor, action, entity, entityId } = params;
     const resource = `recruitment-${entity}`;
 
-    await this.activityLog.record({
+    return {
       actorId: actorIdOf(actor),
       actorName: actor.name,
       actorRoles: actor.roles,
@@ -114,14 +150,15 @@ export class RecruitmentAuditService {
         actorType: actor.type,
         entity,
         entityId,
+        result: params.success === false ? 'REJECTED' : 'SUCCESS',
         ...(params.context ?? {}),
       },
       beforeData: capPayload(toPlain(params.before)) as unknown,
       afterData: capPayload(toPlain(params.after)) as unknown,
       changes: capPayload(diff(params.before, params.after)) as unknown,
-      statusCode: null,
+      statusCode: params.success === false ? null : 200,
       success: params.success ?? true,
-    });
+    };
   }
 }
 

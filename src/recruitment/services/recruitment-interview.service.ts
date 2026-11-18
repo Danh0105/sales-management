@@ -141,67 +141,81 @@ export class RecruitmentInterviewService {
     dto: UpdateInterviewSlotDto,
     actor: RecruitmentActor,
   ) {
-    const slot = await this.slotRepo.findOne({ where: { id } });
-    if (!slot) {
-      throw new NotFoundException({
-        code: 'SLOT_NOT_FOUND',
-        message: `Không tìm thấy slot #${id}`,
+    return this.dataSource.transaction(async (em) => {
+      const repo = em.getRepository(RecruitmentInterviewSlot);
+      const slot = await repo.findOne({
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
       });
-    }
-    const before = { ...slot };
-
-    const timeChanged = dto.startAt !== undefined || dto.endAt !== undefined;
-    if (timeChanged) {
-      if (slot.bookedCount > 0) {
-        throw new ConflictException({
-          code: 'SLOT_HAS_BOOKINGS',
-          message: 'Slot đã có lịch đặt — không đổi giờ được, hãy tạo slot mới',
+      if (!slot) {
+        throw new NotFoundException({
+          code: 'SLOT_NOT_FOUND',
+          message: `Không tìm thấy slot #${id}`,
         });
       }
-      const { start, end } = this.parseRange(
-        dto.startAt ?? slot.startAt.toISOString(),
-        dto.endAt ?? slot.endAt.toISOString(),
-      );
-      slot.startAt = start;
-      slot.endAt = end;
-    }
-    if (dto.capacity !== undefined && dto.capacity < slot.bookedCount) {
-      throw new BadRequestException({
-        code: 'CAPACITY_BELOW_BOOKED',
-        message: `Slot đã có ${slot.bookedCount} lịch đặt`,
-      });
-    }
-    if (dto.jobId !== undefined && dto.jobId !== slot.jobId) {
-      if (slot.bookedCount > 0) {
-        throw new ConflictException({
-          code: 'SLOT_HAS_BOOKINGS',
-          message: 'Slot đã có lịch đặt — không đổi vị trí được',
+      const before = { ...slot };
+
+      const timeChanged = dto.startAt !== undefined || dto.endAt !== undefined;
+      if (timeChanged) {
+        if (slot.bookedCount > 0) {
+          throw new ConflictException({
+            code: 'SLOT_HAS_BOOKINGS',
+            message:
+              'Slot đã có lịch đặt — không đổi giờ được, hãy tạo slot mới',
+          });
+        }
+        const { start, end } = this.parseRange(
+          dto.startAt ?? slot.startAt.toISOString(),
+          dto.endAt ?? slot.endAt.toISOString(),
+        );
+        if (start <= new Date()) {
+          throw new BadRequestException({
+            code: 'SLOT_IN_PAST',
+            message: 'Slot phỏng vấn phải ở tương lai',
+          });
+        }
+        slot.startAt = start;
+        slot.endAt = end;
+      }
+      if (dto.capacity !== undefined && dto.capacity < slot.bookedCount) {
+        throw new BadRequestException({
+          code: 'CAPACITY_BELOW_BOOKED',
+          message: `Slot đã có ${slot.bookedCount} lịch đặt`,
         });
       }
-      if (dto.jobId) await this.getJobOrThrow(dto.jobId);
-      slot.jobId = dto.jobId ?? null;
-    }
-    if (dto.interviewerId !== undefined) {
-      await this.assertEmployee(dto.interviewerId);
-      slot.interviewerId = dto.interviewerId ?? null;
-    }
-    if (dto.capacity !== undefined) slot.capacity = dto.capacity;
-    if (dto.timezone !== undefined) slot.timezone = dto.timezone;
-    if (dto.location !== undefined) slot.location = dto.location ?? null;
-    if (dto.meetingUrl !== undefined) slot.meetingUrl = dto.meetingUrl ?? null;
-    if (dto.notes !== undefined) slot.notes = dto.notes ?? null;
-    if (dto.isActive !== undefined) slot.isActive = dto.isActive;
+      if (dto.jobId !== undefined && dto.jobId !== slot.jobId) {
+        if (slot.bookedCount > 0) {
+          throw new ConflictException({
+            code: 'SLOT_HAS_BOOKINGS',
+            message: 'Slot đã có lịch đặt — không đổi vị trí được',
+          });
+        }
+        if (dto.jobId) await this.getJobOrThrow(dto.jobId);
+        slot.jobId = dto.jobId ?? null;
+      }
+      if (dto.interviewerId !== undefined) {
+        await this.assertEmployee(dto.interviewerId);
+        slot.interviewerId = dto.interviewerId ?? null;
+      }
+      if (dto.capacity !== undefined) slot.capacity = dto.capacity;
+      if (dto.timezone !== undefined) slot.timezone = dto.timezone;
+      if (dto.location !== undefined) slot.location = dto.location ?? null;
+      if (dto.meetingUrl !== undefined)
+        slot.meetingUrl = dto.meetingUrl ?? null;
+      if (dto.notes !== undefined) slot.notes = dto.notes ?? null;
+      if (dto.isActive !== undefined) slot.isActive = dto.isActive;
 
-    const saved = await this.slotRepo.save(slot);
-    await this.audit.record({
-      actor,
-      action: 'INTERVIEW_SLOT_UPDATE',
-      entity: 'interview-slots',
-      entityId: id,
-      before,
-      after: saved,
+      const saved = await repo.save(slot);
+      await this.audit.recordMandatory(em, {
+        actor,
+        action: 'INTERVIEW_SLOT_UPDATE',
+        entity: 'interview-slots',
+        entityId: id,
+        before,
+        after: saved,
+      });
+      return saved;
     });
-    return saved;
   }
 
   async listSlots(
@@ -301,7 +315,9 @@ export class RecruitmentInterviewService {
 
   async findAll(
     query: QueryInterviewDto,
-  ): Promise<Paginated<RecruitmentInterview>> {
+  ): Promise<
+    Paginated<RecruitmentInterview & { allowedNextStatuses: InterviewStatus[] }>
+  > {
     const { page, limit } = query;
     const qb = this.interviewRepo
       .createQueryBuilder('i')
@@ -334,7 +350,15 @@ export class RecruitmentInterviewService {
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
-    return { data, total, page, limit };
+    return {
+      data: data.map((interview) => ({
+        ...interview,
+        allowedNextStatuses: [...INTERVIEW_TRANSITIONS[interview.status]],
+      })),
+      total,
+      page,
+      limit,
+    };
   }
 
   async findOne(id: number) {
@@ -346,6 +370,7 @@ export class RecruitmentInterviewService {
     const { interviewer, ...rest } = interview;
     return {
       ...rest,
+      allowedNextStatuses: [...INTERVIEW_TRANSITIONS[interview.status]],
       interviewer: interviewer
         ? { id: interviewer.id, name: interviewer.name }
         : null,
@@ -358,42 +383,45 @@ export class RecruitmentInterviewService {
    * ra khỏi slot thì slot cũng được trả chỗ.
    */
   async update(id: number, dto: UpdateInterviewDto, actor: RecruitmentActor) {
-    const interview = await this.getOrThrow(id);
-    const before = { ...interview };
-    const now = new Date();
+    await this.dataSource.transaction(async (em) => {
+      const interview = await em
+        .getRepository(RecruitmentInterview)
+        .findOne({ where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!interview) throw this.notFound(id);
+      const before = { ...interview };
+      const now = new Date();
 
-    if (dto.status && dto.status !== interview.status) {
-      if (!INTERVIEW_TRANSITIONS[interview.status].includes(dto.status)) {
+      if (dto.status && dto.status !== interview.status) {
+        if (!INTERVIEW_TRANSITIONS[interview.status].includes(dto.status)) {
+          throw new ConflictException({
+            code: 'INVALID_INTERVIEW_TRANSITION',
+            message: `Không thể chuyển lịch từ ${interview.status} sang ${dto.status}`,
+          });
+        }
+        if (dto.status === CANCELLED && !dto.cancellationReason) {
+          throw new BadRequestException({
+            code: 'CANCELLATION_REASON_REQUIRED',
+            message: 'Phải nhập lý do huỷ lịch',
+          });
+        }
+      }
+
+      const active = ACTIVE_STATUSES.includes(interview.status);
+      const timeChanged =
+        dto.scheduledStart !== undefined || dto.scheduledEnd !== undefined;
+      if (timeChanged && !active) {
         throw new ConflictException({
-          code: 'INVALID_INTERVIEW_TRANSITION',
-          message: `Không thể chuyển lịch từ ${interview.status} sang ${dto.status}`,
+          code: 'INTERVIEW_CLOSED',
+          message: `Lịch đã ${interview.status}, không đổi giờ được`,
         });
       }
-      if (dto.status === CANCELLED && !dto.cancellationReason) {
-        throw new BadRequestException({
-          code: 'CANCELLATION_REASON_REQUIRED',
-          message: 'Phải nhập lý do huỷ lịch',
-        });
-      }
-    }
+      await this.assertEmployee(dto.interviewerId);
 
-    const active = ACTIVE_STATUSES.includes(interview.status);
-    const timeChanged =
-      dto.scheduledStart !== undefined || dto.scheduledEnd !== undefined;
-    if (timeChanged && !active) {
-      throw new ConflictException({
-        code: 'INTERVIEW_CLOSED',
-        message: `Lịch đã ${interview.status}, không đổi giờ được`,
-      });
-    }
-    await this.assertEmployee(dto.interviewerId);
+      let applicationChange: {
+        from: ApplicationStatus;
+        to: ApplicationStatus;
+      } | null = null;
 
-    let applicationChange: {
-      from: ApplicationStatus;
-      to: ApplicationStatus;
-    } | null = null;
-
-    const saved = await this.dataSource.transaction(async (em) => {
       if (timeChanged) {
         const { start, end } = this.parseRange(
           dto.scheduledStart ?? interview.scheduledStart.toISOString(),
@@ -430,17 +458,19 @@ export class RecruitmentInterviewService {
           );
         }
       }
-      return em.getRepository(RecruitmentInterview).save(interview);
-    });
+      const saved = await em
+        .getRepository(RecruitmentInterview)
+        .save(interview);
 
-    await this.audit.record({
-      actor,
-      action: 'INTERVIEW_UPDATE',
-      entity: 'interviews',
-      entityId: id,
-      before,
-      after: saved,
-      context: { applicationId: saved.applicationId, applicationChange },
+      await this.audit.recordMandatory(em, {
+        actor,
+        action: 'INTERVIEW_UPDATE',
+        entity: 'interviews',
+        entityId: id,
+        before,
+        after: saved,
+        context: { applicationId: saved.applicationId, applicationChange },
+      });
     });
     return this.findOne(id);
   }
@@ -536,56 +566,63 @@ export class RecruitmentInterviewService {
    * (slot) hoặc HR tự hẹn.
    */
   async aiConfirm(id: number) {
-    const interview = await this.getOrThrow(id);
-    const application = await this.getApplicationOrThrow(
-      interview.applicationId,
-    );
-    const candidate = await this.candidateRepo.findOne({
-      where: { id: application.candidateId },
-    });
-
-    if (interview.status === CONFIRMED) {
-      return {
-        interview: toAiInterviewView(interview),
-        alreadyConfirmed: true,
-        application: { id: application.id, status: application.status },
-      };
-    }
-    assertAiCanAct(application, candidate);
-    if (interview.status !== PROPOSED) {
-      throw new ConflictException({
-        code: 'INTERVIEW_NOT_PROPOSED',
-        message: `Lịch đang ở trạng thái ${interview.status}, không xác nhận được`,
+    return this.dataSource.transaction(async (em) => {
+      const interview = await em
+        .getRepository(RecruitmentInterview)
+        .findOne({ where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!interview) throw this.notFound(id);
+      const application = await em
+        .getRepository(RecruitmentApplication)
+        .findOneOrFail({
+          where: { id: interview.applicationId },
+          lock: { mode: 'pessimistic_write' },
+        });
+      const candidate = await em.getRepository(RecruitmentCandidate).findOne({
+        where: { id: application.candidateId },
+        lock: { mode: 'pessimistic_write' },
       });
-    }
-    if (interview.scheduledStart <= new Date()) {
-      throw new ConflictException({
-        code: 'INTERVIEW_IN_PAST',
-        message: 'Lịch phỏng vấn đã qua giờ — đề xuất lịch khác',
-      });
-    }
-    if (
-      application.status !== ApplicationStatus.INTERVIEW &&
-      !canTransition(
-        application.status,
-        ApplicationStatus.INTERVIEW,
-        AI_ACTOR.type,
-        {
-          interviewConfirmed: true,
-        },
-      )
-    ) {
-      throw new ConflictException({
-        code: 'INTERVIEW_NOT_ALLOWED',
-        message: `Hồ sơ đang ở trạng thái ${application.status}, không xác nhận lịch được`,
-      });
-    }
 
-    const before = { ...interview };
-    const applicationBefore = { ...application };
-    const now = new Date();
+      if (interview.status === CONFIRMED) {
+        return {
+          interview: toAiInterviewView(interview),
+          alreadyConfirmed: true,
+          application: { id: application.id, status: application.status },
+        };
+      }
+      assertAiCanAct(application, candidate);
+      if (interview.status !== PROPOSED) {
+        throw new ConflictException({
+          code: 'INTERVIEW_NOT_PROPOSED',
+          message: `Lịch đang ở trạng thái ${interview.status}, không xác nhận được`,
+        });
+      }
+      if (interview.scheduledStart <= new Date()) {
+        throw new ConflictException({
+          code: 'INTERVIEW_IN_PAST',
+          message: 'Lịch phỏng vấn đã qua giờ — đề xuất lịch khác',
+        });
+      }
+      if (
+        application.status !== ApplicationStatus.INTERVIEW &&
+        !canTransition(
+          application.status,
+          ApplicationStatus.INTERVIEW,
+          AI_ACTOR.type,
+          {
+            interviewConfirmed: true,
+          },
+        )
+      ) {
+        throw new ConflictException({
+          code: 'INTERVIEW_NOT_ALLOWED',
+          message: `Hồ sơ đang ở trạng thái ${application.status}, không xác nhận lịch được`,
+        });
+      }
 
-    const saved = await this.dataSource.transaction(async (em) => {
+      const before = { ...interview };
+      const applicationBefore = { ...application };
+      const now = new Date();
+
       interview.status = CONFIRMED;
       interview.candidateConfirmedAt = now;
       if (application.status !== ApplicationStatus.INTERVIEW) {
@@ -600,40 +637,42 @@ export class RecruitmentInterviewService {
         application.status = ApplicationStatus.INTERVIEW;
         await em.getRepository(RecruitmentApplication).save(application);
       }
-      return em.getRepository(RecruitmentInterview).save(interview);
-    });
+      const saved = await em
+        .getRepository(RecruitmentInterview)
+        .save(interview);
 
-    await this.audit.record({
-      actor: AI_ACTOR,
-      action: 'INTERVIEW_CONFIRM',
-      entity: 'interviews',
-      entityId: id,
-      before,
-      after: saved,
-      context: { applicationId: application.id },
-    });
-    if (applicationBefore.status !== application.status) {
-      await this.audit.record({
+      await this.audit.recordMandatory(em, {
         actor: AI_ACTOR,
-        action: 'APPLICATION_STATUS_CHANGE',
-        entity: 'applications',
-        entityId: application.id,
-        before: applicationBefore,
-        after: application,
-        context: {
-          from: applicationBefore.status,
-          to: application.status,
-          via: 'INTERVIEW_CONFIRM',
-          interviewId: id,
-        },
+        action: 'INTERVIEW_CONFIRM',
+        entity: 'interviews',
+        entityId: id,
+        before,
+        after: saved,
+        context: { applicationId: application.id },
       });
-    }
+      if (applicationBefore.status !== application.status) {
+        await this.audit.recordMandatory(em, {
+          actor: AI_ACTOR,
+          action: 'APPLICATION_STATUS_CHANGE',
+          entity: 'applications',
+          entityId: application.id,
+          before: applicationBefore,
+          after: application,
+          context: {
+            from: applicationBefore.status,
+            to: application.status,
+            via: 'INTERVIEW_CONFIRM',
+            interviewId: id,
+          },
+        });
+      }
 
-    return {
-      interview: toAiInterviewView(saved),
-      alreadyConfirmed: false,
-      application: { id: application.id, status: application.status },
-    };
+      return {
+        interview: toAiInterviewView(saved),
+        alreadyConfirmed: false,
+        application: { id: application.id, status: application.status },
+      };
+    });
   }
 
   // ----------------------------------------------------------- helpers ----
@@ -646,6 +685,7 @@ export class RecruitmentInterviewService {
     const repo = em.getRepository(RecruitmentApplication);
     const application = await repo.findOneOrFail({
       where: { id: interview.applicationId },
+      lock: { mode: 'pessimistic_write' },
     });
     if (application.status === ApplicationStatus.INTERVIEW) return null;
     if (

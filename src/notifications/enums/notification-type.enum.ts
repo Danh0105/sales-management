@@ -27,4 +27,6 @@ export enum NotificationType {
   TEACHER_ACCOUNT_REQUEST = 'TEACHER_ACCOUNT_REQUEST',
   /** Nhân sự đã duyệt/từ chối đề nghị mở tài khoản — báo lại cho Giáo vụ đã gửi. */
   TEACHER_ACCOUNT_RESULT = 'TEACHER_ACCOUNT_RESULT',
+  /** Phân hệ đề nghị tài chính (tạm ứng, hoàn ứng, thanh toán) — `meta.route` mở đúng chứng từ. */
+  FINANCIAL_REQUEST = 'FINANCIAL_REQUEST',
 }

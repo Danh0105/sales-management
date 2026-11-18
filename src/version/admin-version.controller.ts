@@ -4,17 +4,23 @@ import {
   UploadedFile,
   UseInterceptors,
   Body,
+  UseGuards,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AppVersionService } from './version.service';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/role-guard';
+import { Roles } from '../auth/roles.decorator';
 
 @Controller('admin/version')
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class AdminVersionController {
   constructor(private service: AppVersionService) { }
 
   @Post('upload')
+  @Roles('director')
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({

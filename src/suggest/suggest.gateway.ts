@@ -3,8 +3,10 @@ import {
     WebSocketServer,
     OnGatewayConnection,
     OnGatewayDisconnect,
+    OnGatewayInit,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
+import { RealtimeAuthService } from '../realtime/realtime-auth.service';
 
 @WebSocketGateway({
     namespace: 'suggest',
@@ -13,42 +15,23 @@ import { Server, Socket } from 'socket.io';
     },
 })
 export class SuggestGateway
-    implements OnGatewayConnection, OnGatewayDisconnect {
+    implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+
+    constructor(private readonly auth: RealtimeAuthService) {}
 
     @WebSocketServer()
     server!: Server;
 
+    afterInit(server: Server) {
+        this.auth.protect(server);
+    }
+
     // ================= CONNECT =================
     handleConnection(client: Socket) {
-        const rawEmployeeId =
-            client.handshake.query.employeeId as string;
-
-        const employeeId = Number(rawEmployeeId);
-
-        if (!rawEmployeeId || Number.isNaN(employeeId)) {
-            console.log(
-                `❌ Suggest socket rejected: ${client.id}, employeeId invalid:`,
-                rawEmployeeId,
-            );
-
-            console.log("SOCKET MISSING USER ID", {
-                socketId: client.id,
-                query: client.handshake.query,
-                auth: client.handshake.auth,
-            });
-
-            return;
-        }
-
-        client.join(`suggest_user_${employeeId}`);
-
-        console.log(
-            `✅ User ${employeeId} connected → joined suggest_user_${employeeId}`,
-        );
+        this.auth.joinOwnRoom(client, 'suggest_user_');
     }
     // ================= DISCONNECT =================
     handleDisconnect(client: Socket) {
-        const employeeId = client.handshake.query.employeeId;
-        console.log(`❌ User ${employeeId} disconnected`);
+        // Lifecycle timers được RealtimeAuthService dọn ở sự kiện disconnect.
     }
 }

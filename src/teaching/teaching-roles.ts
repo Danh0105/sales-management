@@ -18,6 +18,12 @@ export const TEACHER_COLLABORATOR_ROLE = 'giaovien_ctv';
 export const TEACHER_ROLES = [TEACHER_STAFF_ROLE, TEACHER_COLLABORATOR_ROLE];
 
 /**
+ * Phòng ban (bảng `department`, tên là duy nhất) của mọi giáo viên công ty.
+ * Cộng tác viên không đổi: tài khoản mới vẫn vào phòng mặc định #1.
+ */
+export const TEACHER_STAFF_DEPARTMENT = 'Chuyên môn';
+
+/**
  * Giáo vụ — làm được mọi việc của Nhân sự **trừ** khai tiền: đơn giá mỗi tiết
  * của môn học, và các khoản phụ cấp khi chấm công.
  */
@@ -43,7 +49,6 @@ export const TEACHER_ACCOUNT_APPROVE_ROLES = [HR_ROLE];
 /** Ban giám đốc xem được toàn bộ số liệu nhưng không sửa. */
 export const TEACHING_VIEW_ONLY_ROLES = [
   'director',
-  'director_la',
   'troly_gd',
   'ketoan_truong',
 ];

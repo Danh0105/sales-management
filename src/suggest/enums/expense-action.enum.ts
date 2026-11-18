@@ -5,16 +5,41 @@ export enum ExpenseAction {
     SALE_ADMIN_REVIEW = 'SALE_ADMIN_REVIEW',
     SALE_ADMIN_REJECT = 'SALE_ADMIN_REJECT',
     APPROVE = 'APPROVE',
+  /** Giám đốc duyệt đề xuất chi tháng; chưa có lệnh chi thì hệ thống lập theo tổng Còn chi. */
+  APPROVE_MONTHLY = 'APPROVE_MONTHLY',
     REJECT = 'REJECT',
+  /** Giám đốc từ chối đề xuất chi tháng. */
+  REJECT_MONTHLY = 'REJECT_MONTHLY',
+  /**
+   * Quy trình Kế toán (16/11/2026): Kế toán nhập xong số liệu bảng ở QL thu chi,
+   * hệ thống chốt số tiền = Còn chi của bảng, gửi Kế toán trưởng duyệt.
+   */
+  SUBMIT_TO_CHIEF_ACCOUNTANT = 'SUBMIT_TO_CHIEF_ACCOUNTANT',
+  /** Kế toán trưởng duyệt, chuyển Giám đốc. */
+  CHIEF_APPROVE = 'CHIEF_APPROVE',
+  /** Kế toán trưởng từ chối. */
+  CHIEF_REJECT = 'CHIEF_REJECT',
+  /** Giám đốc duyệt đề xuất theo quy trình Kế toán — chờ Kế toán công nợ lập lệnh chi. */
+  APPROVE_MONTHLY_CHAIN = 'APPROVE_MONTHLY_CHAIN',
+  /** Hệ thống chuyển đề xuất đang chờ Giám đốc sang quy trình Kế toán (lúc deploy 16/11/2026). */
+  MOVE_TO_ACCOUNTANT_FLOW = 'MOVE_TO_ACCOUNTANT_FLOW',
     /** Chủ đề xuất tự rút đơn khi chưa được duyệt. */
     WITHDRAW = 'WITHDRAW',
     CREATE_PAYMENT_ORDER = 'CREATE_PAYMENT_ORDER',
+  /** Kế toán lập lại lệnh chi tháng sau hoàn quỹ (hoặc đề xuất cũ chờ nhập tiền), rồi Giám đốc duyệt. */
+  CREATE_MONTHLY_PAYMENT_ORDER = 'CREATE_MONTHLY_PAYMENT_ORDER',
     /** Kế toán công nợ sửa lệnh chi đã lập — các bước sau phải làm lại. */
     EDIT_PAYMENT_ORDER = 'EDIT_PAYMENT_ORDER',
+  /** Kế toán sửa số tiền chi tháng — bắt buộc Giám đốc duyệt lại. */
+  EDIT_MONTHLY_PAYMENT_ORDER = 'EDIT_MONTHLY_PAYMENT_ORDER',
     CONFIRM_CASH_RELEASED = 'CONFIRM_CASH_RELEASED',
     CONFIRM_CASH_RECEIVED = 'CONFIRM_CASH_RECEIVED',
     CONFIRM_SPENT = 'CONFIRM_SPENT',
     CONFIRM_NOT_SPENT = 'CONFIRM_NOT_SPENT',
+  /** Chi tháng nhiều trường: kinh doanh chọn trường đã chi, phần còn lại hoàn quỹ. */
+  CONFIRM_PARTIALLY_SPENT = 'CONFIRM_PARTIALLY_SPENT',
+  /** Thủ quỹ nhận lại phần dư của lần chi một phần. */
+  CONFIRM_REMAINDER_RETURNED = 'CONFIRM_REMAINDER_RETURNED',
     CONFIRM_FUND_RETURNED = 'CONFIRM_FUND_RETURNED',
 
     // ===== nhánh ĐỀ XUẤT THIẾT BỊ =====

@@ -23,14 +23,17 @@ const SUBJECTS = [
 ];
 
 /** Ghi lại mọi câu SQL theo đúng thứ tự để kiểm tra trình tự thao tác. */
-function makeService(options: { subjects?: typeof SUBJECTS } = {}) {
+function makeService(
+    options: { subjects?: typeof SUBJECTS; refs?: typeof REFS } = {},
+) {
     const sql: string[] = [];
     const rows = options.subjects ?? SUBJECTS;
+    const refs = options.refs ?? REFS;
 
     const query = async (text: string, params?: any[]) => {
         sql.push(text.replace(/\s+/g, ' ').trim());
 
-        if (text.includes('information_schema')) return REFS;
+        if (text.includes('pg_constraint')) return refs;
         if (text.includes('FROM subjects WHERE id = ANY')) {
             const ids: number[] = params?.[0] ?? [];
             return rows.filter((s) => ids.includes(s.id));
@@ -73,7 +76,7 @@ describe('gộp môn học trùng nhau', () => {
 
         await service.merge({ keepId: 724, mergeIds: [725], dryRun: false });
 
-        // Danh sách bảng lấy từ information_schema chứ không hard-code: thêm
+        // Danh sách bảng lấy từ pg_constraint chứ không hard-code: thêm
         // khoá ngoại mới mà quên cập nhật code thì lần gộp sau mất dữ liệu.
         for (const ref of REFS) {
             expect(
@@ -82,6 +85,18 @@ describe('gộp môn học trùng nhau', () => {
                 ),
             ).toBe(true);
         }
+    });
+
+    it('dừng hẳn khi không đọc được bảng tham chiếu nào', async () => {
+        // information_schema trả rỗng với role không sở hữu bảng — khi đó
+        // xoá môn là CASCADE mất chính sách và buổi dạy.
+        const { service, sql } = makeService({ refs: [] });
+
+        await expect(
+            service.merge({ keepId: 724, mergeIds: [725], dryRun: false }),
+        ).rejects.toThrow('dừng gộp để tránh mất dữ liệu');
+
+        expect(sql.some((q) => q.startsWith('DELETE'))).toBe(false);
     });
 
     it('dry-run không ghi gì vào database', async () => {

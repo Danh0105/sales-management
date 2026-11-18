@@ -36,6 +36,8 @@ function event(
     messageText: TEXT,
     attemptCount: 1,
     aiControlVersion: null,
+    aiProviderDispatchedAt: null,
+    aiReservedTokens: null,
     ...overrides,
   };
 }
@@ -45,6 +47,7 @@ function okResponse(text = REPLY) {
     JSON.stringify({
       id: 'resp_1',
       status: 'completed',
+      usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 },
       output: [
         {
           type: 'message',
@@ -68,12 +71,18 @@ function setup(
     controlVersion?: number;
     resumeSignalPending?: boolean;
     priorReply?: boolean;
+    /** Env (cấu hình an toàn G8: pilot, trần, chính sách). */
+    env?: Record<string, string>;
+    limitVerdict?: unknown;
+    /** AI đã bị worker khác / người vận hành dừng trước (haltAiIfRunning → null). */
+    haltedByOther?: boolean;
   } = {},
 ) {
   const txEm = { tx: true, query: jest.fn().mockResolvedValue([]) };
   const queue = {
     heartbeat: jest.fn().mockResolvedValue(true),
     markAiStarted: jest.fn().mockResolvedValue(true),
+    markProviderDispatched: jest.fn().mockResolvedValue('DISPATCHED'),
     complete: jest
       .fn()
       .mockResolvedValue({ completed: true, outboxId: 5, discarded: false }),
@@ -90,6 +99,8 @@ function setup(
       },
     ),
     fail: jest.fn().mockResolvedValue(true),
+    recordUsage: jest.fn().mockResolvedValue(undefined),
+    release: jest.fn().mockResolvedValue(true),
   };
   const conversations = {
     saveMessage: jest
@@ -155,8 +166,39 @@ function setup(
     }),
   };
   const alerts = { raise: jest.fn().mockResolvedValue(true) };
+  const runtime = {
+    set: jest.fn().mockResolvedValue({}),
+    state: jest
+      .fn()
+      .mockResolvedValue({ aiHalted: false, workerHalted: false }),
+    onStop: jest.fn().mockReturnValue(jest.fn()),
+    haltAiIfRunning: jest.fn(
+      async (
+        _reason: string,
+        _actor: unknown,
+        alsoInTx?: (em: unknown, state: unknown) => Promise<unknown>,
+      ) => {
+        const state = opts.haltedByOther
+          ? null
+          : { aiHalted: true, updatedAt: new Date('2026-10-13T01:48:00.123Z') };
+        if (state) await alsoInTx?.(txEm, state);
+        return state;
+      },
+    ),
+  };
+  const limits = {
+    evaluate: jest.fn().mockResolvedValue(opts.limitVerdict ?? { ok: true }),
+    reserve: jest
+      .fn()
+      .mockResolvedValue(
+        opts.limitVerdict &&
+          (opts.limitVerdict as { ok?: boolean }).ok === false
+          ? { kind: 'LIMIT', verdict: opts.limitVerdict }
+          : { kind: 'RESERVED' },
+      ),
+  };
   const worker = new RecruitmentChannelWorker(
-    { get: () => undefined } as any,
+    { get: (key: string) => opts.env?.[key] } as any,
     queue as any,
     conversations as any,
     candidateService as any,
@@ -165,10 +207,14 @@ function setup(
     audit as any,
     control as any,
     alerts as any,
+    runtime as any,
+    limits as any,
   );
   return {
     worker,
     queue,
+    runtime,
+    limits,
     conversations,
     candidates,
     candidateService,
@@ -258,7 +304,11 @@ describe('RecruitmentChannelWorker.process', () => {
       }),
     );
     expect(queue.complete).toHaveBeenCalledWith(
-      event(),
+      expect.objectContaining({
+        id: 11,
+        aiControlVersion: 3,
+        aiReservedTokens: 200_000,
+      }),
       'w1:abc',
       {
         externalRecipientId: SENDER,
@@ -295,7 +345,7 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('OpenAI hết quota (429) → FAILED có lịch thử lại, không PROCESSED, không có tin đi', async () => {
+  it('OpenAI hết quota (429) sau dispatch → FAILED cuối, không retry mù', async () => {
     fetchSpy.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -311,7 +361,7 @@ describe('RecruitmentChannelWorker.process', () => {
       expect.anything(),
       'w1:abc',
       'PROVIDER_QUOTA',
-      4000,
+      null,
     );
     expect(queue.complete).not.toHaveBeenCalled();
     // Chỉ tin đến (idempotent) — không có tin đi nào cho lượt lỗi.
@@ -321,7 +371,7 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('OpenClaw 5xx → thử lại', async () => {
+  it('OpenClaw 5xx sau dispatch → FAILED cuối, không retry mù', async () => {
     fetchSpy.mockResolvedValue(new Response('', { status: 503 }));
     const { worker, queue } = setup();
     await worker.process(event(), 'w1:abc', CONFIG);
@@ -329,7 +379,7 @@ describe('RecruitmentChannelWorker.process', () => {
       expect.anything(),
       'w1:abc',
       'AGENT_UNAVAILABLE',
-      1000,
+      null,
     );
   });
 
@@ -530,18 +580,39 @@ describe('RecruitmentChannelWorker.process', () => {
     );
   });
 
-  it('lượt mới: ghi bền version điều khiển (markAiStarted) TRƯỚC khi gọi OpenClaw', async () => {
-    const { worker, queue } = setup();
-    await worker.process(event(), 'w1:abc', CONFIG);
-    expect(queue.markAiStarted).toHaveBeenCalledWith(event(), 'w1:abc', 3);
-    expect(queue.markAiStarted.mock.invocationCallOrder[0]).toBeLessThan(
-      fetchSpy.mock.invocationCallOrder[0],
+  it('lỗi hạ tầng trước dispatch đạt lần thử thứ ba → dead-letter, không gọi provider', async () => {
+    const { worker, queue, control } = setup();
+    control.control.mockRejectedValue(new Error('db'));
+    await worker.process(event({ attemptCount: 3 }), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.fail).toHaveBeenCalledWith(
+      expect.anything(),
+      'w1:abc',
+      'CONTROL_CHECK_FAILED',
+      null,
     );
   });
 
-  it('mất lease trước khi ghi version → không gọi OpenClaw, không ghi kết quả', async () => {
-    const { worker, queue } = setup();
-    queue.markAiStarted.mockResolvedValue(false);
+  it('lượt mới: reserve quota và ghi mốc dispatch TRƯỚC khi gọi OpenClaw', async () => {
+    const { worker, queue, limits } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(limits.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11 }),
+      'w1:abc',
+      3,
+      expect.objectContaining({ tokenReservationPerTurn: 200_000 }),
+    );
+    expect(limits.reserve.mock.invocationCallOrder[0]).toBeLessThan(
+      queue.markProviderDispatched.mock.invocationCallOrder[0],
+    );
+    expect(
+      queue.markProviderDispatched.mock.invocationCallOrder[0],
+    ).toBeLessThan(fetchSpy.mock.invocationCallOrder[0]);
+  });
+
+  it('mất lease trước khi reserve → không gọi OpenClaw, không ghi kết quả', async () => {
+    const { worker, queue, limits } = setup();
+    limits.reserve.mockResolvedValue({ kind: 'LOST' });
     await worker.process(event(), 'w1:abc', CONFIG);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
@@ -553,7 +624,7 @@ describe('RecruitmentChannelWorker.process', () => {
       priorReply: true,
     });
     await worker.process(
-      event({ attemptCount: 2, aiControlVersion: 3 }),
+      event({ attemptCount: 2, aiControlVersion: 3, aiReservedTokens: 200000 }),
       'w2:def',
       CONFIG,
     );
@@ -576,7 +647,7 @@ describe('RecruitmentChannelWorker.process', () => {
   it('chạy lại lượt đã bắt đầu, chưa có tin đi → chạy lại lượt AI dưới version cũ (dù handoff của chính lượt làm AI_PAUSED)', async () => {
     const { worker, queue } = setup({ controlState: 'AI_PAUSED' });
     await worker.process(
-      event({ attemptCount: 2, aiControlVersion: 3 }),
+      event({ attemptCount: 2, aiControlVersion: 3, aiReservedTokens: 200000 }),
       'w2:def',
       CONFIG,
     );
@@ -607,6 +678,292 @@ describe('RecruitmentChannelWorker.process', () => {
     expect(txEm.query).toHaveBeenCalledWith(
       expect.stringMatching(/DISCARDED_CONTROL_CHANGED/),
       [77],
+    );
+  });
+});
+
+describe('RecruitmentChannelWorker.process — an toàn AI (P3-7.3 / G8)', () => {
+  let logs: string[];
+  let fetchSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    logs = [];
+    for (const level of ['log', 'warn', 'error'] as const) {
+      jest
+        .spyOn(Logger.prototype, level)
+        .mockImplementation((message: unknown) => {
+          logs.push(String(message));
+        });
+    }
+    fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(okResponse());
+  });
+
+  afterEach(() => {
+    const all = logs.join('\n');
+    for (const secret of [TEXT, SENDER]) expect(all).not.toContain(secret);
+    jest.restoreAllMocks();
+  });
+
+  it('vượt trần lượt của người gửi → KHÔNG gọi OpenClaw, PROCESSED SKIPPED_RATE_LIMITED + cảnh báo HR', async () => {
+    const { worker, queue, alerts, runtime, txEm } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'SENDER',
+        limit: 'SENDER_HOURLY_TURNS',
+        used: 10,
+        max: 10,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(queue.markAiStarted).not.toHaveBeenCalled();
+    expect(queue.completeWithoutAi.mock.calls[0][3]).toBe(
+      'SKIPPED_RATE_LIMITED',
+    );
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'CANDIDATE_MESSAGE_WAITING',
+        conversationId: 55,
+        eventId: 11,
+        details: { limit: 'SENDER_HOURLY_TURNS', used: 10, max: 10 },
+      }),
+      txEm,
+    );
+    expect(runtime.set).not.toHaveBeenCalled();
+  });
+
+  it('vượt trần toàn hệ thống khi AI đã bị dừng (worker khác vừa dừng) → không cảnh báo trùng, vẫn trả event về hàng chờ', async () => {
+    const { worker, queue, alerts } = setup({
+      haltedByOther: true,
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TURNS',
+        used: 300,
+        max: 300,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(alerts.raise).not.toHaveBeenCalled();
+    expect(queue.release).toHaveBeenCalled();
+  });
+
+  it('vượt trần toàn hệ thống → tự DỪNG AI (actor hệ thống) + cảnh báo AI_LIMIT_REACHED, trả event về hàng chờ', async () => {
+    const { worker, queue, alerts, runtime, txEm } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TOKENS',
+        used: 30_000_001,
+        max: 30_000_000,
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(runtime.haltAiIfRunning).toHaveBeenCalledWith(
+      expect.stringMatching(/^AI_LIMIT DAILY_TOKENS/),
+      expect.objectContaining({ type: 'SYSTEM' }),
+      expect.any(Function),
+    );
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'AI_LIMIT_REACHED',
+        severity: 'HIGH',
+        sourceKey: 'ai-limit:DAILY_TOKENS:2026-10-13T01:48:00.123Z',
+      }),
+      txEm,
+    );
+    expect(queue.release).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11 }),
+      'w1:abc',
+    );
+    expect(queue.completeWithoutAi).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
+  });
+
+  it('lượt đã bắt đầu (chạy lại) không bị kiểm trần lần nữa', async () => {
+    const { worker, limits } = setup({
+      limitVerdict: {
+        ok: false,
+        scope: 'GLOBAL',
+        limit: 'DAILY_TURNS',
+        used: 9,
+        max: 1,
+      },
+      storedReply: REPLY,
+      priorReply: true,
+    });
+    await worker.process(
+      event({ attemptCount: 2, aiControlVersion: 3 }),
+      'w1:abc',
+      CONFIG,
+    );
+    expect(limits.evaluate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'dấu hiệu nội bộ (tên tool)',
+      'Mình sẽ gọi recruitment_get_candidate để xem',
+      'INTERNAL_MARKER',
+    ],
+    ['số điện thoại lạ', 'Bạn gọi chị Hoa 0987654321 nhé', 'FOREIGN_CONTACT'],
+    [
+      'URL ngoài danh sách',
+      'Xem thêm tại https://evil.example.com/x',
+      'FOREIGN_URL',
+    ],
+  ])(
+    'câu trả lời vi phạm chính sách (%s) → KHÔNG xếp hàng gửi, BLOCKED_BY_POLICY + cảnh báo HR (mã quy tắc)',
+    async (_n, reply, rule) => {
+      fetchSpy.mockResolvedValue(okResponse(reply));
+      const { worker, queue, alerts, txEm } = setup({ storedReply: reply });
+      await worker.process(event(), 'w1:abc', CONFIG);
+      expect(queue.complete).not.toHaveBeenCalled();
+      expect(queue.completeWithoutAi.mock.calls[0][3]).toBe(
+        'BLOCKED_BY_POLICY',
+      );
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'AI_POLICY_HANDOFF',
+          eventId: 11,
+          details: { rule },
+        }),
+        txEm,
+      );
+      expect(JSON.stringify(alerts.raise.mock.calls)).not.toContain(reply);
+      expect(txEm.query).toHaveBeenCalledWith(
+        expect.stringContaining('BLOCKED_BY_POLICY'),
+        [101, false],
+      );
+    },
+  );
+
+  it('câu trả lời có dạng bí mật → chặn + che nội dung tin AI đã lưu (không giữ nguyên văn)', async () => {
+    const reply = 'Key là sk-abcdefghijklmnop1234';
+    fetchSpy.mockResolvedValue(okResponse(reply));
+    const { worker, queue, alerts, txEm } = setup({ storedReply: reply });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({ details: { rule: 'SECRET_LIKE' } }),
+      txEm,
+    );
+    const [sql, params] = txEm.query.mock.calls.find(([q]) =>
+      String(q).includes('BLOCKED_BY_POLICY'),
+    )!;
+    expect(sql).toMatch(/content = CASE WHEN \$2::boolean THEN '\[Đã ẩn/);
+    expect(params).toEqual([101, true]);
+  });
+
+  it('câu trả lời nhắc lại SĐT của chính ứng viên / liên hệ được phép / miền được phép → gửi bình thường', async () => {
+    const reply =
+      'Mình đã ghi nhận số 0912345678 của bạn. Hotline 1900 1234 56, chi tiết tại https://kidoedu.vn/tuyen-dung';
+    fetchSpy.mockResolvedValue(okResponse(reply));
+    const { worker, queue } = setup({
+      storedReply: reply,
+      env: {
+        RECRUITMENT_AI_REPLY_ALLOWED_CONTACTS: '1900123456',
+        RECRUITMENT_AI_REPLY_ALLOWED_DOMAINS: 'kidoedu.vn',
+      },
+    });
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.complete).toHaveBeenCalled();
+    expect(queue.completeWithoutAi).not.toHaveBeenCalled();
+  });
+
+  it('usage của OpenClaw → ghi token của lượt', async () => {
+    const body = {
+      id: 'resp_1',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: REPLY }],
+        },
+      ],
+      usage: {
+        input_tokens: 1000,
+        input_tokens_details: { cached_tokens: 800 },
+        output_tokens: 50,
+        total_tokens: 1050,
+      },
+    };
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    const { worker, queue } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.recordUsage).toHaveBeenCalledWith(11, {
+      input: 1000,
+      cached: 800,
+      output: 50,
+      total: 1050,
+    });
+  });
+
+  it('token thực tế vượt mức đặt trước → vẫn gửi câu trả lời, KHÔNG dừng AI toàn hệ thống', async () => {
+    const body = {
+      id: 'resp_long',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: REPLY }],
+        },
+      ],
+      // Hội thoại thật: ngữ cảnh tăng ~20k token/lượt, lượt 7 đã 187k (mặc định đặt trước 200k).
+      usage: {
+        input_tokens: 249_000,
+        input_tokens_details: { cached_tokens: 240_000 },
+        output_tokens: 1_000,
+        total_tokens: 250_000,
+      },
+    };
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    const { worker, queue, runtime } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(queue.recordUsage).toHaveBeenCalledWith(
+      11,
+      expect.objectContaining({ total: 250_000 }),
+    );
+    expect(runtime.haltAiIfRunning).not.toHaveBeenCalled();
+    expect(queue.complete).toHaveBeenCalled();
+  });
+
+  it('provider trả lời nhưng thiếu usage → auto-halt và không xếp outbox', async () => {
+    const body = {
+      id: 'resp_no_usage',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: REPLY }],
+        },
+      ],
+    };
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    const { worker, queue, runtime } = setup();
+    await worker.process(event(), 'w1:abc', CONFIG);
+    expect(runtime.haltAiIfRunning).toHaveBeenCalledWith(
+      'AI_LIMIT TOKEN_USAGE_MISSING',
+      expect.anything(),
+      expect.any(Function),
+    );
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(queue.fail).toHaveBeenCalledWith(
+      expect.anything(),
+      'w1:abc',
+      'TOKEN_USAGE_MISSING',
+      null,
     );
   });
 });

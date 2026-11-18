@@ -65,6 +65,15 @@ export class PolicyYear {
     @Column({ name: 'total_remaining', type: 'numeric', default: 0, transformer: numericTransformer })
     totalRemaining!: number;
 
+    @Column({ name: 'gift_flowers_completed', default: false })
+    giftFlowersCompleted!: boolean;
+
+    @Column({ name: 'opening_ceremony_completed', default: false })
+    openingCeremonyCompleted!: boolean;
+
+    @Column({ name: 'teachers_day_completed', default: false })
+    teachersDayCompleted!: boolean;
+
     @OneToMany(() => PolicyYearSubject, (s) => s.policyYear, {
         cascade: true,
     })

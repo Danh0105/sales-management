@@ -39,6 +39,9 @@ export const TEACHING_CHECKIN_ALERT_LATE_MINUTES = (() => {
  * lại ghi một dòng cảnh báo vô ích trong log.
  *
  * Bật bằng `TEACHING_CHECKIN_ALERT_ZALO=1` trong .env.
+ *
+ * Từ 02/11/2026 tin Zalo chỉ gồm buổi ở trường khu vực TP.HCM (company-departure.ts)
+ * và chỉ gửi cho tài khoản Nhân sự; Giáo vụ vẫn nhận trong app và push như cũ.
  */
 /**
  * Đọc tại thời điểm job chạy vì ConfigModule nạp `.env` sau lúc các module

@@ -4,8 +4,10 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
+import { RealtimeAuthService } from '../realtime/realtime-auth.service';
 
 @WebSocketGateway({
   cors: {
@@ -13,22 +15,22 @@ import { Server, Socket } from 'socket.io';
   },
 })
 export class PolicyGateway
-  implements OnGatewayConnection, OnGatewayDisconnect {
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+  constructor(private readonly auth: RealtimeAuthService) {}
+
   @WebSocketServer()
   server!: Server;
 
+  afterInit(server: Server) {
+    this.auth.protect(server);
+  }
+
   handleConnection(client: Socket) {
-    const employeeId = client.handshake.query.employeeId as string;
-
-    if (employeeId) {
-      client.join(`user_${employeeId}`);
-    }
-
-    console.log('Client connected:', client.id, 'user:', employeeId);
+    this.auth.joinOwnRoom(client);
   }
 
   handleDisconnect(client: Socket) {
-    console.log('Client disconnected:', client.id);
+    // Lifecycle timers được RealtimeAuthService dọn ở sự kiện disconnect.
   }
 
   notifyNewPolicy(

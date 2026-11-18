@@ -35,6 +35,10 @@ import {
 import { TeachingScope } from './teaching-roles';
 import { findTeachingManagers } from './teaching-managers.util';
 import {
+  formatConfirmationPlace,
+  toVietnameseDate,
+} from './confirmation-place.util';
+import {
   addDays,
   assertDateOrder,
   assertTimeOrder,
@@ -1273,10 +1277,6 @@ export class TeachingScheduleService {
     // Giáo viên thuê ngoài không có tài khoản đăng nhập — không có ai để báo.
     if (!teacher.employeeId) return;
 
-    const message =
-      `Bạn được xếp lịch dạy ${DAY_OF_WEEK_LABELS[schedule.dayOfWeek] ?? ''} ` +
-      `${toDisplayTime(schedule.startTime)}–${toDisplayTime(schedule.endTime)}, ` +
-      `bắt đầu từ ${toDateString(schedule.effectiveFrom)}. Vui lòng xác nhận hoặc từ chối.`;
     const pushData = {
       kind: TEACHING_SCHEDULE_CONFIRM_REQUEST_KIND,
       module: TEACHING_MODULE,
@@ -1285,6 +1285,14 @@ export class TeachingScheduleService {
     };
 
     try {
+      const place = await this.describeConfirmationPlace(schedule.id);
+      const detail =
+        `${DAY_OF_WEEK_LABELS[schedule.dayOfWeek] ?? ''} ` +
+        `${toDisplayTime(schedule.startTime)}–${toDisplayTime(schedule.endTime)}` +
+        `${place ? ` – ${place}` : ''}, ` +
+        `từ ${toVietnameseDate(toDateString(schedule.effectiveFrom) as string)}`;
+      const message = `Bạn được xếp lịch dạy ${detail}. Vui lòng xác nhận hoặc từ chối.`;
+
       await this.notificationService.create({
         receiverId: teacher.employeeId,
         type: NotificationType.TEACHING_SCHEDULE_CONFIRM_REQUEST,
@@ -1293,6 +1301,8 @@ export class TeachingScheduleService {
           ...pushData,
           entityType: 'schedule',
           scheduleId: schedule.id,
+          // Một dòng trong tin Zalo gộp khi Nhân sự xếp nhiều lịch liền nhau.
+          summary: `Lịch ${detail}`,
         },
       });
 
@@ -1312,6 +1322,27 @@ export class TeachingScheduleService {
         'Gửi thông báo yêu cầu xác nhận lịch dạy lỗi',
         error as any,
       );
+    }
+  }
+
+  /** Môn – lớp, trường của mẫu lịch; tra lỗi thì bỏ trống chứ không chặn thông báo. */
+  private async describeConfirmationPlace(scheduleId: number): Promise<string> {
+    try {
+      const row = await this.scheduleRepo
+        .createQueryBuilder('ts')
+        .leftJoin('ts.school', 'sc')
+        .leftJoin('ts.class', 'cl')
+        .leftJoin('ts.subject', 'sub')
+        .select([
+          'sc.name AS "schoolName"',
+          'cl.name AS "className"',
+          'sub.name AS "subjectName"',
+        ])
+        .where('ts.id = :id', { id: scheduleId })
+        .getRawOne();
+      return formatConfirmationPlace(row);
+    } catch {
+      return '';
     }
   }
 

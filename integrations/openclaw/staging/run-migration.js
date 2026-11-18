@@ -28,6 +28,13 @@ async function main() {
   const qr = ds.createQueryRunner();
   await qr.startTransaction();
   try {
+    // Tuỳ chọn (guard đặt): migration cần khoá ACCESS EXCLUSIVE trên bảng đang có ghi thì
+    // chờ khoá tối đa chừng này rồi rollback, thay vì xếp hàng chặn mọi truy vấn phía sau.
+    const lockTimeout = process.env.MIGRATION_LOCK_TIMEOUT;
+    if (lockTimeout) {
+      if (!/^\d{1,5}(ms|s)$/.test(lockTimeout)) throw new Error(`MIGRATION_LOCK_TIMEOUT sai: ${lockTimeout}`);
+      await qr.query(`SET LOCAL lock_timeout = '${lockTimeout}'`);
+    }
     await migration[direction](qr);
     await qr.commitTransaction();
     console.log('OK — đã commit');

@@ -11,13 +11,26 @@ import { hostname } from 'os';
 import { DataSource } from 'typeorm';
 
 import { RecruitmentAuditService } from '../recruitment-audit.service';
+import {
+  HrAlertSeverity,
+  HrAlertType,
+  RuntimeControlScope,
+} from '../recruitment.enums';
 import { SYSTEM_ACTOR } from '../recruitment.roles';
 import {
   RecruitmentChannelOutboxQueue,
   type ClaimedOutbox,
   type DispatchGate,
+  type DispatchGuard,
 } from './recruitment-channel-outbox.queue';
+import { readAiSafetyConfig } from './recruitment-ai-safety.config';
+import {
+  readOutboundSafetyConfig,
+  type RecruitmentOutboundSafetyConfig,
+} from './recruitment-outbound-safety.config';
 import { retryDelayMs } from './recruitment-channel-worker.config';
+import { readHrMessageTtl } from './recruitment-outbox-approval-expiry.service';
+import { RecruitmentRuntimeControlService } from './recruitment-runtime-control.service';
 import { RecruitmentHrAlertService } from './recruitment-hr-alert.service';
 import {
   RecruitmentZaloCredentialStore,
@@ -41,7 +54,7 @@ type Outcome =
   | { status: 'SENT'; providerMessageId: string | null }
   | { status: 'RETRY'; code: string }
   | { status: 'UNKNOWN'; code: string }
-  | { status: 'DEAD_LETTER'; code: string };
+  | { status: 'DEAD_LETTER'; code: string; oaBlocked?: boolean };
 
 /**
  * Sender: `recruitment_channel_outbox` → Zalo Send API của OA **tuyển dụng**.
@@ -59,6 +72,10 @@ type Outcome =
  * - token hỏng → refresh (có khoá, một lần cho mọi sender) rồi gửi lại một lần;
  * - Zalo từ chối hẳn / dữ liệu sai → DEAD_LETTER;
  * - có thể đã tới Zalo (mất kết nối, hết giờ sau khi gửi) → UNKNOWN, không gửi lại.
+ *
+ * Single dispatch guard (G8 C2): bật khi pilot mode bật (không tắt được) hoặc
+ * `RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED=true` — chỉ tin AI có grant của SYSTEM OWNER
+ * mới được gửi, mỗi grant đúng một lần dispatch; thiếu bảng grant → sender không chạy.
  */
 @Injectable()
 export class RecruitmentZaloSender
@@ -67,6 +84,15 @@ export class RecruitmentZaloSender
   private readonly logger = new Logger('RecruitmentZaloSender');
   private readonly enabled: boolean;
   private readonly config: ZaloOutboundConfig | null;
+  /** Fingerprint người nhận được phép khi pilot (`null` = không pilot). */
+  private readonly pilotSenders: string[] | null;
+  /** Single dispatch guard — `null` = tắt (không pilot, không yêu cầu). */
+  private readonly guard: DispatchGuard | null;
+  /** Production admission/quota. `null` trong pilot hoặc khi chưa go-live. */
+  private readonly production: RecruitmentOutboundSafetyConfig | null;
+  /** Tin HR chờ quá TTL (phút) không bao giờ được gửi muộn. */
+  private readonly hrMessageTtlMinutes: number;
+  private lastHalted = false;
   private readonly senderId = `${hostname().slice(0, 60)}:${process.pid}:${randomUUID().slice(0, 6)}`;
   private running = false;
   private loops: Promise<void>[] = [];
@@ -78,22 +104,87 @@ export class RecruitmentZaloSender
     private readonly audit: RecruitmentAuditService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly alerts: RecruitmentHrAlertService,
+    private readonly runtime?: RecruitmentRuntimeControlService,
   ) {
     const get = (key: string) => configService.get<string>(key);
     this.enabled = isZaloOutboundEnabled(get);
     const read = readZaloOutboundConfig(get);
     this.config = 'config' in read ? read.config : null;
+    const safety = readAiSafetyConfig(get);
+    this.pilotSenders = 'config' in safety ? safety.config.pilotSenders : null;
+    this.guard =
+      this.config &&
+      (this.pilotSenders !== null || this.config.dispatchGrantRequired)
+        ? { oaId: this.config.oaId }
+        : null;
+    const outboundSafety = readOutboundSafetyConfig(get);
+    this.production =
+      'config' in outboundSafety && outboundSafety.config.productionMode
+        ? outboundSafety.config
+        : null;
+    this.hrMessageTtlMinutes = readHrMessageTtl(get);
   }
 
   onApplicationBootstrap(): void {
     if (!this.enabled || !this.config) return;
     this.running = true;
-    this.logger.log(
-      `sender start id=${this.senderId} oa=${this.config.oaId} slots=${this.config.concurrency}`,
-    );
-    for (let slot = 0; slot < this.config.concurrency; slot++) {
-      this.loops.push(this.loop(slot, this.config));
+    this.loops.push(this.start(this.config));
+  }
+
+  private async start(config: ZaloOutboundConfig): Promise<void> {
+    if (this.guard) {
+      let ready = false;
+      try {
+        ready = await this.queue.dispatchGuardReady();
+      } catch (error) {
+        this.logger.error(`sender guard check error=${errorCode(error)}`);
+      }
+      if (!ready) {
+        this.running = false;
+        this.logger.error(
+          'sender KHÔNG chạy: single dispatch guard bật nhưng thiếu bảng recruitment_outbound_dispatch_grants',
+        );
+        return;
+      }
     }
+    if (this.production) {
+      let ready = false;
+      try {
+        ready = await this.queue.productionSafetyReady();
+      } catch (error) {
+        this.logger.error(`sender production check error=${errorCode(error)}`);
+      }
+      if (!ready) {
+        this.running = false;
+        this.logger.error(
+          'sender KHÔNG chạy: production mode thiếu ledger / uỷ quyền / schema quota trượt',
+        );
+        return;
+      }
+    }
+    // GO PROD: không có uỷ quyền ACTIVE thì sender vẫn chạy nhưng không claim tin nào
+    // (cửa claim + cửa dispatch đều đòi uỷ quyền) — chỉ đổi env không gửi được.
+    let authorization = '-';
+    if (this.production) {
+      try {
+        const auth = await this.queue.activeProductionAuthorization(
+          config.oaId,
+        );
+        authorization = auth
+          ? `${auth.id} limits=${auth.maxRequestsPerRecipientWindow}/${auth.recipientWindowHours}h,${auth.maxRequestsPerRecipientDay}/${auth.maxRequestsPerDay} budget=${auth.dailyCostBudgetVnd}/${auth.monthlyCostBudgetVnd}`
+          : 'none';
+      } catch (error) {
+        authorization = `error:${errorCode(error)}`;
+      }
+    }
+    this.logger.log(
+      `sender start id=${this.senderId} oa=${config.oaId} slots=${config.concurrency} mode=${this.production ? 'production' : 'pilot'} dispatchGuard=${this.guard ? 'on' : 'off'} authorization=${authorization}`,
+    );
+    const loops: Promise<void>[] = [];
+    for (let slot = 0; slot < config.concurrency; slot++) {
+      loops.push(this.loop(slot, config));
+    }
+    await Promise.allSettled(loops);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -109,11 +200,17 @@ export class RecruitmentZaloSender
           nextMaintenance = Date.now() + Math.max(config.pollMs * 5, 2_000);
           await this.maintenance(config);
         }
+        if (await this.outboundHalted()) {
+          await sleep(config.pollMs + Math.floor(Math.random() * 200));
+          continue;
+        }
         const owner = `${this.senderId}:${randomUUID().slice(0, 8)}`;
         const row = await this.queue.claimNext(
           config.oaId,
           owner,
           config.leaseMs,
+          this.guard,
+          this.production !== null,
         );
         if (!row) {
           await sleep(config.pollMs + Math.floor(Math.random() * 200));
@@ -159,7 +256,15 @@ export class RecruitmentZaloSender
       );
     }
 
-    const gate = await this.queue.dispatch(row, owner);
+    const gate = await this.queue.dispatch(
+      row,
+      owner,
+      false,
+      this.pilotSenders,
+      this.guard,
+      this.production,
+      this.hrMessageTtlMinutes,
+    );
     if (gate.outcome !== 'DISPATCHED') {
       return this.notDispatched(row, owner, config, gate, started);
     }
@@ -173,6 +278,10 @@ export class RecruitmentZaloSender
     try {
       let result = await this.send(row, token.accessToken, config);
       if (result.result === 'TOKEN_INVALID') {
+        // Kết thúc ledger request thứ nhất trước khi reserve/ghi request thứ hai.
+        if (this.production) {
+          await this.queue.markAttemptRejected(row.id, owner, result.code);
+        }
         try {
           token = await this.credentials.refresh(config, token.version);
         } catch (error) {
@@ -186,7 +295,15 @@ export class RecruitmentZaloSender
         }
         // Lần trước Zalo từ chối token (chắc chắn chưa tới) và refresh có thể lâu —
         // HR có thể đã tiếp quản trong lúc đó: kiểm lại trước lần gửi thứ hai.
-        const again = await this.queue.dispatch(row, owner, true);
+        const again = await this.queue.dispatch(
+          row,
+          owner,
+          true,
+          this.pilotSenders,
+          this.guard,
+          this.production,
+          this.hrMessageTtlMinutes,
+        );
         if (again.outcome !== 'DISPATCHED') {
           return this.notDispatched(row, owner, config, again, started);
         }
@@ -222,6 +339,11 @@ export class RecruitmentZaloSender
     if (!this.enabled || row.channelAccountId !== config.oaId) {
       return { result: 'RETRY', code: 'OUTBOUND_DISABLED' };
     }
+    // Thu hẹp cửa sổ race của dừng khẩn: kiểm lại ngay trước khi mở socket. Request
+    // đã bay thì không thể thu hồi, nhưng sau khi flag commit sẽ không mở request mới.
+    if (await this.outboundHalted()) {
+      return { result: 'RETRY', code: 'OUTBOUND_HALTED' };
+    }
     const outcome = await postRequest(
       `${config.apiUrl.replace(/\/+$/, '')}/v3.0/oa/message/cs`,
       { 'Content-Type': 'application/json', access_token: accessToken },
@@ -252,6 +374,9 @@ export class RecruitmentZaloSender
       case 'TOKEN_INVALID':
         return { status: 'RETRY', code: 'CREDENTIAL_INVALID' };
       case 'REJECTED':
+        if (result.oaBlocked) {
+          return { status: 'DEAD_LETTER', code: result.code, oaBlocked: true };
+        }
         return result.permanent || row.attemptCount >= config.maxRejectAttempts
           ? { status: 'DEAD_LETTER', code: result.code }
           : { status: 'RETRY', code: result.code };
@@ -358,6 +483,64 @@ export class RecruitmentZaloSender
     ) {
       await this.record(row.id, outcome.status, code);
     }
+    // Lỗi quyền dịch vụ của cả OA: dừng khẩn ngay cả khi mất lease (Zalo đã trả lời).
+    if (outcome.status === 'DEAD_LETTER' && outcome.oaBlocked) {
+      await this.blockOutbound(row.id, config, code);
+    }
+  }
+
+  /**
+   * Zalo từ chối vì quyền dịch vụ của OA (vd. -224): DỪNG KHẨN outbound (audit RUNTIME_STOP,
+   * actor hệ thống) + cảnh báo CRITICAL cho HR / SYSTEM OWNER. Không tự mở lại khi gói OA
+   * thay đổi — người vận hành mở lại thủ công sau khi Owner xác nhận gói. Dừng khẩn lỗi
+   * → runtime tự bật failsafe (fail-closed).
+   */
+  private async blockOutbound(
+    outboxId: number,
+    config: ZaloOutboundConfig,
+    code: string,
+  ): Promise<void> {
+    this.logger.error(
+      `sender OUTBOUND DỪNG KHẨN: Zalo ${code} — OA thiếu quyền dịch vụ (gói OA); chỉ mở lại thủ công sau khi SYSTEM OWNER xác nhận gói OA`,
+    );
+    if (!this.runtime) {
+      this.logger.error(
+        'sender: không có runtime control — KHÔNG dừng được outbound tự động',
+      );
+    } else {
+      try {
+        await this.runtime.set(
+          [RuntimeControlScope.OUTBOUND],
+          true,
+          `ZALO_OA_SERVICE_BLOCKED ${code}: OA cần kiểm tra/nâng cấp gói dịch vụ — chỉ mở lại sau khi SYSTEM OWNER xác nhận`,
+          SYSTEM_ACTOR,
+        );
+      } catch (error) {
+        this.logger.error(
+          `sender: dừng khẩn outbound lỗi error=${errorCode(error)} (runtime đã bật failsafe)`,
+        );
+      }
+    }
+    try {
+      const day = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+      }).format(new Date());
+      await this.alerts.raise({
+        type: HrAlertType.OUTBOUND_PROVIDER_BLOCKED,
+        severity: HrAlertSeverity.CRITICAL,
+        sourceKey: `zalo-oa:${config.oaId}:${code}:${day}`,
+        outboxId,
+        details: {
+          code,
+          outboundHalted: true,
+          action: 'OWNER_CHECK_OA_PACKAGE',
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `sender: cảnh báo OA bị chặn lỗi error=${errorCode(error)}`,
+      );
+    }
   }
 
   /** Cửa kiểm cuối không cho gửi: chặn (tin AI sau khi HR đổi điều khiển), dữ liệu sai, mất lease. */
@@ -369,6 +552,13 @@ export class RecruitmentZaloSender
     started: number,
   ): Promise<void> {
     switch (gate.outcome) {
+      case 'HELD':
+        this.logger.warn(
+          gate.code
+            ? `sender outbox=${row.id} result=HELD code=${gate.code} (single dispatch guard) — giữ chờ, không mở kết nối`
+            : `sender outbox=${row.id} result=HELD (outbound đang dừng khẩn) — giữ chờ, không mở kết nối`,
+        );
+        return;
       case 'LOST':
         this.logger.warn(
           `sender outbox=${row.id} lease lost trước khi gửi — bỏ`,
@@ -397,6 +587,19 @@ export class RecruitmentZaloSender
           network: false,
         });
     }
+  }
+
+  /** Dừng khẩn outbound (P3-7.3 / G8) — đọc mới mỗi vòng; log một lần khi đổi trạng thái. */
+  private async outboundHalted(): Promise<boolean> {
+    if (!this.runtime) return false;
+    const halted = (await this.runtime.state()).outboundHalted;
+    if (halted !== this.lastHalted) {
+      this.lastHalted = halted;
+      if (halted)
+        this.logger.warn('sender: outbound đang DỪNG KHẨN — không claim tin');
+      else this.logger.warn('sender: outbound mở lại');
+    }
+    return halted;
   }
 
   private async maintenance(config: ZaloOutboundConfig) {

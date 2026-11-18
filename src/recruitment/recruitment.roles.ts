@@ -12,7 +12,6 @@ export const RECRUITMENT_MANAGE_ROLES: readonly string[] = [HR_ROLE];
 /** Ban giám đốc xem được toàn bộ pipeline nhưng không thao tác. */
 export const RECRUITMENT_VIEW_ONLY_ROLES: readonly string[] = [
   'director',
-  'director_la',
   'troly_gd',
 ];
 

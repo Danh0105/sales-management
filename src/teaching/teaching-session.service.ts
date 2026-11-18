@@ -39,6 +39,7 @@ import {
   CreateTeachingSessionDto,
   DeclineTeachingSessionDto,
   QueryAttendanceSummaryDto,
+  QueryMyAttendanceSummaryDto,
   QueryTravelReviewDto,
   QueryTeachingSessionsDto,
   NotifyTeachingScheduleDto,
@@ -56,6 +57,7 @@ import {
   TeachingApplicationStatus,
 } from './teaching.enum';
 import {
+  addDays,
   amountOf,
   assertDateOrder,
   assertTimeOrder,
@@ -118,7 +120,11 @@ import {
 } from './fuel-allowance-tier.service';
 import { effectiveRatePerPeriod } from './teaching-rate.util';
 import { HCM_OFFICE, isHcmRegionWard } from './company-departure';
-import { findTeachingManagers as findTeachingManagersUtil } from './teaching-managers.util';
+import { formatConfirmationPlace } from './confirmation-place.util';
+import {
+  findHrStaff,
+  findTeachingManagers as findTeachingManagersUtil,
+} from './teaching-managers.util';
 import { FcmService } from '../fcm/fcm.service';
 import { EmployeeFcmTokenService } from '../employee-fcm-token/employee-fcm-token.service';
 import { LessonImageStorageService } from './lesson-image-storage.service';
@@ -133,6 +139,7 @@ import {
   LessonImageEntity,
 } from './entities/lesson-image.entity';
 import { isCronLeader } from '../utils/is-cron-leader';
+import { lessonStudentCounts } from './lesson-student-counts';
 import {
   TEACHER_COLLABORATOR_ROLE,
   TEACHER_STAFF_ROLE,
@@ -150,6 +157,9 @@ import {
 
 const MAX_LIMIT = 200;
 
+/** Giáo viên tự xem tổng hợp công tối đa ~một quý mỗi lần (dựng lộ trình từng ngày). */
+const MY_SUMMARY_MAX_DAYS = 93;
+
 /** Buổi của giáo viên công ty (tài khoản có role `giaovien_congty`), alias `ss`. */
 export const STAFF_TEACHER_SQL =
   `EXISTS (SELECT 1 FROM teachers stt JOIN employee ste ON ste.id = stt.employee_id ` +
@@ -162,7 +172,7 @@ export const STAFF_TEACHER_SQL =
  * vì điền đơn giá cũng không đúng. Dùng chung cho cột "thiếu giá N buổi" và
  * danh sách chi tiết các buổi đó.
  */
-const MISSING_RATE_SQL =
+export const MISSING_RATE_SQL =
   `(ss.status = '${SessionStatus.PRESENT}' AND ss.ratePerPeriod IS NULL AND ss.gasAllowance IS NULL ` +
   `AND NOT ${STAFF_TEACHER_SQL})`;
 
@@ -1707,6 +1717,15 @@ export class TeachingSessionService {
       throw error;
     }
 
+    // Kiểm sĩ số trước khi lưu ảnh để không phải dọn file khi request sai.
+    let studentCounts: ReturnType<typeof lessonStudentCounts>;
+    try {
+      studentCounts = lessonStudentCounts(dto);
+    } catch (error) {
+      this.logCheckoutFailure(trace, error);
+      throw error;
+    }
+
     let lessonImages: LessonImage[];
     try {
       lessonImages = await this.lessonImageStorage.storeMany(files);
@@ -1783,7 +1802,9 @@ export class TeachingSessionService {
 
         session.lessonName = dto.lessonName;
         session.lessonEvaluation = dto.lessonEvaluation;
-        session.actualStudentCount = dto.actualStudentCount;
+        session.actualStudentCount = studentCounts.actualStudentCount;
+        session.totalStudentCount = studentCounts.totalStudentCount;
+        session.absentStudentNames = studentCounts.absentStudentNames;
         session.lessonImages = lessonImages;
         const submittedAt = new Date();
         session.lessonSubmittedAt = submittedAt;
@@ -2452,6 +2473,84 @@ export class TeachingSessionService {
   }
 
   /**
+   * Tổng hợp chấm công + quãng đường của chính giáo viên đang đăng nhập —
+   * cùng số liệu với tab Tổng hợp và Rà soát quãng đường của Nhân sự, chỉ
+   * của giáo viên này (teacherId lấy từ token). Có phụ cấp xăng nhưng không
+   * trả tiền tiết; bỏ toạ độ GPS và chẩn đoán nội bộ của từng lượt.
+   */
+  async myAttendanceSummary(
+    employeeId: number,
+    query: QueryMyAttendanceSummaryDto,
+  ) {
+    assertDateOrder(
+      query.fromDate,
+      query.toDate,
+      'fromDate phải nhỏ hơn hoặc bằng toDate',
+    );
+    if (addDays(query.fromDate, MY_SUMMARY_MAX_DAYS - 1) < query.toDate) {
+      throw new BadRequestException(
+        `Chỉ xem tối đa ${MY_SUMMARY_MAX_DAYS} ngày mỗi lần`,
+      );
+    }
+    const teacher = await this.getTeacherByEmployee(employeeId);
+    const range = {
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      teacherId: teacher.id,
+    };
+    const [summary, travel] = await Promise.all([
+      this.attendanceSummary(range),
+      this.travelReview(range),
+    ]);
+    const row = summary.data.find((item) => item.teacherId === teacher.id);
+    const route = travel.teachers.find((item) => item.teacherId === teacher.id);
+
+    return {
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      teacherName: teacher.name,
+      attendance: {
+        totalSessions: row?.totalSessions ?? 0,
+        present: row?.present ?? 0,
+        absent: row?.absent ?? 0,
+        excused: row?.excused ?? 0,
+        cancelled: row?.cancelled ?? 0,
+        unchecked: row?.unchecked ?? 0,
+        makeup: row?.makeup ?? 0,
+        totalPeriods: row?.totalPeriods ?? 0,
+        /** Tiết có dạy (đã chấm Có mặt). */
+        presentPeriods: row?.payablePeriods ?? 0,
+      },
+      /** Phần đã chấm công — khớp bảng công Nhân sự đang tính. */
+      totalDistanceKm: row?.totalDistanceKm ?? 0,
+      fuelAllowanceAmount: row?.fuelAllowanceAmount ?? 0,
+      /** Tiết đã tới ngày mà chưa chấm công — km/phụ cấp các lượt đó chưa vào bảng công. */
+      uncheckedSessions: route?.uncheckedSessions ?? 0,
+      days: (route?.days ?? []).map((day) => ({
+        date: day.date,
+        fromOffice: day.fromOffice,
+        totalDistanceKm: day.totalDistanceKm,
+        fuelAllowanceAmount: day.fuelAllowanceAmount,
+        stops: day.stops.map((stop) => ({
+          schoolName: stop.schoolName,
+          locationName: stop.locationName,
+          startTime: stop.startTime,
+          endTime: stop.endTime,
+          periods: stop.periods,
+          sessions: stop.sessions,
+          uncheckedSessions: stop.uncheckedSessions,
+          counted: stop.counted,
+          distanceKm: stop.counted ? stop.distanceKm : null,
+          gasAllowance: stop.counted ? stop.gasAllowance : null,
+          checkedIn: stop.checkin !== null,
+          flags: stop.flags,
+          missingReasons: stop.missingReasons,
+        })),
+      })),
+    };
+  }
+
+  /**
    * Phụ cấp xăng gộp theo MỖI LẦN đến nơi dạy (block: chuỗi tiết liên tiếp
    * trong cùng ngày, cùng giáo viên, cùng ĐỊA ĐIỂM) — không cộng theo từng
    * tiết, tránh trả nhiều lần cho một lượt đi lại.
@@ -2697,6 +2796,8 @@ export class TeachingSessionService {
         'ss.lessonEvaluation AS "lessonEvaluation"',
         'ss.lessonImages AS "lessonImages"',
         'ss.actualStudentCount AS "actualStudentCount"',
+        'ss.totalStudentCount AS "totalStudentCount"',
+        'ss.absentStudentNames AS "absentStudentNames"',
         'ss.lessonSubmittedAt AS "lessonSubmittedAt"',
         'ss.lessonReportAlertAt AS "lessonReportAlertAt"',
         'ss.note AS "note"',
@@ -2887,6 +2988,10 @@ export class TeachingSessionService {
       lessonName: row.lessonName ?? null,
       lessonEvaluation: row.lessonEvaluation ?? null,
       actualStudentCount: this.nullableNumber(row.actualStudentCount),
+      totalStudentCount: this.nullableNumber(row.totalStudentCount),
+      absentStudentNames: Array.isArray(row.absentStudentNames)
+        ? row.absentStudentNames
+        : null,
       lessonSubmittedAt: row.lessonSubmittedAt
         ? new Date(row.lessonSubmittedAt).toISOString()
         : null,
@@ -3275,7 +3380,7 @@ export class TeachingSessionService {
 
     // Gửi OA trước các kênh realtime/push: socket hoặc Firebase chậm không được
     // phép làm mất cảnh báo Zalo vốn có cửa sổ chỉ vài phút.
-    const zaloSent = await this.sendCheckinAlertToZalo(managers, message);
+    const zaloSent = await this.sendCheckinAlertToZalo(sessions);
 
     for (const receiverId of recipients) {
       await this.notificationService.create({
@@ -3560,13 +3665,6 @@ export class TeachingSessionService {
   ): Promise<void> {
     if (!teacher.employeeId) return;
 
-    const slot =
-      `ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
-      `lúc ${toDisplayTime(session.startTime)}`;
-    const message =
-      reason === 'rescheduled'
-        ? `Buổi dạy của bạn đã đổi lịch sang ${slot}. Vui lòng xác nhận hoặc từ chối.`
-        : `Bạn được xếp buổi dạy ${slot}. Vui lòng xác nhận hoặc từ chối.`;
     const pushData = {
       kind: TEACHING_SCHEDULE_CONFIRM_REQUEST_KIND,
       module: TEACHING_MODULE,
@@ -3575,11 +3673,30 @@ export class TeachingSessionService {
     };
 
     try {
+      const place = await this.describeConfirmationPlace(session.id);
+      const detail =
+        `ngày ${this.formatVietnameseDate(toDateString(session.date) as string)} ` +
+        `lúc ${toDisplayTime(session.startTime)}` +
+        `${place ? ` – ${place}` : ''}`;
+      const message =
+        reason === 'rescheduled'
+          ? `Buổi dạy của bạn đã đổi lịch sang ${detail}. Vui lòng xác nhận hoặc từ chối.`
+          : `Bạn được xếp buổi dạy ${detail}. Vui lòng xác nhận hoặc từ chối.`;
+
       await this.notificationService.create({
         receiverId: teacher.employeeId,
         type: NotificationType.TEACHING_SCHEDULE_CONFIRM_REQUEST,
         message,
-        meta: { ...pushData, entityType: 'session', sessionId: session.id },
+        meta: {
+          ...pushData,
+          entityType: 'session',
+          sessionId: session.id,
+          // Một dòng trong tin Zalo gộp khi Nhân sự xếp nhiều lịch liền nhau.
+          summary:
+            reason === 'rescheduled'
+              ? `Đổi lịch: buổi ${detail}`
+              : `Buổi ${detail}`,
+        },
       });
 
       const tokens = await this.employeeFcmTokenService.getTokens([
@@ -3598,6 +3715,27 @@ export class TeachingSessionService {
         'Gửi thông báo yêu cầu xác nhận buổi dạy lỗi',
         error as any,
       );
+    }
+  }
+
+  /** Môn – lớp, trường của buổi; tra lỗi thì bỏ trống chứ không chặn thông báo. */
+  private async describeConfirmationPlace(sessionId: number): Promise<string> {
+    try {
+      const row = await this.sessionRepo
+        .createQueryBuilder('ss')
+        .leftJoin('ss.school', 'sc')
+        .leftJoin('ss.class', 'cl')
+        .leftJoin('ss.subject', 'sub')
+        .select([
+          'sc.name AS "schoolName"',
+          'cl.name AS "className"',
+          'sub.name AS "subjectName"',
+        ])
+        .where('ss.id = :id', { id: sessionId })
+        .getRawOne();
+      return formatConfirmationPlace(row);
+    } catch {
+      return '';
     }
   }
 
@@ -3785,31 +3923,40 @@ export class TeachingSessionService {
    * Kênh Zalo của báo động — chạy sau thông báo trong app và push, và không bao
    * giờ ném lỗi ra ngoài: Zalo là kênh phụ, hỏng thì báo động vẫn phải tới nơi
    * bằng hai kênh kia.
+   *
+   * Chỉ buổi ở trường khu vực TP.HCM và chỉ gửi Nhân sự (quyết định 02/11/2026);
+   * Giáo vụ và các khu vực khác theo dõi qua thông báo trong app/push.
    */
   private async sendCheckinAlertToZalo(
-    managers: Array<{ id: number; zaloUserId: string | null }>,
-    message: string,
+    sessions: Array<
+      Parameters<TeachingSessionService['buildCheckinAlertMessage']>[0][number] & {
+        hcmRegion: boolean;
+      }
+    >,
   ): Promise<number> {
     if (!isTeachingCheckinAlertZaloEnabled()) return 0;
 
-    const targets = managers
-      .map((m) => m.zaloUserId)
-      .filter((id): id is string => Boolean(id));
-
-    if (!targets.length) {
-      this.logger.warn(
-        'Bật báo động Zalo nhưng chưa tài khoản Giáo vụ / Nhân sự nào có zalo_user_id',
-      );
-      return 0;
-    }
+    const hcmSessions = sessions.filter((s) => s.hcmRegion);
+    if (!hcmSessions.length) return 0;
 
     try {
+      const targets = (await findHrStaff(this.employeeRepo))
+        .map((m) => m.zaloUserId)
+        .filter((id): id is string => Boolean(id));
+
+      if (!targets.length) {
+        this.logger.warn(
+          'Bật báo động Zalo nhưng chưa tài khoản Nhân sự nào có zalo_user_id',
+        );
+        return 0;
+      }
+
       this.logger.log(
         `Zalo: bắt đầu gửi cảnh báo check-in tới ${targets.length} người`,
       );
       const result = await this.zaloNotifyService.sendToMany(
         targets,
-        `${TEACHING_CHECKIN_ALERT_ZALO_PREFIX}${message}`,
+        `${TEACHING_CHECKIN_ALERT_ZALO_PREFIX}${this.buildCheckinAlertMessage(hcmSessions)}`,
       );
       this.logger.log(
         `Zalo: hoàn tất cảnh báo check-in (${result.sent} thành công, ${result.failed} lỗi)`,
@@ -3901,6 +4048,7 @@ export class TeachingSessionService {
       .createQueryBuilder('ss')
       .innerJoin('ss.teacher', 't')
       .innerJoin('ss.school', 'sc')
+      .leftJoin('sc.ward', 'sw')
       .leftJoin('ss.class', 'cl')
       .innerJoin('ss.subject', 'sub')
       .select([
@@ -3911,6 +4059,8 @@ export class TeachingSessionService {
         'ss.teacherId AS "teacherId"',
         't.name AS "teacherName"',
         'sc.name AS "schoolName"',
+        'sw.id AS "schoolWardId"',
+        'sw.province_id AS "schoolProvinceId"',
         'cl.name AS "className"',
         'sub.name AS "subjectName"',
       ])
@@ -3937,6 +4087,7 @@ export class TeachingSessionService {
         className: (row.className as string) ?? null,
         subjectName: (row.subjectName as string) ?? '',
         minutesToStart: this.minutesOfTime(startTime) - nowMinutes,
+        hcmRegion: isHcmRegionWard(row.schoolWardId, row.schoolProvinceId),
       };
     });
   }

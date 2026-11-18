@@ -17,6 +17,13 @@ import {
   buildSchoolExpenseItemData,
 } from '../school-expenses/expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
+import {
+  keepLinkedPaymentFields,
+  linkedRowDeleteError,
+  loadLinkedManagementRows,
+  loadSuggestPayments,
+  withSuggestPayments,
+} from '../management-expense-item/suggest-payments';
 
 @Injectable()
 export class SchoolExpenseItemsService {
@@ -116,7 +123,15 @@ export class SchoolExpenseItemsService {
       });
     }
 
-    return await qb.getMany();
+    // Dòng có Đã chi từ Đề xuất Chi Trường: Ngày chi / Nguồn chi hiện lần ghi
+    // gần nhất kèm mã đề xuất để màn hình khoá ô (như Chi Ngoài).
+    const items = await qb.getMany();
+    const payments = await loadSuggestPayments(
+      this.schoolExpenseItemRepository.manager,
+      items.map((item) => item.id),
+      'SCHOOL_EXPENSE',
+    );
+    return items.map((item) => withSuggestPayments(item, payments));
   }
 
   // FIND ONE
@@ -131,6 +146,19 @@ export class SchoolExpenseItemsService {
     }
 
     return data;
+  }
+
+  /** Một dòng cho màn hình — kèm phần Đã chi từ đề xuất như danh sách. */
+  async findOneView(id: number) {
+    const data = await this.findOne(id);
+    return withSuggestPayments(
+      data,
+      await loadSuggestPayments(
+        this.schoolExpenseItemRepository.manager,
+        [data.id],
+        'SCHOOL_EXPENSE',
+      ),
+    );
   }
 
   // UPDATE
@@ -171,23 +199,36 @@ export class SchoolExpenseItemsService {
       data.subject = subject;
     }
 
+    // Dòng có Đã chi từ Đề xuất Chi Trường: Ngày chi / Nguồn chi / Đã chi giữ số trên server.
+    const linkedRow = (
+      await loadLinkedManagementRows(
+        this.schoolExpenseItemRepository.manager,
+        { itemIds: [id] },
+        'SCHOOL_EXPENSE',
+      )
+    ).get(id);
+
+    const built = buildSchoolExpenseItemData({
+      rowIndex: data.rowIndex,
+      totalPeriods: data.totalPeriods,
+      studentCount: data.studentCount,
+      monthsCount: data.monthsCount,
+      giaovien: data.giaovien,
+      thue: data.thue,
+      csvc: data.csvc,
+      expenseDate: data.expenseDate,
+      paidAmount: data.paidAmount,
+      paymentType: data.paymentType,
+      cashAccount: data.cashAccount,
+      payer: data.payer,
+      note: data.note,
+      ...body,
+    });
     Object.assign(
       data,
-      buildSchoolExpenseItemData({
-        rowIndex: data.rowIndex,
-        totalPeriods: data.totalPeriods,
-        studentCount: data.studentCount,
-        monthsCount: data.monthsCount,
-        giaovien: data.giaovien,
-        thue: data.thue,
-        csvc: data.csvc,
-        expenseDate: data.expenseDate,
-        paidAmount: data.paidAmount,
-        paymentType: data.paymentType,
-        payer: data.payer,
-        note: data.note,
-        ...body,
-      }),
+      linkedRow
+        ? keepLinkedPaymentFields(built, linkedRow, built.schoolExpenseAmount)
+        : built,
     );
 
     const saved = await this.schoolExpenseItemRepository.save(data);
@@ -218,6 +259,16 @@ export class SchoolExpenseItemsService {
     const data = await this.findOne(id);
 
     assertNotFinalized(data.schoolExpense);
+
+    const linkedRow = (
+      await loadLinkedManagementRows(
+        this.schoolExpenseItemRepository.manager,
+        { itemIds: [id] },
+        'SCHOOL_EXPENSE',
+      )
+    ).get(id);
+    if (linkedRow)
+      throw linkedRowDeleteError(linkedRow.payments, 'SCHOOL_EXPENSE');
 
     await this.historyRepository.save({
       schoolExpenseId: data.schoolExpense?.id,

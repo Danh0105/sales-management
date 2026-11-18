@@ -8,6 +8,7 @@ import { NotifyService } from '../../notify-zalo/notify.service';
 import { NotificationType } from '../enums/notification-type.enum';
 import { TEACHING_SCHEDULE_ROUTE } from '../constants/teaching-schedule.constant';
 import { NotificationGateway } from '../gateways/notification.geteway';
+import { LongAnScopeService, longAnOnlyStaffSql } from '../../long-an-director/long-an-scope.service';
 
 /**
  * Nhóm type giảng dạy gửi kèm Zalo OA — KHÔNG gồm TEACHING_CHECKIN_ALERT vì
@@ -28,6 +29,19 @@ const TEACHING_ZALO_TYPES = new Set<NotificationType>([
   NotificationType.TEACHER_ACCOUNT_RESULT,
 ]);
 
+const LONG_AN_PROVINCE_ID = 7;
+const LONG_AN_DIRECTOR_ROLE = 'director_la';
+
+/**
+ * Giám đốc Long An chỉ nhận thông báo khi biết chắc nguồn thuộc Long An:
+ * chính sách theo tỉnh của trường, báo cáo theo `daily_reports.province_id`,
+ * kế hoạch cũ theo người gửi thuần Long An. Không khai báo nguồn thì không nhận.
+ */
+export type LongAnNotificationSource =
+  | { kind: 'policy'; policyId?: number; subjectId?: number }
+  | { kind: 'report'; reportId?: number; provinceId?: number };
+const FULL_DIRECTOR_ROLE = 'director';
+
 /**
  * Đọc tại thời điểm gọi (không chốt hằng số) — ConfigModule nạp `.env` sau
  * khi module TS được import, chốt sớm có thể luôn đọc ra "tắt".
@@ -37,6 +51,51 @@ const TEACHING_ZALO_TYPES = new Set<NotificationType>([
  */
 const isTeachingNotificationZaloEnabled = () =>
   process.env.TEACHING_NOTIFICATION_ZALO !== '0';
+
+/** Gốc web app — ghép với `meta.url` dạng "/#/..." thành link bấm được trong tin Zalo. */
+const teachingAppUrl = () =>
+  (process.env.TEACHING_APP_URL || 'https://kidoapp.kidoedu.vn').replace(/\/+$/, '');
+
+/** Tin Zalo không mở thẳng app như push — kèm link để người nhận bấm vào xử lý. */
+function withAppLink(message: string, meta?: Record<string, any> | null): string {
+  const url = meta?.url;
+  if (typeof url !== 'string' || !url.startsWith('/')) return message;
+  return `${message}\n👉 ${teachingAppUrl()}${url}`;
+}
+
+/**
+ * Yêu cầu xác nhận lịch dạy: Nhân sự hay xếp nhiều lịch liền nhau (lưu TKB hàng
+ * loạt, sửa từng ô liên tiếp) — mỗi lịch một tin Zalo là vài chục tin cho một
+ * giáo viên. Gom theo giáo viên: gửi khi đã yên 30 giây, chậm nhất 2 phút sau
+ * yêu cầu đầu tiên. Restart giữa chừng thì mất tin Zalo đang gom, thông báo
+ * trong app vẫn còn.
+ */
+const CONFIRM_DIGEST_QUIET_MS = 30_000;
+const CONFIRM_DIGEST_MAX_WAIT_MS = 120_000;
+/** Zalo giới hạn 2.000 ký tự mỗi tin. */
+const CONFIRM_DIGEST_MAX_LINES = 15;
+const CONFIRM_DIGEST_PREFIX = '📅 LỊCH DẠY CẦN XÁC NHẬN\n';
+
+type ConfirmDigestItem = {
+  message: string;
+  summary: string;
+  meta?: Record<string, any> | null;
+};
+
+function buildConfirmDigestText(items: ConfirmDigestItem[]): string {
+  if (items.length === 1) {
+    return withAppLink(`${CONFIRM_DIGEST_PREFIX}${items[0].message}`, items[0].meta);
+  }
+
+  const shown = items.slice(0, CONFIRM_DIGEST_MAX_LINES);
+  const more = items.length - shown.length;
+  const text =
+    `${CONFIRM_DIGEST_PREFIX}Bạn được xếp ${items.length} lịch dạy mới:\n` +
+    shown.map((item) => `• ${item.summary}`).join('\n') +
+    (more > 0 ? `\n… và ${more} lịch khác` : '') +
+    '\nVui lòng xác nhận hoặc từ chối.';
+  return withAppLink(text, items[0].meta);
+}
 
 @Injectable()
 export class NotificationService {
@@ -52,7 +111,127 @@ export class NotificationService {
     private readonly employeeRepo: Repository<Employee>,
 
     private readonly notifyService: NotifyService,
+
+    private readonly longAnScope: LongAnScopeService,
   ) {}
+
+  /** Yêu cầu xác nhận lịch dạy đang gom theo người nhận, chờ gửi Zalo một lần. */
+  private readonly confirmDigest = new Map<
+    number,
+    { items: ConfirmDigestItem[]; firstAt: number; timer?: NodeJS.Timeout }
+  >();
+
+  /**
+   * `director_la` là vai trò giám đốc theo tỉnh, không phải một giám đốc toàn
+   * hệ thống. Tài khoản đồng thời có role `director` vẫn giữ quyền đầy đủ.
+   */
+  private async isRestrictedLongAnDirector(employeeId: number): Promise<boolean> {
+    const employee = await this.employeeRepo.findOne({
+      where: { id: employeeId },
+      select: ['id', 'roles'],
+    });
+    const roles = employee?.roles ?? [];
+    return roles.includes(LONG_AN_DIRECTOR_ROLE) && !roles.includes(FULL_DIRECTOR_ROLE);
+  }
+
+  private applyLongAnDirectorScope(
+    qb: SelectQueryBuilder<Notification>,
+    alias = 'n',
+  ): SelectQueryBuilder<Notification> {
+    return qb.andWhere(
+      `(
+        (${alias}.type = 'POLICY' AND EXISTS (
+          SELECT 1 FROM policy la_policy
+          JOIN subjects la_subject ON la_subject.id = la_policy."subjectId"
+          JOIN schools la_school ON la_school.id = la_subject.school_id
+          JOIN wards la_ward ON la_ward.id = la_school.ward_id
+          WHERE la_policy.id = ${alias}."entityId"
+            AND la_ward.province_id = :longAnProvinceId
+        ))
+        OR (${alias}.type = 'REPORT' AND EXISTS (
+          SELECT 1 FROM daily_reports la_report
+          WHERE la_report.id = ${alias}."entityId"
+            AND la_report.province_id = :longAnProvinceId
+        ))
+        OR (${alias}.type = 'WEEKLY_PLAN'
+          AND ${longAnOnlyStaffSql(`${alias}."senderId"`)})
+      )`,
+      { longAnProvinceId: LONG_AN_PROVINCE_ID },
+    );
+  }
+
+  private async applyReceiverNotificationScope(
+    qb: SelectQueryBuilder<Notification>,
+    receiverId: number,
+    alias = 'n',
+  ): Promise<SelectQueryBuilder<Notification>> {
+    if (await this.isRestrictedLongAnDirector(receiverId)) {
+      return this.applyLongAnDirectorScope(qb, alias);
+    }
+    return qb;
+  }
+
+  /**
+   * Lọc cả trước khi lấy FCM token. `createNotifications` cũng gọi lại hàm
+   * này để DB/socket/Zalo không thể lệch phạm vi với push notification.
+   */
+  async scopeBusinessReceiverIds(
+    receiverIds: number[],
+    senderId?: number,
+    source?: LongAnNotificationSource,
+  ): Promise<number[]> {
+    const uniqueIds = [...new Set(receiverIds)].filter((id) => Number.isInteger(id));
+    if (!uniqueIds.length) return [];
+
+    const receivers = await this.employeeRepo.find({
+      where: { id: In(uniqueIds) },
+      select: ['id', 'roles'],
+    });
+    const restrictedIds = new Set(
+      receivers
+        .filter((receiver) => {
+          const roles = receiver.roles ?? [];
+          return roles.includes(LONG_AN_DIRECTOR_ROLE) && !roles.includes(FULL_DIRECTOR_ROLE);
+        })
+        .map((receiver) => Number(receiver.id)),
+    );
+    if (!restrictedIds.size) return uniqueIds;
+
+    const allowed = await this.isLongAnSource(senderId, source);
+    return uniqueIds.filter(
+      (receiverId) => !restrictedIds.has(receiverId) || allowed,
+    );
+  }
+
+  private async isLongAnSource(
+    senderId?: number,
+    source?: LongAnNotificationSource,
+  ): Promise<boolean> {
+    if (source?.kind === 'policy') {
+      if (source.policyId) return this.longAnScope.policyInScope(source.policyId);
+      if (source.subjectId) return this.longAnScope.subjectInScope(source.subjectId);
+      return false;
+    }
+    if (source?.kind === 'report') {
+      if (source.provinceId != null) {
+        return Number(source.provinceId) === LONG_AN_PROVINCE_ID;
+      }
+      if (source.reportId) return this.longAnScope.reportInScope(source.reportId);
+      return senderId ? this.longAnScope.employeeIsLongAnOnly(senderId) : false;
+    }
+    return false;
+  }
+
+  /** Nguồn của thông báo suy ra từ loại + entity, dùng khi lưu vào DB. */
+  private longAnSourceOf(
+    type?: NotificationType,
+    entityId?: number,
+  ): LongAnNotificationSource | undefined {
+    if (type === NotificationType.POLICY) return { kind: 'policy', policyId: entityId };
+    if (type === NotificationType.REPORT) return { kind: 'report', reportId: entityId };
+    if (type === NotificationType.WEEKLY_PLAN) return { kind: 'report' };
+    return undefined;
+  }
 
   /**
    * Gửi kèm Zalo OA cho thông báo giảng dạy — kênh phụ, không bao giờ được
@@ -62,10 +241,20 @@ export class NotificationService {
     receiverId: number,
     type: NotificationType,
     message?: string | null,
+    meta?: Record<string, any> | null,
   ) {
     if (!message || !TEACHING_ZALO_TYPES.has(type)) return;
     if (!isTeachingNotificationZaloEnabled()) return;
 
+    if (type === NotificationType.TEACHING_SCHEDULE_CONFIRM_REQUEST) {
+      this.queueConfirmDigest(receiverId, message, meta);
+      return;
+    }
+
+    await this.sendZaloToEmployee(receiverId, withAppLink(message, meta));
+  }
+
+  private async sendZaloToEmployee(receiverId: number, text: string) {
     try {
       const employee = await this.employeeRepo.findOne({
         where: { id: receiverId },
@@ -73,12 +262,50 @@ export class NotificationService {
       });
       if (!employee?.zaloUserId) return;
 
-      await this.notifyService.sendMessage(employee.zaloUserId, message);
+      await this.notifyService.sendMessage(employee.zaloUserId, text);
     } catch (error) {
       this.logger.warn(
         `Không gửi được Zalo OA cho nhân viên #${receiverId}: ${(error as Error).message}`,
       );
     }
+  }
+
+  private queueConfirmDigest(
+    receiverId: number,
+    message: string,
+    meta?: Record<string, any> | null,
+  ) {
+    const now = Date.now();
+    const entry = this.confirmDigest.get(receiverId) ?? {
+      items: [],
+      firstAt: now,
+    };
+    entry.items.push({
+      message,
+      summary: typeof meta?.summary === 'string' ? meta.summary : message,
+      meta,
+    });
+
+    if (entry.timer) clearTimeout(entry.timer);
+    const wait = Math.min(
+      CONFIRM_DIGEST_QUIET_MS,
+      entry.firstAt + CONFIRM_DIGEST_MAX_WAIT_MS - now,
+    );
+    entry.timer = setTimeout(
+      () => void this.flushConfirmDigest(receiverId),
+      Math.max(0, wait),
+    );
+    this.confirmDigest.set(receiverId, entry);
+  }
+
+  /** Gửi ngay tin gộp đang chờ của một người nhận (hẹn giờ gọi; test gọi thẳng). */
+  async flushConfirmDigest(receiverId: number) {
+    const entry = this.confirmDigest.get(receiverId);
+    if (!entry) return;
+    this.confirmDigest.delete(receiverId);
+    if (entry.timer) clearTimeout(entry.timer);
+
+    await this.sendZaloToEmployee(receiverId, buildConfirmDigestText(entry.items));
   }
 
   private getEventByType(type: NotificationType) {
@@ -131,6 +358,9 @@ export class NotificationService {
       case NotificationType.TEACHER_ACCOUNT_RESULT:
         return 'teacher-account-result:new';
 
+      case NotificationType.FINANCIAL_REQUEST:
+        return 'financial-request-notification:new';
+
       default:
         return 'notification:new';
     }
@@ -140,6 +370,15 @@ export class NotificationService {
   // ======================================================
 
   async create(data: Partial<Notification>) {
+    if (data.receiverId) {
+      const receiverIds = await this.scopeBusinessReceiverIds(
+        [data.receiverId],
+        data.senderId,
+        this.longAnSourceOf(data.type, data.entityId),
+      );
+      if (!receiverIds.length) return null;
+    }
+
     const notification = this.repo.create(data);
 
     const saved = await this.repo.save(notification);
@@ -148,7 +387,12 @@ export class NotificationService {
 
     this.gateway.emitToUser(saved.receiverId, event, saved);
 
-    await this.pushTeachingZalo(saved.receiverId, saved.type, saved.message);
+    await this.pushTeachingZalo(
+      saved.receiverId,
+      saved.type,
+      saved.message,
+      saved.meta,
+    );
 
     return saved;
   }
@@ -158,12 +402,14 @@ export class NotificationService {
   // ======================================================
 
   async countUnread(receiverId: number) {
-    return this.repo.count({
-      where: {
-        receiverId,
-        isRead: false,
-      },
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.getCount();
   }
 
   // ======================================================
@@ -171,18 +417,14 @@ export class NotificationService {
   // ======================================================
 
   async getUnreadNotifications(receiverId: number) {
-    return this.repo.find({
-      where: {
-        receiverId,
-        isRead: false,
-      },
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      take: 20,
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.orderBy('n.createdAt', 'DESC').take(20).getMany();
   }
 
   // ======================================================
@@ -276,33 +518,22 @@ export class NotificationService {
 
     type?: NotificationType;
   }) {
-    const where: any = {
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId }),
       receiverId,
-    };
+    );
 
-    if (tab === 'unread') {
-      where.isRead = false;
-    }
+    if (tab === 'unread') qb.andWhere('n.isRead = false');
+    if (tab === 'read') qb.andWhere('n.isRead = true');
+    if (type) qb.andWhere('n.type = :type', { type });
 
-    if (tab === 'read') {
-      where.isRead = true;
-    }
-
-    if (type) {
-      where.type = type;
-    }
-
-    const [data, total] = await this.repo.findAndCount({
-      where,
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      skip: (page - 1) * limit,
-
-      take: limit,
-    });
+    const [data, total] = await qb
+      .orderBy('n.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
 
     return {
       data,
@@ -342,7 +573,13 @@ export class NotificationService {
     meta?: Record<string, any>;
   }) {
     // remove duplicate ids
-    const uniqueReceiverIds = [...new Set(receiverIds)];
+    const uniqueReceiverIds = await this.scopeBusinessReceiverIds(
+      receiverIds,
+      senderId,
+      this.longAnSourceOf(type, entityId),
+    );
+
+    if (!uniqueReceiverIds.length) return [];
 
     // create entities
     const notifications = uniqueReceiverIds.map((receiverId) =>
@@ -389,7 +626,10 @@ export class NotificationService {
           .filter((id): id is string => !!id);
 
         if (zaloUserIds.length) {
-          await this.notifyService.sendToMany(zaloUserIds, message);
+          await this.notifyService.sendToMany(
+            zaloUserIds,
+            withAppLink(message, meta),
+          );
         }
       } catch (error) {
         this.logger.warn(
@@ -473,15 +713,15 @@ export class NotificationService {
     };
   }
   async countUnreadByType(receiverId: number, type: NotificationType) {
-    return this.repo.count({
-      where: {
-        receiverId,
-
-        type,
-
-        isRead: false,
-      },
-    });
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.type = :type', { type })
+        .andWhere('n.isRead = false'),
+      receiverId,
+    );
+    return qb.getCount();
   }
   async findByType({
     receiverId,
@@ -500,31 +740,22 @@ export class NotificationService {
 
     tab?: 'unread' | 'read';
   }) {
-    const where: any = {
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
+        .createQueryBuilder('n')
+        .where('n.receiverId = :receiverId', { receiverId })
+        .andWhere('n.type = :type', { type }),
       receiverId,
+    );
 
-      type,
-    };
+    if (tab === 'unread') qb.andWhere('n.isRead = false');
+    if (tab === 'read') qb.andWhere('n.isRead = true');
 
-    if (tab === 'unread') {
-      where.isRead = false;
-    }
-
-    if (tab === 'read') {
-      where.isRead = true;
-    }
-
-    const [data, total] = await this.repo.findAndCount({
-      where,
-
-      order: {
-        createdAt: 'DESC',
-      },
-
-      skip: (page - 1) * limit,
-
-      take: limit,
-    });
+    const [data, total] = await qb
+      .orderBy('n.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
 
     return {
       data,
@@ -547,7 +778,7 @@ export class NotificationService {
     type: NotificationType;
     date: string;
   }) {
-    const rows = await this.repo.manager
+    const qb = this.repo.manager
       .createQueryBuilder()
       .select('e.id', 'senderId')
       .addSelect('e.name', 'senderName')
@@ -570,8 +801,13 @@ export class NotificationService {
       .addGroupBy('e.name')
       .orderBy(`"unreadCount"`, 'DESC')
       .addOrderBy(`"count"`, 'DESC')
-      .addOrderBy('e.name', 'ASC')
-      .getRawMany();
+      .addOrderBy('e.name', 'ASC');
+
+    if (await this.isRestrictedLongAnDirector(receiverId)) {
+      qb.andWhere(longAnOnlyStaffSql('e.id'));
+    }
+
+    const rows = await qb.getRawMany();
 
     return {
       date,
@@ -626,11 +862,13 @@ export class NotificationService {
     limit?: number;
     date: string;
   }) {
-    const qb = this.repo
+    let qb = this.repo
       .createQueryBuilder('n')
       .where('n.receiverId = :receiverId', { receiverId })
       .andWhere('n.senderId = :senderId', { senderId })
       .andWhere('DATE(n.createdAt) = :date', { date });
+
+    qb = await this.applyReceiverNotificationScope(qb, receiverId);
 
     if (type) {
       qb.andWhere('n.type = :type', { type });
@@ -752,12 +990,17 @@ export class NotificationService {
   }
 
   async getNotificationStats(receiverId: number) {
-    const rows = await this.repo
+    const qb = await this.applyReceiverNotificationScope(
+      this.repo
       .createQueryBuilder('n')
       .select('n.type', 'type')
       .addSelect('n.isRead', 'isRead')
       .addSelect('COUNT(*)', 'count')
-      .where('n.receiverId = :receiverId', { receiverId })
+      .where('n.receiverId = :receiverId', { receiverId }),
+      receiverId,
+    );
+
+    const rows = await qb
       .groupBy('n.type')
       .addGroupBy('n.isRead')
       .getRawMany();

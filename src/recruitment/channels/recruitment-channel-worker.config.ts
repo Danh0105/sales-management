@@ -30,6 +30,9 @@ export const EVENT_TEXT_RETENTION_DAYS = 7;
 /** Lượt chạy xong mà kết quả không dùng được (model) thì chỉ thử tối đa chừng này lần. */
 export const MAX_AGENT_ATTEMPTS = 3;
 
+/** Lỗi hạ tầng trước khi gửi provider cũng phải có trần; không thử vô hạn tới hạn lưu tin. */
+export const MAX_INFRA_ATTEMPTS = 3;
+
 const OA_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const AGENT_ID = /^[a-z0-9_-]{1,64}$/;
 

@@ -18,6 +18,8 @@ import { SuggestPaymentOrder } from './entities/suggest-payment-order.entity';
 import { SuggestStockIssueOrder } from './entities/suggest-stock-issue-order.entity';
 import { SuggestStockInOrder } from './entities/suggest-stock-in-order.entity';
 import { SuggestAssignment } from './entities/suggest-assignment.entity';
+import { SuggestMonthlyItem } from './entities/suggest-monthly-item.entity';
+import { SuggestPolicySupportItem } from './entities/suggest-policy-support-item.entity';
 import { SuggestAttachment } from './entities/suggest-attachment.entity';
 import { SuggestReminderSetting } from './entities/suggest-reminder-setting.entity';
 import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entity';
@@ -37,6 +39,8 @@ import { EmployeeFcmToken } from '../employee-fcm-token/employee-fcm-token.entit
             SuggestStockIssueOrder,
             SuggestStockInOrder,
             SuggestAssignment,
+            SuggestMonthlyItem,
+            SuggestPolicySupportItem,
             SuggestAttachment,
             SuggestReminderSetting,
             EmployeeFcmToken,

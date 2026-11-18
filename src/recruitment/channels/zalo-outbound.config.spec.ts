@@ -20,7 +20,7 @@ const get = (values: Record<string, string | undefined>) => (key: string) =>
   values[key];
 
 describe('cấu hình gửi tin Zalo OA tuyển dụng', () => {
-  it('đủ biến → URL Zalo thật làm mặc định, mã token mặc định -216, chưa có mã vĩnh viễn', () => {
+  it('đủ biến → URL Zalo thật, token -216 và lỗi nghiệp vụ cố định là mặc định', () => {
     const result = readZaloOutboundConfig(get(BASE));
     expect('config' in result).toBe(true);
     if (!('config' in result)) return;
@@ -32,7 +32,11 @@ describe('cấu hình gửi tin Zalo OA tuyển dụng', () => {
       maxRejectAttempts: 3,
     });
     expect([...result.config.tokenErrors]).toEqual([-216]);
-    expect([...result.config.permanentErrors]).toEqual([]);
+    expect(result.config.permanentErrors).toEqual(
+      new Set([
+        -205, -209, -210, -212, -213, -221, -223, -224, -227, -230, -232, -233,
+      ]),
+    );
     expect(result.config.tokenKey.equals(KEY)).toBe(true);
   });
 
@@ -113,5 +117,24 @@ describe('mã hoá token trong DB (AES-256-GCM)', () => {
   ])('%s → lỗi, không trả token rác', (_name, read) => {
     const stored = encryptToken(KEY, 'oa-recruit', 'access-token-xyz');
     expect(() => read(stored)).toThrow();
+  });
+});
+
+describe('RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED (single dispatch guard)', () => {
+  const flag = (value: string | undefined) => {
+    const result = readZaloOutboundConfig(
+      get({ ...BASE, RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED: value }),
+    );
+    return 'config' in result
+      ? result.config.dispatchGrantRequired
+      : result.invalid;
+  };
+  it('mặc định tắt; "true" bật; "false" tắt', () => {
+    expect(flag(undefined)).toBe(false);
+    expect(flag('true')).toBe(true);
+    expect(flag('false')).toBe(false);
+  });
+  it('giá trị khác true/false → cấu hình không hợp lệ', () => {
+    expect(flag('yes')).toEqual(['RECRUITMENT_ZALO_DISPATCH_GRANT_REQUIRED']);
   });
 });

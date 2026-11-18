@@ -22,6 +22,7 @@ import * as bcrypt from 'bcrypt';
 import { Teacher } from './entities/teacher.entity';
 import { TeachingSession } from './entities/teaching-session.entity';
 import { Employee } from '../employee/employee.entity';
+import { Department } from '../department/department.entity';
 import {
   CreateTeacherDto,
   QueryTeachersDto,
@@ -30,6 +31,7 @@ import {
 import {
   TEACHER_COLLABORATOR_ROLE,
   TEACHER_ROLES,
+  TEACHER_STAFF_DEPARTMENT,
   TEACHER_STAFF_ROLE,
 } from './teaching-roles';
 import { SchoolsService } from '../school/schools.service';
@@ -329,6 +331,7 @@ export class TeacherService {
         throw new ConflictException('Email đã được sử dụng');
       }
 
+      const role = dto.teacherRole ?? TEACHER_STAFF_ROLE;
       const employee = await employeeRepo.save(
         employeeRepo.create({
           name: dto.name,
@@ -337,8 +340,8 @@ export class TeacherService {
           bankAccountNumber: dto.bankAccountNumber ?? null,
           bankName: dto.bankName ?? null,
           password: passwordHash,
-          roles: [dto.teacherRole ?? TEACHER_STAFF_ROLE],
-          department: { id: 1 },
+          roles: [role],
+          department: await this.newAccountDepartment(manager, role),
         }),
       );
       employeeId = employee.id ?? null;
@@ -1153,6 +1156,7 @@ export class TeacherService {
     if (!teacher) throw new NotFoundException('Giáo viên không tồn tại');
     await this.assertAccountAttachable(teacher, input.phone, input.email);
 
+    const role = input.teacherRole ?? TEACHER_STAFF_ROLE;
     const employee = await employees.save(
       employees.create({
         name: input.name ?? teacher.name,
@@ -1161,8 +1165,8 @@ export class TeacherService {
         bankAccountNumber: input.bankAccountNumber ?? null,
         bankName: input.bankName ?? null,
         password: input.passwordHash,
-        roles: [input.teacherRole ?? TEACHER_STAFF_ROLE],
-        department: { id: 1 },
+        roles: [role],
+        department: await this.newAccountDepartment(manager, role),
       }),
     );
 
@@ -1170,6 +1174,29 @@ export class TeacherService {
     await teachers.save(teacher);
 
     return teacher.id;
+  }
+
+  /**
+   * Phòng ban của tài khoản giáo viên mới: giáo viên công ty vào phòng Chuyên
+   * môn, cộng tác viên giữ phòng mặc định #1 như trước. Chưa có phòng Chuyên môn
+   * (chưa chạy migration, bị đổi tên) cũng về #1 — không chặn việc mở tài khoản.
+   */
+  private async newAccountDepartment(
+    manager: EntityManager,
+    role: string,
+  ): Promise<{ id: number }> {
+    const staff =
+      role === TEACHER_STAFF_ROLE
+        ? await this.findStaffDepartment(manager)
+        : null;
+    return { id: staff?.id ?? 1 };
+  }
+
+  private findStaffDepartment(manager: EntityManager) {
+    return manager.getRepository(Department).findOne({
+      where: { name: TEACHER_STAFF_DEPARTMENT },
+      select: { id: true },
+    });
   }
 
   /** Chuỗi rỗng vẫn băm ra một hash hợp lệ, nên chặn thẳng thay vì để lọt. */
@@ -1775,7 +1802,8 @@ export class TeacherService {
   /**
    * Đổi giáo viên công ty <-> cộng tác viên cho tài khoản đã gắn — giữ nguyên
    * mọi role khác tài khoản đang có (VD kiêm nhiệm nhansu), chỉ thay đúng
-   * role giáo viên cũ bằng role mới.
+   * role giáo viên cũ bằng role mới. Thành giáo viên công ty thì chuyển sang
+   * phòng Chuyên môn; về cộng tác viên thì giữ nguyên phòng đang có.
    */
   private async changeTeacherRole(employeeId: number, newRole: string) {
     const employee = await this.employeeRepo.findOne({
@@ -1787,6 +1815,10 @@ export class TeacherService {
       (r) => !TEACHER_ROLES.includes(r),
     );
     employee.roles = [...otherRoles, newRole];
+    if (newRole === TEACHER_STAFF_ROLE) {
+      const staff = await this.findStaffDepartment(this.dataSource.manager);
+      if (staff) employee.department = staff;
+    }
     await this.employeeRepo.save(employee);
   }
 
