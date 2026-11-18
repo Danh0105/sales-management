@@ -13,6 +13,7 @@ import {
   DataSource,
   EntityManager,
   In,
+  LessThan,
   Not,
   SelectQueryBuilder,
 } from 'typeorm';
@@ -287,7 +288,7 @@ export class SuggestService {
       }
 
       const saved = await this.dataSource.transaction(async (manager) => {
-        await this.assertNoOpenExpense(manager, actor.id);
+        await this.assertNoOverdueExpense(manager, actor.id);
 
         let school: School | undefined;
         let ward: Ward | undefined;
@@ -1066,7 +1067,7 @@ export class SuggestService {
     const sheetInput = this.chainSheetInput(dto);
 
     const saved = await this.dataSource.transaction(async (manager) => {
-      await this.assertNoOpenExpense(manager, actor.id);
+      await this.assertNoOverdueExpense(manager, actor.id);
 
       const { school, period, schoolYear } = await this.resolveChainSheet(
         manager,
@@ -2126,8 +2127,11 @@ export class SuggestService {
     return user;
   }
 
-  /** Mỗi nhân viên chỉ được có một đề xuất chi chưa hoàn tất tại một thời điểm. */
-  private async assertNoOpenExpense(
+  /**
+   * Cho phép tạo nhiều đề xuất song song, nhưng phải xử lý xong đề xuất đã quá
+   * ngày dự kiến chi trước khi tạo thêm.
+   */
+  private async assertNoOverdueExpense(
     manager: EntityManager,
     employeeId: number,
   ): Promise<void> {
@@ -2138,20 +2142,22 @@ export class SuggestService {
       [employeeId],
     );
 
-    const openExpense = await manager.findOne(Suggest, {
+    const overdueExpense = await manager.findOne(Suggest, {
       where: {
         type: SuggestType.EXPENSE_REQUEST,
         createdBy: employeeId,
         status: Not(In(EXPENSE_TERMINAL_STATUSES)),
+        // Không dựa vào isOverdue vì cờ này chỉ được cron cập nhật định kỳ.
+        expectedPaymentDate: LessThan(vnToday()),
       },
-      select: ['id', 'code', 'status'],
-      order: { createdAt: 'DESC' },
+      select: ['id', 'code', 'status', 'expectedPaymentDate'],
+      order: { expectedPaymentDate: 'ASC', createdAt: 'ASC' },
     });
-    if (!openExpense) return;
+    if (!overdueExpense) return;
 
-    const reference = openExpense.code ?? `#${openExpense.id}`;
+    const reference = overdueExpense.code ?? `#${overdueExpense.id}`;
     throw new BadRequestException(
-      `Bạn còn đề xuất ${reference} chưa hoàn tất. Vui lòng hoàn tất hoặc rút đề xuất này trước khi tạo đề xuất mới`,
+      `Bạn còn đề xuất ${reference} đã quá hạn ngày ${overdueExpense.expectedPaymentDate}. Vui lòng giải quyết hoặc rút đề xuất này trước khi tạo đề xuất mới`,
     );
   }
 
