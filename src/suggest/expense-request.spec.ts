@@ -76,7 +76,6 @@ describe('Expense request school mapping', () => {
       (service as any).dataSource = {
         transaction: jest.fn((callback) => callback(manager)),
       };
-      (service as any).assertNoOverdueExpense = jest.fn();
       return service;
     }
 
@@ -445,54 +444,6 @@ describe('Expense request school mapping', () => {
       );
       expect(manager.query).not.toHaveBeenCalled();
     });
-  });
-
-  it('cho phép tạo thêm khi không có đề xuất chưa giải quyết đã quá hạn', async () => {
-    const manager = {
-      query: jest.fn(),
-      findOne: jest.fn().mockResolvedValue(null),
-    };
-    const service = Object.create(SuggestService.prototype) as SuggestService;
-
-    await expect(
-      (service as any).assertNoOverdueExpense(manager, 7),
-    ).resolves.toBeUndefined();
-
-    expect(manager.findOne).toHaveBeenCalledWith(
-      expect.any(Function),
-      expect.objectContaining({
-        where: expect.objectContaining({
-          createdBy: 7,
-          type: SuggestType.EXPENSE_REQUEST,
-          expectedPaymentDate: expect.objectContaining({
-            _type: 'lessThan',
-          }),
-        }),
-      }),
-    );
-  });
-
-  it('chặn tạo khi nhân viên còn đề xuất chi chưa giải quyết đã quá hạn', async () => {
-    const manager = {
-      query: jest.fn(),
-      findOne: jest.fn().mockResolvedValue({
-        id: 91,
-        code: 'DX-202611-0091',
-        status: SuggestStatus.PENDING_APPROVAL,
-        expectedPaymentDate: '2026-11-17',
-      }),
-    };
-    const service = Object.create(SuggestService.prototype) as SuggestService;
-
-    await expect(
-      (service as any).assertNoOverdueExpense(manager, 7),
-    ).rejects.toThrow(
-      'Bạn còn đề xuất DX-202611-0091 đã quá hạn ngày 2026-11-17',
-    );
-    expect(manager.query).toHaveBeenCalledWith(
-      expect.stringContaining('pg_advisory_xact_lock'),
-      [7],
-    );
   });
 
   it('áp dụng đồng thời status, schoolId và schoolYear trước pagination', async () => {

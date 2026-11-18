@@ -66,9 +66,9 @@ Optional: `description` (lý do chi tiết), `beneficiaryInfo`, `participants` (
 
 > **Dùng lại hàm `create`:** không còn `createExpense()` riêng — `SuggestService.create()` tự rẽ nhánh khi `dto.type = "EXPENSE_REQUEST"`. Vì vậy cũng có thể tạo qua **`POST /suggest`** (form suggest cũ) bằng cách gửi thêm `type: "EXPENSE_REQUEST"`. Cả hai đường đều tạo đề xuất ở trạng thái `PENDING_APPROVAL` và báo Giám đốc.
 
-Một người có thể tạo nhiều đề xuất chi chưa hoàn tất cùng lúc. Tuy nhiên, nếu
-người đó còn đề xuất chưa ở trạng thái kết thúc và `expectedPaymentDate` đã qua,
-API sẽ từ chối tạo mới cho đến khi đề xuất quá hạn được giải quyết hoặc rút.
+Một người có thể tạo nhiều đề xuất chi chưa hoàn tất cùng lúc, kể cả khi còn đề
+xuất đã quá ngày dự kiến chi. Đề xuất quá hạn vẫn tiếp tục được cảnh báo và xử
+lý theo quy trình riêng, nhưng không chặn việc tạo đề xuất mới.
 
 ### Response đặc biệt
 
