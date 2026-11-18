@@ -68,7 +68,6 @@ describe('Luồng đề xuất chi tháng', () => {
 
   it.each([
     ['Sales Admin', salesAdmin],
-    ['Kế toán trưởng', chiefAccountant],
     ['Kế toán công nợ', accountant],
   ])('%s không duyệt hay từ chối được thay Giám đốc', (_name, actor) => {
     for (const action of [
@@ -79,6 +78,23 @@ describe('Luồng đề xuất chi tháng', () => {
         assertExpenseTransition(action, SuggestStatus.PENDING_APPROVAL, actor),
       ).toThrow(ForbiddenException);
     }
+  });
+
+  it('Kế toán trưởng duyệt hoặc từ chối được thay Giám đốc', () => {
+    expect(
+      assertExpenseTransition(
+        ExpenseAction.APPROVE_MONTHLY,
+        SuggestStatus.PENDING_APPROVAL,
+        chiefAccountant,
+      ),
+    ).toBe(SuggestStatus.PAYMENT_ORDERED);
+    expect(
+      assertExpenseTransition(
+        ExpenseAction.REJECT_MONTHLY,
+        SuggestStatus.PENDING_APPROVAL,
+        chiefAccountant,
+      ),
+    ).toBe(SuggestStatus.REJECTED);
   });
 
   it('Giám đốc không duyệt được khi Kế toán chưa nhập tiền', () => {

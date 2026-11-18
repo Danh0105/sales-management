@@ -135,7 +135,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/cash-received')
-    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.CHIEF_ACCOUNTANT)
     cashReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -145,7 +145,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/confirm-spent')
-    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.CHIEF_ACCOUNTANT)
     @UseInterceptors(multiUpload)
     confirmSpent(
         @Param('id', ParseIntPipe) id: number,
@@ -163,7 +163,7 @@ export class ExpenseRequestController {
 
     /** Chi tháng nhiều trường: chọn trường đã chi, phần dư hoàn quỹ. */
     @Post(':id/confirm-partially-spent')
-    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.CHIEF_ACCOUNTANT)
     @UseInterceptors(multiUpload)
     confirmPartiallySpent(
         @Param('id', ParseIntPipe) id: number,
@@ -181,7 +181,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/confirm-not-spent')
-    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.CHIEF_ACCOUNTANT)
     confirmNotSpent(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNotSpentDto,
@@ -269,7 +269,11 @@ export class ExpenseRequestController {
      * riêng role DIRECTOR — xem `overrideRoles` trong expense-flow.state-machine.ts).
      */
     @Post(':id/withdraw')
-    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.DIRECTOR)
+    @Roles(
+        ...EXPENSE_REQUESTER_ROLES,
+        ExpenseRole.DIRECTOR,
+        ExpenseRole.CHIEF_ACCOUNTANT,
+    )
     withdraw(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: WithdrawExpenseDto,
@@ -328,7 +332,7 @@ export class ExpenseRequestController {
 
     /** Kinh doanh xác nhận đã nhận thiết bị (nhánh đề xuất thiết bị) */
     @Post(':id/equipment-received')
-    @Roles(...EXPENSE_REQUESTER_ROLES)
+    @Roles(...EXPENSE_REQUESTER_ROLES, ExpenseRole.CHIEF_ACCOUNTANT)
     equipmentReceived(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -342,7 +346,7 @@ export class ExpenseRequestController {
     // nợ + thủ quỹ ở nhánh tiền (lên lệnh xuất kho, nhận lại thiết bị).
 
     @Post(':id/stock-issue-order')
-    @Roles(ExpenseRole.TECHNICAL)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.CHIEF_ACCOUNTANT)
     stockIssueOrder(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: CreateStockIssueOrderDto,
@@ -352,7 +356,7 @@ export class ExpenseRequestController {
     }
 
     @Post(':id/equipment-returned')
-    @Roles(ExpenseRole.TECHNICAL)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.CHIEF_ACCOUNTANT)
     equipmentReturned(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: ConfirmNoteDto,
@@ -430,7 +434,7 @@ export class ExpenseRequestController {
 
     /** Đề xuất sửa chữa: phòng kỹ thuật xác nhận nhận việc. */
     @Post(':id/repair-accept')
-    @Roles(ExpenseRole.TECHNICAL)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.CHIEF_ACCOUNTANT)
     repairAccept(
         @Param('id', ParseIntPipe) id: number,
         @Req() req: any,
@@ -440,7 +444,7 @@ export class ExpenseRequestController {
 
     /** Đề xuất sửa chữa: phòng kỹ thuật từ chối, bắt buộc có lý do. */
     @Post(':id/repair-reject')
-    @Roles(ExpenseRole.TECHNICAL)
+    @Roles(ExpenseRole.TECHNICAL, ExpenseRole.CHIEF_ACCOUNTANT)
     repairReject(
         @Param('id', ParseIntPipe) id: number,
         @Body() dto: RejectExpenseDto,

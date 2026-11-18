@@ -429,6 +429,13 @@ export function assertExpenseTransition(
   }
 
   const kind = ctx.kind ?? ExpenseRequestKind.CASH;
+  // Kế toán trưởng là người vận hành dự phòng cho toàn bộ quy trình đề xuất
+  // chi. Quyền này chỉ thay thế role/owner/người được chỉ định; mọi chốt về
+  // loại đề xuất, nguồn thiết bị, trạng thái và phân tách hai bước liên tiếp
+  // bên dưới vẫn giữ nguyên.
+  const chiefWorkflowOverride = ctx.actorRoles?.includes(
+    ExpenseRole.CHIEF_ACCOUNTANT,
+  );
 
   if (def.kinds && !def.kinds.includes(kind)) {
     throw new ConflictException(
@@ -450,22 +457,25 @@ export function assertExpenseTransition(
   }
 
   if (def.assignee) {
-    if (!ctx.isAssignee) {
+    if (!chiefWorkflowOverride && !ctx.isAssignee) {
       throw new ForbiddenException(
         def.assignee === 'acceptor'
           ? 'Chỉ người nghiệm thu được Giám đốc chỉ định mới thực hiện được bước này'
           : 'Chỉ người xử lý được Giám đốc chỉ định mới thực hiện được bước này',
       );
     }
-  } else if (!ctx.actorRoles?.some((r) => def.roles.includes(r))) {
+  } else if (
+    !chiefWorkflowOverride &&
+    !ctx.actorRoles?.some((r) => def.roles.includes(r))
+  ) {
     throw new ForbiddenException(
       `Không có quyền thực hiện ${action} (yêu cầu role: ${def.roles.join(', ')})`,
     );
   }
 
-  const hasOverrideRole = ctx.actorRoles?.some((r) =>
-    def.overrideRoles?.includes(r),
-  );
+  const hasOverrideRole =
+    chiefWorkflowOverride ||
+    ctx.actorRoles?.some((r) => def.overrideRoles?.includes(r));
 
   if (!hasOverrideRole && !def.assignee) {
     if (def.ownerOnly && !ctx.isOwner) {

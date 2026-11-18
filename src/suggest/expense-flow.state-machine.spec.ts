@@ -283,6 +283,102 @@ describe('Expense flow state machine (trong Suggest)', () => {
   });
 });
 
+describe('Kế toán trưởng vận hành mọi quy trình đề xuất chi', () => {
+  const chief = {
+    actorRoles: [ExpenseRole.CHIEF_ACCOUNTANT],
+    isOwner: false,
+    actorId: 90,
+    previousActorId: 89,
+  };
+
+  it.each([
+    [
+      'duyệt chi tháng',
+      ExpenseAction.APPROVE_MONTHLY,
+      SuggestStatus.PENDING_APPROVAL,
+      SuggestStatus.PAYMENT_ORDERED,
+      { kind: ExpenseRequestKind.CASH },
+    ],
+    [
+      'xác nhận nhận tiền thay chủ đơn',
+      ExpenseAction.CONFIRM_CASH_RECEIVED,
+      SuggestStatus.CASH_RELEASED,
+      SuggestStatus.CASH_RECEIVED,
+      { kind: ExpenseRequestKind.CASH },
+    ],
+    [
+      'lập lệnh xuất kho',
+      ExpenseAction.CREATE_STOCK_ISSUE_ORDER,
+      SuggestStatus.APPROVED,
+      SuggestStatus.STOCK_ISSUE_ORDERED,
+      {
+        kind: ExpenseRequestKind.EQUIPMENT,
+        equipmentSource: EquipmentSource.STOCK,
+      },
+    ],
+    [
+      'xác nhận nhận thiết bị thay chủ đơn',
+      ExpenseAction.CONFIRM_EQUIPMENT_RECEIVED,
+      SuggestStatus.STOCK_ISSUE_ORDERED,
+      SuggestStatus.EQUIPMENT_RECEIVED,
+      { kind: ExpenseRequestKind.EQUIPMENT },
+    ],
+    [
+      'nhận việc sửa chữa',
+      ExpenseAction.ACCEPT_REPAIR,
+      SuggestStatus.APPROVED,
+      SuggestStatus.REPAIR_ACCEPTED,
+      { kind: ExpenseRequestKind.REPAIR },
+    ],
+    [
+      'lập phiếu nhập kho dù không phải người được chỉ định',
+      ExpenseAction.CREATE_STOCK_IN_RECEIPT,
+      SuggestStatus.APPROVED,
+      SuggestStatus.STOCK_IN_COMPLETED,
+      {
+        kind: ExpenseRequestKind.EQUIPMENT,
+        equipmentSource: EquipmentSource.SUPPLIER,
+        isAssignee: false,
+      },
+    ],
+  ])('%s', (_name, action, from, to, extra) => {
+    expect(
+      assertExpenseTransition(action as ExpenseAction, from as SuggestStatus, {
+        ...chief,
+        ...extra,
+      }),
+    ).toBe(to);
+  });
+
+  it('được xử lý đề xuất do chính mình tạo nhưng không được làm hai chốt liên tiếp', () => {
+    expect(
+      assertExpenseTransition(
+        ExpenseAction.APPROVE,
+        SuggestStatus.PENDING_APPROVAL,
+        { ...chief, isOwner: true },
+      ),
+    ).toBe(SuggestStatus.APPROVED);
+
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.CONFIRM_CASH_RELEASED,
+        SuggestStatus.PAYMENT_ORDERED,
+        { ...chief, previousActorId: chief.actorId },
+      ),
+    ).toThrow(ForbiddenException);
+  });
+
+  it('không được dùng action sai loại đề xuất dù có quyền vận hành toàn cục', () => {
+    expect(() =>
+      assertExpenseTransition(
+        ExpenseAction.CREATE_PAYMENT_ORDER,
+        SuggestStatus.APPROVED,
+        { ...chief, kind: ExpenseRequestKind.EQUIPMENT },
+      ),
+    ).toThrow(ConflictException);
+  });
+});
+
 describe('phân tách nhiệm vụ khi một người giữ nhiều role', () => {
     // Nhân viên có thật trong hệ thống: vừa `sales` vừa `thuquy`. Nếu chỉ kiểm
     // "có role không", người này tự lên đề xuất rồi tự xuất tiền cho chính mình.

@@ -2496,7 +2496,11 @@ export class SuggestService {
         ExpenseAction.ACCEPT_REPAIR,
         ExpenseAction.REJECT_REPAIR,
       ];
+      const chiefWorkflowOverride = user.roles?.includes(
+        ExpenseRole.CHIEF_ACCOUNTANT,
+      );
       if (
+        !chiefWorkflowOverride &&
         technicalActions.includes(opts.action) &&
         s.assignedTechnicianId != null &&
         s.assignedTechnicianId !== user.id
@@ -2506,6 +2510,7 @@ export class SuggestService {
         );
       }
       if (
+        !chiefWorkflowOverride &&
         technicalActions.includes(opts.action) &&
         opts.action !== ExpenseAction.CONFIRM_EQUIPMENT_RETURNED &&
         (await manager.count(SuggestAssignment, {
@@ -6377,6 +6382,20 @@ export class SuggestService {
       params.saStatus = SuggestStatus.PENDING_APPROVAL;
     }
     if (roles.includes(ExpenseRole.CHIEF_ACCOUNTANT)) {
+      // Kế toán trưởng là người vận hành dự phòng của toàn bộ workflow: ngoài
+      // các bước kế toán/thủ quỹ, còn thấy việc của chủ đơn, kỹ thuật và người
+      // được chỉ định ở mọi loại CASH/EQUIPMENT/REPAIR. Loại/trạng thái hợp lệ
+      // và nguyên tắc hai bước liên tiếp vẫn do state machine kiểm soát.
+      const chiefWorkflowStatuses = [
+        ...new Set(
+          Object.values(EXPENSE_TRANSITIONS).flatMap((definition) =>
+            definition ? definition.from : [],
+          ),
+        ),
+      ].filter((status) => status !== SuggestStatus.DRAFT);
+      conditions.push(notMine('s.status IN (:...chiefWorkflowStatuses)'));
+      params.chiefWorkflowStatuses = chiefWorkflowStatuses;
+
       // Kế toán trưởng cũng duyệt/từ chối được ngang Giám đốc & Sales Admin.
       conditions.push(
         notMine('s.status = :caStatus AND s.isMonthlyExpense = false'),
