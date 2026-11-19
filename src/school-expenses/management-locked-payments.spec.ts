@@ -215,7 +215,8 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
     },
   );
 
-  it('Chi Trường luôn lấy đơn giá giáo viên từ Thông tin cơ sở vật chất', async () => {
+  // 19/11/2026: ĐG giáo viên nhập/sửa như ĐG CSVC; bỏ trống mới lấy chính sách.
+  it('Chi Trường giữ ĐG giáo viên kế toán nhập, Tiền GV = HS × tháng × ĐG', async () => {
     const { save, manager, calls } = setup(
       ['ketoan_truong'],
       [],
@@ -230,7 +231,27 @@ describe('Chi Ngoài đã khoá / kỳ đã kết thúc — cột chi còn sửa
     expect(calls(manager.create, SchoolExpenseItem)).toEqual([
       [
         SchoolExpenseItem,
-        expect.objectContaining({ giaovien: 70000 }),
+        expect.objectContaining({ giaovien: 99999, teacherAmount: 871 * 99999 }),
+      ],
+    ]);
+  });
+
+  it('Chi Trường: bỏ trống ĐG giáo viên thì lấy theo Thông tin cơ sở vật chất', async () => {
+    const { save, manager, calls } = setup(
+      ['ketoan_truong'],
+      [],
+      {
+        confirmed: false,
+        schoolExpenseItems: [{ ...schoolBodyRow(undefined, 0), teacherUnitPrice: undefined }],
+      },
+    );
+
+    await save();
+
+    expect(calls(manager.create, SchoolExpenseItem)).toEqual([
+      [
+        SchoolExpenseItem,
+        expect.objectContaining({ giaovien: 70000, teacherAmount: 871 * 70000 }),
       ],
     ]);
   });

@@ -622,15 +622,6 @@ export class RealExpensesService {
         )
         : null;
 
-      // Đọc các dòng đã được server tính thành tiền ngay trong transaction.
-      // Lần nhập đầu tiên có lương dương sẽ tách tiền GV khỏi Chi Trường ngay.
-      // Bảng rỗng / chưa có tiền vẫn dùng ĐG GV từ chính sách ở Chi Trường.
-      const teacherSplit = await this.teacherSplitApplies(
-        queryRunner.manager,
-        schoolExpenseId,
-        Number(body.subjectId),
-      );
-
       // Delete old items for this subject
       await queryRunner.manager.delete(RevenueItem, {
         schoolExpense: {
@@ -712,15 +703,24 @@ export class RealExpensesService {
       // Create school expense items
       const keptSchoolIds = new Set<number>();
       for (const [index, item] of schoolExpenseItems.entries()) {
+        // 19/11/2026 (user chọn): ĐG giáo viên như ĐG CSVC — Kế toán nhập/sửa
+        // từng dòng, bỏ trống thì lấy theo chính sách; Tiền GV = Số HS × Số
+        // tháng × ĐG GV, tính cả khi môn có bảng Giáo viên trường.
+        const rawTeacherUnitPrice = item?.teacherUnitPrice ?? item?.giaovien;
+        const teacherUnitPrice =
+          rawTeacherUnitPrice === undefined ||
+          rawTeacherUnitPrice === null ||
+          rawTeacherUnitPrice === ''
+            ? policyTeacherUnitPrice
+            : rawTeacherUnitPrice;
         const built = buildSchoolExpenseItemData(
           {
             ...item,
-            giaovien: policyTeacherUnitPrice,
-            teacherUnitPrice: policyTeacherUnitPrice,
+            giaovien: teacherUnitPrice,
+            teacherUnitPrice,
           },
           index,
           sharedItems[index],
-          { teacherSplit },
         );
         const linkedId = Number(item?.id);
         const linkedRow =
