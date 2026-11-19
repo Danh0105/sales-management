@@ -6,7 +6,7 @@ import { SuggestType } from '../enums/suggest-type.enum';
 import { ExpenseRequestKind } from '../enums/expense-request-kind.enum';
 import { toMoney } from '../utils/money';
 import { CASHFLOW_SOURCES, type CashflowSource } from '../cashflow-sources';
-import { MonthlyExpenseItemDto, PolicySupportItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
+import { MonthlyCashflowItemDto, MonthlyExpenseItemDto, PolicySupportItemDto, RequestedEquipmentItemDto, parseJsonArray, parseJsonArrayOf, parseBoolean } from './expense/create-expense-request.dto';
 
 export class CreateSuggestDto {
     @IsString()
@@ -117,6 +117,19 @@ export class CreateSuggestDto {
     @IsArray()
     @ValidateNested({ each: true })
     policySupportItems?: PolicySupportItemDto[];
+
+    /** Khoản đã tích — xem `CreateExpenseRequestDto.cashflowItems`. */
+    @IsOptional()
+    @Transform(({ value }) => parseJsonArrayOf(MonthlyCashflowItemDto)({ value }))
+    @IsArray()
+    @ValidateNested({ each: true })
+    cashflowItems?: MonthlyCashflowItemDto[];
+
+    /** Số tiền kinh doanh đề xuất — xem `CreateExpenseRequestDto.salesAmount`. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    salesAmount?: number;
 
     /** Các trường của đề xuất chi tháng — xem `CreateExpenseRequestDto.monthlyItems`. */
     @IsOptional()

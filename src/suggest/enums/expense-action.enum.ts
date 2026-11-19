@@ -15,6 +15,11 @@ export enum ExpenseAction {
    * hệ thống chốt số tiền = Còn chi của bảng, gửi Kế toán trưởng duyệt.
    */
   SUBMIT_TO_CHIEF_ACCOUNTANT = 'SUBMIT_TO_CHIEF_ACCOUNTANT',
+  /**
+   * "Đề xuất chi tháng" tích chọn (19/11/2026): Kế toán / Kế toán công nợ nhập
+   * số tiền từng khoản kinh doanh đã chọn rồi gửi thẳng Giám đốc duyệt.
+   */
+  SUBMIT_MONTHLY_AMOUNTS = 'SUBMIT_MONTHLY_AMOUNTS',
   /** Kế toán trưởng duyệt, chuyển Giám đốc. */
   CHIEF_APPROVE = 'CHIEF_APPROVE',
   /** Kế toán trưởng từ chối. */

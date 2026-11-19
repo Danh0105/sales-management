@@ -82,6 +82,33 @@ export class RequestedEquipmentItemDto {
   warehouseItemId?: number;
 }
 
+/** Tối đa số khoản của một "Đề xuất chi tháng" tích chọn (một trường + một kỳ). */
+export const MAX_SALES_PICK_ITEMS = 200;
+
+/**
+ * Một khoản kinh doanh tích ở "Đề xuất chi tháng" (trường + kỳ lấy từ đề
+ * xuất): Chi trường (SCHOOL_EXPENSE) / Chi Ban quản lí (MANAGEMENT) theo môn,
+ * Chi giáo viên (SCHOOL_TEACHER) theo giáo viên trường.
+ */
+export class MonthlyCashflowItemDto {
+  @IsIn(CASHFLOW_SOURCES as unknown as string[], {
+    message: 'Loại khoản chi tháng không hợp lệ',
+  })
+  source!: CashflowSource;
+
+  @ValidateIf((item: MonthlyCashflowItemDto) => item.source !== 'SCHOOL_TEACHER')
+  @Type(() => Number)
+  @IsInt({ message: 'Khoản Chi trường / Chi Ban quản lí phải có môn' })
+  @IsPositive()
+  subjectId?: number;
+
+  @ValidateIf((item: MonthlyCashflowItemDto) => item.source === 'SCHOOL_TEACHER')
+  @Type(() => Number)
+  @IsInt({ message: 'Khoản Chi giáo viên phải có giáo viên' })
+  @IsPositive()
+  schoolTeacherId?: number;
+}
+
 /** Một trường của đề xuất chi tháng: trường + năm học + môn + kỳ kế toán. */
 export class MonthlyExpenseItemDto {
   @Type(() => Number)
@@ -216,6 +243,28 @@ export class CreateExpenseRequestDto {
   })
   @ValidateNested({ each: true })
   monthlyItems?: MonthlyExpenseItemDto[];
+
+  /**
+   * "Đề xuất chi tháng" tích chọn (19/11/2026): các khoản kinh doanh chọn ở
+   * bảng Chi Trường / Chi Ngoài / Giáo viên trường của `schoolId` trong kỳ
+   * `expensePeriodId`. Multipart gửi chuỗi JSON. Có trường này = luồng mới.
+   */
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArrayOf(MonthlyCashflowItemDto)({ value }))
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Chọn ít nhất một khoản chi' })
+  @ArrayMaxSize(MAX_SALES_PICK_ITEMS, {
+    message: `Một đề xuất chi tháng tối đa ${MAX_SALES_PICK_ITEMS} khoản`,
+  })
+  @ValidateNested({ each: true })
+  cashflowItems?: MonthlyCashflowItemDto[];
+
+  /** Số tiền kinh doanh đề xuất — không vượt tổng Còn chi các khoản đã chọn. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'Số tiền đề xuất không hợp lệ' })
+  @IsPositive({ message: 'Số tiền đề xuất phải lớn hơn 0' })
+  salesAmount?: number;
 
   /** Đề xuất chi Năm cho trường: dòng hỗ trợ đã tích (multipart gửi chuỗi JSON). */
   @IsOptional()

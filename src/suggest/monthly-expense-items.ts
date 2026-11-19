@@ -187,7 +187,15 @@ export function partialSpendSummary(
  * Nhãn một dòng trường cho lịch sử: "TH A · Tin học · Tháng 9/2026", khoản
  * lương giáo viên: "TH A · GV Nguyễn Văn B · Tháng 11/2026".
  */
+/** Loại khoản của "Đề xuất chi tháng" tích chọn (khớp `SALES_PICK_SOURCE_LABELS`). */
+const ITEM_KIND_LABELS: Record<string, string> = {
+  SCHOOL_EXPENSE: 'Chi trường',
+  MANAGEMENT: 'Chi Ban quản lí',
+  SCHOOL_TEACHER: 'Chi giáo viên',
+};
+
 export function monthlyItemLabel(item: {
+  cashflowSource?: string | null;
   schoolId?: number | null;
   school?: { name?: string | null } | null;
   subject?: { name?: string | null; catalog?: { name?: string | null } | null } | null;
@@ -203,6 +211,7 @@ export function monthlyItemLabel(item: {
     ? `GV ${item.schoolTeacher?.name || `#${item.schoolTeacherId}`}`
     : null;
   return [
+    item.cashflowSource ? ITEM_KIND_LABELS[item.cashflowSource] : null,
     item.school?.name || `Trường #${item.schoolId ?? '?'}`,
     teacher ?? (item.subject?.catalog?.name || item.subject?.name),
     period,

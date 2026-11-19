@@ -45,7 +45,11 @@ import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { CashflowItemsQueryDto, CashflowSheetQueryDto } from './dto/expense/cashflow-items-query.dto';
 import { UpdateReminderSettingDto } from './dto/expense/update-reminder-setting.dto';
 import { CreateExpenseRequestDto } from './dto/expense/create-expense-request.dto';
-import { ChainNoteDto, ChainRejectDto } from './dto/expense/accountant-chain.dto';
+import {
+    ChainNoteDto,
+    ChainRejectDto,
+    SubmitMonthlyAmountsDto,
+} from './dto/expense/accountant-chain.dto';
 import { PolicySupportQueryDto } from './dto/expense/policy-support-query.dto';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { CreateStockIssueOrderDto } from './dto/expense/create-stock-issue-order.dto';
@@ -231,6 +235,24 @@ export class ExpenseRequestController {
         @Req() req: any,
     ) {
         return this.service.submitToChiefAccountant(id, req.user, dto.note);
+    }
+
+    /**
+     * "Đề xuất chi tháng" tích chọn: Kế toán / Kế toán công nợ nhập số tiền
+     * từng khoản rồi gửi thẳng Giám đốc duyệt.
+     */
+    @Post(':id/submit-amounts')
+    @Roles(
+        ExpenseRole.ACCOUNTANT,
+        ExpenseRole.DEBT_ACCOUNTANT,
+        ExpenseRole.CHIEF_ACCOUNTANT,
+    )
+    submitAmounts(
+        @Param('id', ParseIntPipe) id: number,
+        @Body() dto: SubmitMonthlyAmountsDto,
+        @Req() req: any,
+    ) {
+        return this.service.submitMonthlyAmounts(id, req.user, dto.items, dto.note);
     }
 
     @Post(':id/chief-approve')

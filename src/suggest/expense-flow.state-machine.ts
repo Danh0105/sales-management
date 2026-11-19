@@ -150,6 +150,22 @@ export const EXPENSE_TRANSITIONS: Partial<
     kinds: [ExpenseRequestKind.CASH],
   },
 
+  /**
+   * "Đề xuất chi tháng" tích chọn: Kế toán hoặc Kế toán công nợ (Kế toán trưởng
+   * làm thay được) nhập số tiền từng khoản rồi gửi thẳng Giám đốc — không qua
+   * Kế toán trưởng duyệt.
+   */
+  [ExpenseAction.SUBMIT_MONTHLY_AMOUNTS]: {
+    from: [SuggestStatus.PENDING_ACCOUNTANT],
+    to: SuggestStatus.PENDING_APPROVAL,
+    roles: [
+      ExpenseRole.ACCOUNTANT,
+      ExpenseRole.DEBT_ACCOUNTANT,
+      ExpenseRole.CHIEF_ACCOUNTANT,
+    ],
+    kinds: [ExpenseRequestKind.CASH],
+  },
+
   [ExpenseAction.CHIEF_APPROVE]: {
     from: [SuggestStatus.PENDING_CHIEF_APPROVAL],
     to: SuggestStatus.PENDING_APPROVAL,
@@ -520,6 +536,7 @@ export function expenseActorForStatus(
   kind: ExpenseRequestKind = ExpenseRequestKind.CASH,
   equipmentSource?: EquipmentSource | null,
   isMonthlyExpense = false,
+  approvalFlow?: string | null,
 ): { roles: string[]; owner: boolean; assignee?: ExpenseAssignee } | null {
   // Thiết bị từ nhà cung cấp: hai bước sau duyệt thuộc về người được chỉ
   // định, không thuộc role nào — nơi gọi tự tra id người được chỉ định.
@@ -543,7 +560,15 @@ export function expenseActorForStatus(
   switch (status) {
     case SuggestStatus.PENDING_ACCOUNTANT:
       return {
-        roles: [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        // "Đề xuất chi tháng" tích chọn: Kế toán công nợ cũng nhập số tiền được.
+        roles:
+          approvalFlow === 'SALES_PICK'
+            ? [
+                ExpenseRole.ACCOUNTANT,
+                ExpenseRole.DEBT_ACCOUNTANT,
+                ExpenseRole.CHIEF_ACCOUNTANT,
+              ]
+            : [ExpenseRole.ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
         owner: false,
       };
 

@@ -1,4 +1,5 @@
 // suggest.entity.ts
+import { numericTransformer } from '../../utils/numeric-transformer';
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, JoinColumn, ManyToOne, OneToMany, OneToOne, Index } from 'typeorm';
 import { SuggestStatus } from '../SuggestStatus.enum';
 import { SuggestType } from '../enums/suggest-type.enum';
@@ -199,6 +200,21 @@ export class Suggest {
      */
     @Column({ type: 'varchar', name: 'approval_flow', length: 30, nullable: true })
     approvalFlow?: string | null;
+
+    /**
+     * "Đề xuất chi tháng" tích chọn (`approval_flow = SALES_PICK`): số tiền kinh
+     * doanh đề xuất (≤ tổng Còn chi các khoản đã chọn lúc tạo). Kế toán nhập số
+     * tiền từng khoản, tổng không vượt số này.
+     */
+    @Column({
+        type: 'numeric',
+        name: 'sales_amount',
+        precision: 18,
+        scale: 2,
+        nullable: true,
+        transformer: numericTransformer,
+    })
+    salesAmount?: number | null;
 
     /** Môn học áp dụng cho đề xuất chi tháng. */
     @Column({ type: 'int', name: 'subject_id', nullable: true })

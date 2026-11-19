@@ -13,6 +13,7 @@ import { School } from '../../school/schools.entity';
 import { Subject } from '../../subject/subject.entity';
 import { SchoolTeacher } from '../../school-teacher-expense/school-teacher.entity';
 import { Suggest } from './suggest.entity';
+import type { CashflowSource } from '../cashflow-sources';
 
 /**
  * Một trường trong đề xuất chi tháng: trường + năm học + môn + kỳ kế toán.
@@ -79,6 +80,14 @@ export class SuggestMonthlyItem {
         transformer: numericTransformer,
     })
     requestedAmount!: number | null;
+
+    /**
+     * Bảng nguồn của khoản ở "Đề xuất chi tháng" tích chọn (MANAGEMENT = Chi
+     * Ban quản lí / bảng Chi Ngoài, SCHOOL_EXPENSE = Chi trường, SCHOOL_TEACHER
+     * = Chi giáo viên). Trống = theo `suggest.cashflow_source`.
+     */
+    @Column({ type: 'varchar', name: 'cashflow_source', length: 20, nullable: true })
+    cashflowSource!: CashflowSource | null;
 
     /** Thứ tự người tạo đã chọn. */
     @Column({ type: 'int', default: 0 })

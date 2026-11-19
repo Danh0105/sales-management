@@ -52,6 +52,45 @@ export const isAccountantChain = (s: {
   approvalFlow?: string | null;
 }) => !!s.isMonthlyExpense && s.approvalFlow === ACCOUNTANT_CHAIN;
 
+/**
+ * "Đề xuất chi tháng" tích chọn (từ 19/11/2026): một trường + một kỳ kế toán,
+ * kinh doanh tích Chi trường (bảng Chi Trường) / Chi Ban quản lí (bảng Chi
+ * Ngoài) — chỉ môn đã xác nhận BBCS — / Chi giáo viên (bảng Giáo viên trường,
+ * Kế toán đã nhập), nhập một số tiền ≤ tổng Còn chi đã chọn → Kế toán hoặc Kế
+ * toán công nợ nhập số tiền từng khoản (mỗi khoản ≤ Còn chi, tổng ≤ số kinh
+ * doanh nhập) → Giám đốc (bỏ Kế toán trưởng) → Kế toán công nợ lập lệnh chi →
+ * Thủ quỹ → kinh doanh. Mỗi khoản mang bảng nguồn riêng
+ * (`suggest_monthly_items.cashflow_source`).
+ */
+export const SALES_PICK = 'SALES_PICK';
+
+export const isSalesPick = (s: {
+  isMonthlyExpense?: boolean | null;
+  approvalFlow?: string | null;
+}) => !!s.isMonthlyExpense && s.approvalFlow === SALES_PICK;
+
+/** Chi tháng có Giám đốc duyệt từng khoản trước, Kế toán công nợ lập lệnh chi sau. */
+export const isMonthlyChain = (s: {
+  isMonthlyExpense?: boolean | null;
+  approvalFlow?: string | null;
+}) => isAccountantChain(s) || isSalesPick(s);
+
+/** Tên loại khoản ở "Đề xuất chi tháng" tích chọn. */
+export const SALES_PICK_SOURCE_LABELS: Record<CashflowSource, string> = {
+  SCHOOL_EXPENSE: 'Chi trường',
+  MANAGEMENT: 'Chi Ban quản lí',
+  SCHOOL_TEACHER: 'Chi giáo viên',
+};
+
+/** Bảng nguồn của một khoản: cột riêng của khoản (tích chọn), không thì theo đề xuất. */
+export function itemSourceOf(
+  row: { cashflowSource?: string | null },
+  s: { isMonthlyExpense?: boolean | null; cashflowSource?: string | null },
+): CashflowSource {
+  if (isCashflowSource(row.cashflowSource)) return row.cashflowSource;
+  return cashflowSourceOf(s) ?? 'MANAGEMENT';
+}
+
 /** Năm học của kỳ tháng thật (tháng 8 trở đi thuộc năm học bắt đầu năm đó). */
 export function schoolYearOfPeriod(period: {
   month?: number | null;
@@ -470,7 +509,8 @@ export function managementGroupsFromSections(
 }
 
 /**
- * Khoản đang nằm trong đề xuất chưa xong (cùng bảng nguồn). Dòng Giám đốc
+ * Khoản đang nằm trong đề xuất chưa xong (cùng bảng nguồn — khoản của "Đề xuất
+ * chi tháng" tích chọn theo bảng nguồn của từng khoản). Dòng Giám đốc
  * không duyệt hoặc kinh doanh báo không chi thì không còn giữ khoản. Đề xuất
  * chi tháng cũ chưa có dòng trường đọc từ các cột đơn của `suggest`.
  */
@@ -497,7 +537,7 @@ export async function loadOpenCashflowRequests(
      FROM suggest_monthly_items i
      JOIN suggest s ON s.id = i.suggest_id
      WHERE s.type = 'EXPENSE_REQUEST' AND s.is_monthly_expense = true
-       AND COALESCE(s.cashflow_source, 'MANAGEMENT') = $1
+       AND COALESCE(i.cashflow_source, s.cashflow_source, 'MANAGEMENT') = $1
        AND s.status::text <> ALL($2)
        AND i.excluded = false AND i.spent IS DISTINCT FROM false
        AND i.school_id = ANY($3)
