@@ -65,6 +65,10 @@ export interface SuggestEventData {
   fundSource?: string | null;
   /** CONFIRM_REMAINDER_RETURNED: phần dư Thủ quỹ nhận lại sau khi chi một phần. */
   returnAmount?: number | string | null;
+  /** CONFIRM_CASH_RELEASED: Thủ quỹ xuất từ nhiều nguồn chi (19/11/2026). */
+  cashSplits?: { cashAccount: string; amount: number | string }[];
+  /** CONFIRM_REMAINDER_RETURNED: phần dư trả về từng nguồn (trừ ngược từ nguồn cuối). */
+  returnSplits?: { cashAccount: string; amount: number | string }[];
 }
 
 export interface SuggestEventRow {
@@ -470,6 +474,50 @@ interface ReleaseState {
   returned: SuggestEventRow | null;
   /** Chi tháng chi một phần: các lần Thủ quỹ nhận lại phần dư của lần xuất này. */
   remainders: { event: SuggestEventRow; amount: Cents }[];
+  /** Thủ quỹ xuất từ nhiều nguồn chi (data.cashSplits) — null = một nguồn. */
+  splits: { accountCode: string; amount: Cents }[] | null;
+}
+
+/** Nguồn chi nhiều tài khoản của lần xuất (lịch sử `cashSplits`). */
+function releaseSplits(data: any): { accountCode: string; amount: Cents }[] | null {
+  const list = Array.isArray(data?.cashSplits) ? data.cashSplits : null;
+  if (!list || list.length < 2) return null;
+  const splits = list
+    .filter((split: any) => split?.cashAccount && Number(split?.amount) > 0)
+    .map((split: any) => ({
+      accountCode: String(split.cashAccount),
+      amount: toCents(split.amount),
+    }));
+  return splits.length > 1 ? splits : null;
+}
+
+/**
+ * Phần dư trả về từng nguồn: lấy theo lịch sử (`returnSplits`), bản ghi thiếu
+ * thì trừ ngược từ nguồn cuối.
+ */
+function remainderSplits(
+  splits: { accountCode: string; amount: Cents }[],
+  remainder: { event: SuggestEventRow; amount: Cents },
+): { accountCode: string; amount: Cents }[] {
+  const logged = Array.isArray(remainder.event.data?.returnSplits)
+    ? remainder.event.data.returnSplits
+        .filter((split: any) => split?.cashAccount && Number(split?.amount) > 0)
+        .map((split: any) => ({
+          accountCode: String(split.cashAccount),
+          amount: toCents(split.amount),
+        }))
+    : [];
+  if (logged.length) return logged;
+  let left = remainder.amount;
+  const result: { accountCode: string; amount: Cents }[] = [];
+  for (let i = splits.length - 1; i >= 0 && left > 0n; i -= 1) {
+    const share = splits[i].amount < left ? splits[i].amount : left;
+    if (share <= 0n) continue;
+    result.unshift({ accountCode: splits[i].accountCode, amount: share });
+    left -= share;
+  }
+  if (left > 0n && result.length) result[0].amount += left;
+  return result;
 }
 
 const FUND_SOURCE_LABEL: Record<string, string> = {
@@ -545,6 +593,7 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
           superseded: false,
           returned: null,
           remainders: [],
+          splits: releaseSplits(event.data),
         };
         releases.push(open);
       } else if (event.action === 'CONFIRM_FUND_RETURNED' && open) {
@@ -613,53 +662,71 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
         continue;
       }
 
-      lines.push({
-        key: releaseKey,
-        postingDate: event.event_date,
-        documentDate: event.po_created_date ?? event.event_date,
-        documentNo,
-        invoiceNo: null,
-        description: releaseDescription,
-        accountCode: release.accountCode,
-        receipt: 0n,
-        payment: release.amount,
-        ...partner,
-        isInternalTransfer: false,
-        source,
-      });
+      // Nhiều nguồn chi (19/11/2026): mỗi nguồn một bút toán chi; hoàn quỹ
+      // trả lại từng nguồn; phần dư trả về các nguồn sau cùng.
+      const multi = release.splits && release.splits.length > 1 ? release.splits : null;
+      const parts = multi ?? [{ accountCode: release.accountCode, amount: release.amount }];
+      const partKey = (key: string, accountCode: string) =>
+        multi ? `${key}:${accountCode}` : key;
 
-      for (const remainder of release.remainders) {
+      for (const part of parts) {
         lines.push({
-          key: `EXPENSE_REQUEST:${suggestId}:remainder:${remainder.event.history_id}`,
-          postingDate: remainder.event.event_date,
-          documentDate: remainder.event.event_date,
+          key: partKey(releaseKey, part.accountCode),
+          postingDate: event.event_date,
+          documentDate: event.po_created_date ?? event.event_date,
           documentNo,
           invoiceNo: null,
-          description: clean(`Hoàn phần dư đề xuất ${suggestLabel}${subject}`),
-          accountCode: release.accountCode,
-          receipt: remainder.amount,
-          payment: 0n,
+          description: releaseDescription,
+          accountCode: part.accountCode,
+          receipt: 0n,
+          payment: part.amount,
           ...partner,
           isInternalTransfer: false,
           source,
         });
       }
 
+      for (const remainder of release.remainders) {
+        const remainderKey = `EXPENSE_REQUEST:${suggestId}:remainder:${remainder.event.history_id}`;
+        const returnParts = multi
+          ? remainderSplits(multi, remainder)
+          : [{ accountCode: release.accountCode, amount: remainder.amount }];
+        for (const part of returnParts) {
+          lines.push({
+            key: partKey(remainderKey, part.accountCode),
+            postingDate: remainder.event.event_date,
+            documentDate: remainder.event.event_date,
+            documentNo,
+            invoiceNo: null,
+            description: clean(`Hoàn phần dư đề xuất ${suggestLabel}${subject}`),
+            accountCode: part.accountCode,
+            receipt: part.amount,
+            payment: 0n,
+            ...partner,
+            isInternalTransfer: false,
+            source,
+          });
+        }
+      }
+
       if (release.returned) {
-        lines.push({
-          key: `EXPENSE_REQUEST:${suggestId}:return:${release.returned.history_id}`,
-          postingDate: release.returned.event_date,
-          documentDate: release.returned.event_date,
-          documentNo,
-          invoiceNo: null,
-          description: clean(`Hoàn quỹ đề xuất ${suggestLabel}${subject}`),
-          accountCode: release.accountCode,
-          receipt: release.amount,
-          payment: 0n,
-          ...partner,
-          isInternalTransfer: false,
-          source,
-        });
+        const returnKey = `EXPENSE_REQUEST:${suggestId}:return:${release.returned.history_id}`;
+        for (const part of parts) {
+          lines.push({
+            key: partKey(returnKey, part.accountCode),
+            postingDate: release.returned.event_date,
+            documentDate: release.returned.event_date,
+            documentNo,
+            invoiceNo: null,
+            description: clean(`Hoàn quỹ đề xuất ${suggestLabel}${subject}`),
+            accountCode: part.accountCode,
+            receipt: part.amount,
+            payment: 0n,
+            ...partner,
+            isInternalTransfer: false,
+            source,
+          });
+        }
       }
     }
   }

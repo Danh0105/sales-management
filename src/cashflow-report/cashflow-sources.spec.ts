@@ -449,3 +449,60 @@ describe('diễn giải', () => {
     );
   });
 });
+
+describe('mapSuggestEvents — nhiều nguồn chi (19/11/2026)', () => {
+  const release = event('CONFIRM_CASH_RELEASED', '2026-11-19', {
+    data: {
+      cashAccount: '1111',
+      cashSplits: [
+        { cashAccount: '1111', amount: 1000000 },
+        { cashAccount: '1121', amount: 2000000 },
+      ],
+    },
+  });
+
+  it('mỗi nguồn một bút toán chi, đúng số tiền', () => {
+    const { lines, issues } = mapSuggestEvents([
+      event('APPROVE_MONTHLY', '2026-11-18', {
+        data: { paymentOrder: { code: 'LC-1', amount: 3000000 } },
+      }),
+      release,
+    ]);
+    expect(issues).toEqual([]);
+    expect(lines.map((l) => [l.accountCode, l.payment, l.receipt])).toEqual([
+      ['1111', toCents('1000000'), 0n],
+      ['1121', toCents('2000000'), 0n],
+    ]);
+    expect(new Set(lines.map((l) => l.key)).size).toBe(2);
+  });
+
+  it('phần dư trả về từ nguồn cuối (trừ ngược)', () => {
+    const { lines } = mapSuggestEvents([
+      event('APPROVE_MONTHLY', '2026-11-18', {
+        data: { paymentOrder: { code: 'LC-1', amount: 3000000 } },
+      }),
+      release,
+      event('CONFIRM_REMAINDER_RETURNED', '2026-11-20', {
+        data: { returnAmount: 2500000 },
+      }),
+    ]);
+    expect(lines.filter((l) => l.receipt > 0).map((l) => [l.accountCode, l.receipt])).toEqual([
+      ['1111', toCents('500000')],
+      ['1121', toCents('2000000')],
+    ]);
+  });
+
+  it('hoàn quỹ trả lại từng nguồn', () => {
+    const { lines } = mapSuggestEvents([
+      event('APPROVE_MONTHLY', '2026-11-18', {
+        data: { paymentOrder: { code: 'LC-1', amount: 3000000 } },
+      }),
+      release,
+      event('CONFIRM_FUND_RETURNED', '2026-11-20'),
+    ]);
+    expect(lines.filter((l) => l.receipt > 0).map((l) => [l.accountCode, l.receipt])).toEqual([
+      ['1111', toCents('1000000')],
+      ['1121', toCents('2000000')],
+    ]);
+  });
+});

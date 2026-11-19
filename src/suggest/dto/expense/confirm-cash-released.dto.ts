@@ -1,7 +1,9 @@
-import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { ArrayMaxSize, IsArray, IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
 
 import { INVOICE_CASH_ACCOUNT_CODES } from '../../../revenue-item/invoice-cash-account';
 import { FundSource } from '../../enums/expense-fund-source.enum';
+import { parseJsonArray } from './create-expense-request.dto';
 
 /** Thủ quỹ xác nhận đã xuất tiền — chọn nguồn chi đã dùng để chi. */
 export class ConfirmCashReleasedDto {
@@ -17,6 +19,16 @@ export class ConfirmCashReleasedDto {
     @IsOptional()
     @IsEnum(FundSource, { message: 'Nguồn tiền không hợp lệ' })
     fundSource?: FundSource;
+
+    /**
+     * Nhiều nguồn chi (19/11/2026): `[{ cashAccount, amount }]`, tổng = đúng số
+     * lệnh chi. Gửi multipart nên tới dạng chuỗi JSON; kiểm chi tiết ở service.
+     */
+    @IsOptional()
+    @Transform(parseJsonArray)
+    @IsArray({ message: 'Nguồn chi không hợp lệ' })
+    @ArrayMaxSize(10, { message: 'Tối đa 10 nguồn chi' })
+    cashSplits?: { cashAccount: string; amount: number }[];
 
     @IsOptional()
     @IsString()

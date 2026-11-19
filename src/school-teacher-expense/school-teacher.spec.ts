@@ -72,6 +72,7 @@ describe('Giáo viên trường — tính một dòng', () => {
       monthsCount: 1,
       unitPrice: 5000,
       amount: 500_000,
+      pitManual: false,
       pitRate: 0,
       pitAmount: 0,
       netAmount: 500_000,
@@ -251,5 +252,30 @@ describe('Sổ thu chi — lương Giáo viên trường', () => {
       'MANAGEMENT_EXPENSE',
     );
     expect(issues[0].message).toBe('Chi Ngoài có Đã chi nhưng chưa chọn Nguồn chi');
+  });
+});
+
+describe('Thuế TNCN nhập tay (19/11/2026)', () => {
+  it('bỏ trống = tự tính; có số thì giữ đúng số đó', () => {
+    const auto = buildSchoolTeacherItemData({ unitPrice: 60000, schoolTeacherId: 3 }, 0, { studentCount: 100, monthsCount: 1 }, false);
+    expect([auto.pitManual, auto.pitAmount, auto.netAmount]).toEqual([false, 0, 6_000_000]);
+    const manual = buildSchoolTeacherItemData({ unitPrice: 60000, schoolTeacherId: 3, pitAmount: 123456 }, 0, { studentCount: 100, monthsCount: 1 }, false);
+    expect([manual.pitManual, manual.pitAmount, manual.netAmount]).toEqual([true, 123456, 6_000_000 - 123456]);
+    const zero = buildSchoolTeacherItemData({ unitPrice: 60000, schoolTeacherId: 3, pitAmount: 0 }, 0, { studentCount: 100, monthsCount: 1 }, false);
+    expect([zero.pitManual, zero.pitAmount]).toEqual([true, 0]);
+  });
+
+  it('thuế lớn hơn Thành tiền hoặc âm bị chặn', () => {
+    expect(() => buildSchoolTeacherItemData({ unitPrice: 1000, schoolTeacherId: 3, pitAmount: 1001 }, 0, { studentCount: 1, monthsCount: 1 }, false)).toThrow();
+    expect(() => buildSchoolTeacherItemData({ unitPrice: 1000, schoolTeacherId: 3, pitAmount: -1 }, 0, { studentCount: 1, monthsCount: 1 }, false)).toThrow();
+  });
+
+  it('allocate: dòng nhập tay giữ số, dòng khác vẫn theo ngưỡng', () => {
+    const tax = allocateSchoolTeacherTax([
+      { key: 'a', schoolTeacherId: 9, amount: 3_000_000, manualPit: 0 },
+      { key: 'b', schoolTeacherId: 9, amount: 3_000_000 },
+    ]);
+    expect(tax.get('a')).toEqual({ pitRate: 0, pitAmount: 0, netAmount: 3_000_000 });
+    expect(tax.get('b')).toEqual({ pitRate: 10, pitAmount: 300_000, netAmount: 2_700_000 });
   });
 });

@@ -508,6 +508,7 @@ export class ExpenseRequestController {
             toAttachments(files),
             dto.fundSource,
             dto.cashAccount,
+            dto.cashSplits,
         );
     }
 

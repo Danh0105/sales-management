@@ -69,6 +69,13 @@ export class SuggestPaymentOrder {
     @Column({ type: 'varchar', length: 20, nullable: true })
     cashAccount!: string | null;
 
+    /**
+     * Thủ quỹ xuất từ nhiều nguồn chi (19/11/2026): `[{ cashAccount, amount }]`,
+     * tổng = số lệnh chi; `cashAccount` = nguồn đầu tiên. null = một nguồn (cũ).
+     */
+    @Column({ type: 'jsonb', nullable: true })
+    cashSplits!: { cashAccount: string; amount: number }[] | null;
+
     @Column({ type: 'text', nullable: true })
     note?: string | null;
 

@@ -43,6 +43,7 @@ import {
   canEditLockedDateSource,
   canEditLockedManagementPayments,
   computeOtherCostRows,
+  normalizeCashAmount,
   normalizeSharedFields,
 } from './expense-calculations';
 import { AuthUser } from '../type/auth-user.type';
@@ -62,7 +63,6 @@ import {
   SCHOOL_TEACHER_SPLIT_FROM,
   schoolTeacherMoneySignature,
   schoolTeacherPaid,
-  schoolTeacherSplitApplies,
 } from '../school-teacher-expense/school-teacher';
 import {
   assertLinkedRowsKept,
@@ -73,6 +73,7 @@ import {
   loadSuggestPayments,
   linkedRowDeleteError,
   suggestCodesLabel,
+  suggestSourcesOf,
   withSuggestPayments,
 } from '../management-expense-item/suggest-payments';
 
@@ -490,6 +491,23 @@ export class RealExpensesService {
       { schoolExpenseId, subjectId: body.subjectId },
       'SCHOOL_EXPENSE',
     );
+
+    // 19/11/2026 (user): đã "Xuất hóa đơn tất cả" (mọi dòng Doanh Thu đã khoá
+    // hóa đơn) → khoá toàn bộ các bảng, chỉ còn sửa "Tổng thanh toán công ty".
+    // Kế toán trưởng bỏ qua (mở khoá / sửa như cũ).
+    if (
+      oldRevenue.length > 0 &&
+      oldRevenue.every((item) => item.invoiceLocked) &&
+      !(user?.roles ?? []).includes('ketoan_truong')
+    ) {
+      if (schoolExpense.finalized) {
+        throw new BadRequestException(
+          'Kỳ đã kết thúc và đã xuất hóa đơn tất cả — không sửa được',
+        );
+      }
+      await this.saveCompanyPaymentOnly(schoolExpenseId, body, user, oldRevenue);
+      return await this.getItems(schoolExpenseId, body.subjectId);
+    }
 
     if (finalizedDateSourceOnly) {
       // Kỳ kết thúc chỉ cho phép đổi Ngày chi / Nguồn chi của các dòng đã lưu.
@@ -1094,6 +1112,63 @@ export class RealExpensesService {
   }
 
   /**
+   * Đã "Xuất hóa đơn tất cả": chỉ ghi "Tổng thanh toán công ty" (theo vị trí
+   * dòng Doanh Thu), mọi số liệu khác của request bị bỏ qua.
+   */
+  private async saveCompanyPaymentOnly(
+    schoolExpenseId: number,
+    body: any,
+    user: AuthUser | undefined,
+    oldRevenue: RevenueItem[],
+  ) {
+    const items: any[] = Array.isArray(body?.revenueItems) ? body.revenueItems : [];
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      await queryRunner.manager.query(
+        `SELECT id FROM school_expenses WHERE id = $1 FOR UPDATE`,
+        [schoolExpenseId],
+      );
+      const fresh = await queryRunner.manager.find(RevenueItem, {
+        where: { id: In(oldRevenue.map((row) => row.id)) },
+      });
+      const before: { rowIndex: number; companyPaymentTotal: number | null }[] = [];
+      const after: { rowIndex: number; companyPaymentTotal: number | null }[] = [];
+      for (const row of fresh) {
+        const item = items[row.rowIndex];
+        if (!item || !('companyPaymentTotal' in item)) continue;
+        const next = normalizeCashAmount(item.companyPaymentTotal, 'companyPaymentTotal');
+        const previous =
+          row.companyPaymentTotal === null || row.companyPaymentTotal === undefined
+            ? null
+            : Number(row.companyPaymentTotal);
+        if (next === previous) continue;
+        await queryRunner.manager.update(RevenueItem, { id: row.id }, { companyPaymentTotal: next });
+        before.push({ rowIndex: row.rowIndex, companyPaymentTotal: previous });
+        after.push({ rowIndex: row.rowIndex, companyPaymentTotal: next });
+      }
+      if (after.length) {
+        await queryRunner.manager.save(SchoolExpenseHistory, {
+          schoolExpenseId,
+          updatedById: user?.id,
+          updatedByName: user?.name,
+          action: 'SAVE_ALL',
+          entityType: 'school_expense',
+          oldData: { revenueItems: before },
+          newData: { subjectId: body.subjectId, revenueItems: after },
+        });
+      }
+      await queryRunner.commitTransaction();
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
    * Bảng Giáo viên trường của một môn: xoá rồi ghi lại (dòng không có liên kết
    * nào cần giữ theo id). Dòng đi kèm Doanh Thu (vị trí < số dòng Doanh Thu)
    * lấy số lượng của Doanh Thu; dòng thêm riêng trống thì bỏ. Thuế TNCN tính lại
@@ -1162,7 +1237,8 @@ export class RealExpensesService {
         Number(next.schoolTeacherId || 0) !== Number(previous.schoolTeacherId || 0) ||
         Number(next.amount || 0) !== Number(previous.amount || 0) ||
         Number(next.unitPrice || 0) !== Number(previous.unitPrice || 0) ||
-        Number(next.rowIndex) !== Number(previous.rowIndex)
+        Number(next.rowIndex) !== Number(previous.rowIndex) ||
+        (next.pitManual && Number(next.pitAmount || 0) !== Number(previous.pitAmount || 0))
       ) {
         throw new BadRequestException(
           'Dòng lương giáo viên đã chi/liên kết đề xuất không được xóa hoặc thay đổi tiền',
@@ -1238,6 +1314,7 @@ export class RealExpensesService {
         key: row.id,
         schoolTeacherId: row.schoolTeacherId,
         amount: Number(row.amount || 0),
+        manualPit: row.pitManual ? Number(row.pitAmount || 0) : null,
       })),
     );
     // Một thay đổi ở môn này có thể tính lại thuế của giáo viên ở môn khác.
@@ -1359,9 +1436,8 @@ export class RealExpensesService {
         order: { name: 'ASC', id: 'ASC' },
       })
       : [];
-    const showTeacherTable =
-      schoolTeacherSplitApplies(schoolExpense.period) ||
-      items.length > 0;
+    // 19/11/2026 (user): bảng Giáo viên trường hiện ở mọi trường, mọi kỳ.
+    const showTeacherTable = true;
     return {
       showTeacherTable,
 
@@ -1380,7 +1456,7 @@ export class RealExpensesService {
           ...item,
           paid: schoolTeacherPaid(item) || !!found,
           // Trả theo đề xuất chi: màn hình khoá Ngày chi / Nguồn chi, hiện mã.
-          ...(found ? { suggestCodes: suggestCodesLabel(found) } : {}),
+          ...(found ? { suggestCodes: suggestCodesLabel(found), ...suggestSourcesOf(found) } : {}),
         };
       }),
       approval: approval
@@ -1726,6 +1802,10 @@ export class RealExpensesService {
       invoiceNumber: i.invoiceNumber,
       invoiceDate: i.invoiceDate,
       invoiceLocked: i.invoiceLocked,
+      companyPaymentTotal:
+        i.companyPaymentTotal === null || i.companyPaymentTotal === undefined
+          ? null
+          : num(i.companyPaymentTotal),
       paidAmount: num(i.paidAmount),
       paymentMethod: i.paymentMethod,
       paymentDate: i.paymentDate,

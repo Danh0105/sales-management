@@ -103,9 +103,27 @@ function normalizeTeacherId(value: unknown): number | null {
 }
 
 /**
+ * Thuế TNCN kế toán nhập tay (19/11/2026): bỏ trống = tự tính theo ngưỡng 5
+ * triệu; có số thì giữ đúng số đó (0 ≤ thuế ≤ Thành tiền).
+ */
+export function normalizeManualPit(value: unknown, amount: number): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const pit = Number(value);
+  if (!Number.isFinite(pit) || pit < 0) {
+    throw new BadRequestException('Thuế TNCN của Giáo viên trường không hợp lệ');
+  }
+  const rounded = Math.round(pit);
+  if (rounded > Math.max(0, Math.round(amount))) {
+    throw new BadRequestException('Thuế TNCN không được lớn hơn Thành tiền của dòng');
+  }
+  return rounded;
+}
+
+/**
  * Một dòng Giáo viên trường như server lưu. `sharedItem` là dòng Doanh Thu cùng
- * vị trí (dòng đi kèm) hoặc chính dòng đó (dòng thêm riêng). Thuế TNCN để 0 —
- * tính lại cho cả bảng thu chi bằng `allocateSchoolTeacherTax` sau khi lưu.
+ * vị trí (dòng đi kèm) hoặc chính dòng đó (dòng thêm riêng). Thuế TNCN tự tính
+ * để 0 — tính lại cho cả bảng thu chi bằng `allocateSchoolTeacherTax` sau khi
+ * lưu; thuế nhập tay (`item.pitAmount`) giữ nguyên với `pitManual = true`.
  */
 export function buildSchoolTeacherItemData(
   item: any,
@@ -118,6 +136,7 @@ export function buildSchoolTeacherItemData(
   assertNonNegative({ unitPrice });
 
   const amount = round2(unitPrice * revenueBillingQuantity(shared));
+  const manualPit = normalizeManualPit(item?.pitAmount, amount);
   return {
     rowIndex: index,
     schoolTeacherId: normalizeTeacherId(item?.schoolTeacherId),
@@ -127,9 +146,10 @@ export function buildSchoolTeacherItemData(
     monthsCount: shared.monthsCount,
     unitPrice,
     amount,
-    pitRate: 0,
-    pitAmount: 0,
-    netAmount: amount,
+    pitManual: manualPit !== null,
+    pitRate: manualPit !== null && amount > 0 ? round2((manualPit / amount) * 100) : 0,
+    pitAmount: manualPit ?? 0,
+    netAmount: round2(amount - (manualPit ?? 0)),
     ...buildSchoolTeacherPaymentData(item),
   };
 }
@@ -137,10 +157,16 @@ export function buildSchoolTeacherItemData(
 /**
  * Thuế TNCN của mọi dòng Giáo viên trường trong một bảng thu chi: cộng Thành
  * tiền theo giáo viên (dòng chưa chọn giáo viên xét riêng từng dòng); từ ngưỡng
- * thì mỗi dòng khấu trừ 10% (làm tròn đồng), dưới ngưỡng thì 0.
+ * thì mỗi dòng khấu trừ 10% (làm tròn đồng), dưới ngưỡng thì 0. Dòng có thuế
+ * nhập tay (`manualPit`) giữ đúng số đó.
  */
 export function allocateSchoolTeacherTax<K>(
-  rows: { key: K; schoolTeacherId: number | null; amount: number }[],
+  rows: {
+    key: K;
+    schoolTeacherId: number | null;
+    amount: number;
+    manualPit?: number | null;
+  }[],
 ): Map<K, { pitRate: number; pitAmount: number; netAmount: number }> {
   const groupOf = (row: { key: K; schoolTeacherId: number | null }) =>
     row.schoolTeacherId ? `teacher:${row.schoolTeacherId}` : row;
@@ -152,6 +178,15 @@ export function allocateSchoolTeacherTax<K>(
   const result = new Map<K, { pitRate: number; pitAmount: number; netAmount: number }>();
   for (const row of rows) {
     const amount = Number(row.amount) || 0;
+    if (row.manualPit !== undefined && row.manualPit !== null) {
+      const pitAmount = Math.min(Math.max(0, Math.round(Number(row.manualPit) || 0)), Math.round(amount));
+      result.set(row.key, {
+        pitRate: amount > 0 ? round2((pitAmount / amount) * 100) : 0,
+        pitAmount,
+        netAmount: round2(amount - pitAmount),
+      });
+      continue;
+    }
     const pitRate =
       (gross.get(groupOf(row)) ?? 0) >= SCHOOL_TEACHER_PIT_THRESHOLD
         ? SCHOOL_TEACHER_PIT_RATE

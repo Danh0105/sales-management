@@ -183,6 +183,22 @@ export class RevenueItem {
   })
   invoiceNote!: string | null;
 
+  /**
+   * "Tổng thanh toán công ty" kế toán nhập tay (19/11/2026). null = tự tính
+   * (Số lượng × đơn giá công ty). Không đổi Thành tiền / hóa đơn Viettel.
+   */
+  @Column({
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+    transformer: {
+      to: (value: number | null | undefined) => value,
+      from: (value: string | null) => (value === null ? null : Number(value)),
+    },
+  })
+  companyPaymentTotal!: number | null;
+
   /** Đã bấm "Xuất hóa đơn" — khóa dòng, không được thêm dòng doanh thu (trừ kế toán trưởng). */
   @Column({
     type: 'boolean',

@@ -63,6 +63,10 @@ import {
   isSalesPick,
   itemSourceOf,
   loadOpenCashflowRequests,
+  cashTakerOf,
+  type CashInput,
+  multiAccounts,
+  sumByAccount,
   loadSchoolExpenseGroups,
   loadSchoolTeacherGroups,
   lockCashflowKeys,
@@ -181,6 +185,14 @@ import {
   fundSourceOfCashAccount,
 } from './enums/expense-fund-source.enum';
 import { cashAccountLabel } from '../revenue-item/invoice-cash-account';
+import {
+  type CashSplit,
+  cashSplitsLabel,
+  createCashSplitCursor,
+  normalizeCashSplits,
+  orderCashSplits,
+  returnCashSplits,
+} from './cash-splits';
 import { UpdateExpenseRequestDto } from './dto/expense/update-expense-request.dto';
 import { FilterExpenseDto } from './dto/expense/filter-expense.dto';
 import { ApproveExpenseDto } from './dto/expense/approve-expense.dto';
@@ -205,13 +217,21 @@ type ChiNgoaiPaymentLog =
       skipped?: undefined;
       paidDate: string;
       cashAccount: string | null;
+      /** Nhiều nguồn chi: số tiền đã ghi theo từng tài khoản. */
+      cashAccounts?: { cashAccount: string | null; amount: number }[];
       items: {
         monthlyItemId: number;
         label: string;
         amount: number;
         /** Bảng không còn dòng nào để ghi. */
         unallocated: number;
-        rows: { itemId: number; schoolExpenseId: number; rowIndex: number; amount: number }[];
+        rows: {
+          itemId: number;
+          schoolExpenseId: number;
+          rowIndex: number;
+          amount: number;
+          cashAccounts?: { cashAccount: string | null; amount: number }[];
+        }[];
       }[];
     };
 
@@ -910,8 +930,8 @@ export class SuggestService {
     if (sheet.hasData && !(sheet.proposableTotal > 0)) {
       throw new BadRequestException(
         `${sheetLabel} không còn khoản nào cần đề xuất` +
-          (sheet.inContractTotal > 0
-            ? ' (dòng Hình thức chi "Có trong HĐ" đã tính là đã chi)'
+          (source === 'SCHOOL_EXPENSE'
+            ? ' (chỉ dòng Hình thức chi "Không có trong HĐ" mới đề xuất được)'
             : ' (đã chi đủ hoặc đang nằm trong đề xuất khác)'),
       );
     }
@@ -1752,7 +1772,11 @@ export class SuggestService {
           );
         }
         if (!(group.remainingAmount > 0)) {
-          throw new BadRequestException(`${label} không còn tiền phải chi`);
+          throw new BadRequestException(
+            source === 'SCHOOL_EXPENSE' && group.unsetPaymentTypeAmount > 0
+              ? `${label}: chỉ đề xuất được dòng Chi Trường có Hình thức chi "Không có trong HĐ"`
+              : `${label} không còn tiền phải chi`,
+          );
         }
         picks.push({
           source,
@@ -4619,14 +4643,21 @@ export class SuggestService {
     files?: UploadedAttachment[],
     fundSource?: FundSource,
     cashAccount?: string,
+    cashSplitsInput?: { cashAccount: string; amount: number }[],
   ) {
-    if (!cashAccount && !fundSource) {
+    const multi = Array.isArray(cashSplitsInput) && cashSplitsInput.length > 0;
+    if (!multi && !cashAccount && !fundSource) {
       throw new BadRequestException('Vui lòng chọn nguồn chi');
     }
+    // Nhiều nguồn chi (19/11/2026): nguồn đầu tiên là tài khoản chính của lệnh chi.
+    let splits: CashSplit[] = [];
+    let primaryAccount: string | null = multi
+      ? String(cashSplitsInput![0]?.cashAccount ?? '') || null
+      : cashAccount ?? null;
     // Nguồn chi (tài khoản) quyết định nhóm nguồn tiền; client cũ chỉ gửi nhóm.
-    const source = cashAccount ? fundSourceOfCashAccount(cashAccount) : fundSource!;
-    const sourceLabel = cashAccount
-      ? cashAccountLabel(cashAccount)
+    let source = primaryAccount ? fundSourceOfCashAccount(primaryAccount) : fundSource!;
+    let sourceLabel = primaryAccount
+      ? cashAccountLabel(primaryAccount)
       : FUND_SOURCE_LABEL[source];
 
     const saved = await this.expenseTransition({
@@ -4634,12 +4665,29 @@ export class SuggestService {
       action: ExpenseAction.CONFIRM_CASH_RELEASED,
       user,
       note,
-      logData: () => ({ fundSource: source, cashAccount: cashAccount ?? null }),
+      logData: () => ({
+        fundSource: source,
+        cashAccount: primaryAccount,
+        // Sổ quỹ ghi mỗi nguồn một bút toán chi.
+        ...(splits.length > 1 ? { cashSplits: splits } : {}),
+      }),
       mutate: (s) => {
         s.cashReleasedBy = user.id;
         s.cashReleasedAt = new Date();
       },
       extra: async (manager, s) => {
+        if (multi) {
+          const order = await manager.findOne(SuggestPaymentOrder, {
+            where: { suggestId: s.id! },
+          });
+          if (!order) throw new BadRequestException('Đề xuất chưa có lệnh chi');
+          splits = normalizeCashSplits(cashSplitsInput, Number(order.amount));
+        }
+        if (splits.length) {
+          primaryAccount = splits[0].cashAccount;
+          source = fundSourceOfCashAccount(primaryAccount);
+          sourceLabel = cashSplitsLabel(splits);
+        }
         await this.saveExpenseAttachments(
           manager,
           s.id!,
@@ -4652,7 +4700,8 @@ export class SuggestService {
           { suggestId: s.id! },
           {
             fundSource: source,
-            cashAccount: cashAccount ?? null,
+            cashAccount: primaryAccount,
+            cashSplits: splits.length > 1 ? splits : null,
             // Chi tháng không còn bước Kế toán chọn hình thức: hình thức đi
             // theo tài khoản Thủ quỹ xuất (111x tiền mặt, 112x ngân hàng).
             ...(s.isMonthlyExpense
@@ -4679,7 +4728,8 @@ export class SuggestService {
         meta: {
           status: saved.status,
           fundSource: source,
-          cashAccount: cashAccount ?? null,
+          cashAccount: primaryAccount,
+          ...(splits.length > 1 ? { cashSplits: splits } : {}),
         },
       },
       { userIds: saved.createdBy ? [saved.createdBy] : [] },
@@ -4907,6 +4957,7 @@ export class SuggestService {
   async confirmRemainderReturned(id: number, user: AuthUser, note?: string) {
     let returnAmount: number | null = null;
     let cashAccount: string | null = null;
+    let returnSplits: CashSplit[] | null = null;
 
     const saved = await this.expenseTransition({
       id,
@@ -4929,9 +4980,18 @@ export class SuggestService {
           rows.filter((row) => row.spent).map((row) => row.id),
         ).returnAmount;
         cashAccount = order.cashAccount ?? null;
+        // Nhiều nguồn chi: phần dư trả về các nguồn sau cùng (trừ ngược).
+        const splits = orderCashSplits(order);
+        if (splits.length > 1) {
+          returnSplits = returnCashSplits(splits, returnAmount ?? 0);
+        }
       },
       // Sổ quỹ đọc returnAmount để ghi bút toán thu phần dư.
-      logData: () => ({ returnAmount, cashAccount }),
+      logData: () => ({
+        returnAmount,
+        cashAccount,
+        ...(returnSplits ? { returnSplits } : {}),
+      }),
     });
 
     await this.notifyExpense(
@@ -6230,6 +6290,15 @@ export class SuggestService {
     s: Suggest,
     rows: SuggestMonthlyItem[],
   ): Promise<Record<string, unknown>> {
+    // Nguồn chi Thủ quỹ đã xuất (có thể nhiều nguồn): các khoản lấy lần lượt
+    // từ nguồn 1, hết thì sang nguồn 2… (19/11/2026).
+    const order = await manager.findOne(SuggestPaymentOrder, {
+      where: { suggestId: s.id! },
+    });
+    const splits = orderCashSplits(order);
+    const cursor = createCashSplitCursor(splits);
+    const cash: CashInput =
+      splits.length > 1 ? (amount) => cursor.take(amount) : order?.cashAccount ?? null;
     // "Đề xuất chi tháng" tích chọn: mỗi khoản ghi về đúng bảng của nó.
     if (isSalesPick(s)) {
       const result: Record<string, unknown> = {};
@@ -6237,7 +6306,7 @@ export class SuggestService {
       for (const source of CASHFLOW_SOURCES) {
         const own = rows.filter((row) => itemSourceOf(row, s) === source);
         if (!own.length) continue;
-        const part = await this.recordSourcePayments(manager, s, source, own);
+        const part = await this.recordSourcePayments(manager, s, source, own, cash);
         if (part.chiNgoai) result.chiNgoai = part.chiNgoai;
         if (part.cashflowPayment) logs.push(part.cashflowPayment);
       }
@@ -6245,7 +6314,13 @@ export class SuggestService {
       if (logs.length > 1) result.cashflowPayments = logs;
       return result;
     }
-    return this.recordSourcePayments(manager, s, cashflowSourceOf(s) ?? 'MANAGEMENT', rows);
+    return this.recordSourcePayments(
+      manager,
+      s,
+      cashflowSourceOf(s) ?? 'MANAGEMENT',
+      rows,
+      cash,
+    );
   }
 
   private async recordSourcePayments(
@@ -6253,14 +6328,12 @@ export class SuggestService {
     s: Suggest,
     source: CashflowSource,
     rows: SuggestMonthlyItem[],
+    cash: CashInput,
   ): Promise<Record<string, unknown>> {
     if (source === 'MANAGEMENT') {
-      const chiNgoai = await this.recordChiNgoaiPayments(manager, s, rows);
+      const chiNgoai = await this.recordChiNgoaiPayments(manager, s, rows, cash);
       return chiNgoai ? { chiNgoai } : {};
     }
-    const order = await manager.findOne(SuggestPaymentOrder, {
-      where: { suggestId: s.id! },
-    });
     const paidRows: CashflowPaidRow[] = rows.map((row) => ({
       monthlyItemId: row.id,
       schoolId: row.schoolId,
@@ -6279,7 +6352,7 @@ export class SuggestService {
       s.id!,
       paidRows,
       vnToday(),
-      order?.cashAccount ?? null,
+      cash,
     );
     for (const item of log && 'items' in log && log.items ? log.items : []) {
       if (item.unallocated > 0) {
@@ -6302,6 +6375,7 @@ export class SuggestService {
     manager: EntityManager,
     s: Suggest,
     rows: SuggestMonthlyItem[],
+    cash: CashInput,
   ): Promise<ChiNgoaiPaymentLog | null> {
     if (!rows.length) return null;
     if (rows.some((row) => row.approvedAmount === null || row.approvedAmount === undefined)) {
@@ -6310,10 +6384,9 @@ export class SuggestService {
           'Lệnh chi do Kế toán lập/sửa nên không chia được theo trường — Chi Ngoài không tự ghi, nhập tay ở QL thu chi',
       };
     }
-    const order = await manager.findOne(SuggestPaymentOrder, {
-      where: { suggestId: s.id! },
-    });
-    const cashAccount = order?.cashAccount ?? null;
+    const take = cashTakerOf(cash);
+    const used: { cashAccount: string | null; amount: number }[] = [];
+    const partsByItem = new Map<number, { cashAccount: string | null; amount: number }[]>();
     const paidDate = vnToday();
 
     // Khoá các bảng Chi Ngoài liên quan theo thứ tự id, cùng khoá mà "Lưu" bảng
@@ -6371,13 +6444,19 @@ export class SuggestService {
            WHERE id = $1`,
           [allocation.itemId, allocation.amount],
         );
-        await manager.query(
-          `INSERT INTO management_expense_suggest_payments
-             (management_expense_item_id, suggest_id, suggest_monthly_item_id,
-              amount, paid_date, cash_account)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [allocation.itemId, s.id, row.id, allocation.amount, paidDate, cashAccount],
-        );
+        // Nhiều nguồn chi: mỗi nguồn của dòng một bản ghi riêng.
+        const parts = take(allocation.amount);
+        partsByItem.set(allocation.itemId, parts);
+        used.push(...parts);
+        for (const part of parts) {
+          await manager.query(
+            `INSERT INTO management_expense_suggest_payments
+               (management_expense_item_id, suggest_id, suggest_monthly_item_id,
+                amount, paid_date, cash_account)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [allocation.itemId, s.id, row.id, part.amount, paidDate, part.cashAccount],
+          );
+        }
       }
       items.push({
         monthlyItemId: row.id,
@@ -6391,6 +6470,7 @@ export class SuggestService {
             schoolExpenseId: viewRow.schoolExpenseId,
             rowIndex: viewRow.rowIndex,
             amount: allocation.amount,
+            ...multiAccounts(partsByItem.get(allocation.itemId)),
           };
         }),
       });
@@ -6400,7 +6480,14 @@ export class SuggestService {
         );
       }
     }
-    return { paidDate, cashAccount, items };
+    const accounts = sumByAccount(used);
+    return {
+      paidDate,
+      cashAccount:
+        typeof cash === 'function' ? (accounts[0]?.cashAccount ?? null) : cash,
+      ...(accounts.length > 1 ? { cashAccounts: accounts } : {}),
+      items,
+    };
   }
 
   /** Dòng trường của đề xuất chi tháng; đề xuất cũ chưa có dòng thì lấy từ các cột đơn. */

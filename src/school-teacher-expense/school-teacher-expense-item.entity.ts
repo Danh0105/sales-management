@@ -76,6 +76,10 @@ export class SchoolTeacherExpenseItem {
    * % thuế TNCN đang áp cho dòng: 10 khi tổng thù lao tháng của giáo viên trong
    * bảng thu chi (mọi môn) từ 5.000.000đ, ngược lại 0. Server tự tính.
    */
+  /** Thuế TNCN do kế toán nhập tay (19/11/2026): giữ đúng `pitAmount`, không tự tính. */
+  @Column({ name: 'pit_manual', type: 'boolean', default: false })
+  pitManual!: boolean;
+
   @Column({ name: 'pit_rate', type: 'numeric', precision: 5, scale: 2, default: 0, transformer: numericTransformer })
   pitRate!: number;
 

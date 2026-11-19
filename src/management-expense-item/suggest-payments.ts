@@ -141,7 +141,23 @@ export function withSuggestPayments<T extends { id: number }>(
     suggestPaidAmount: found.total,
     suggestCodes: suggestCodesLabel(found),
     suggestPayments: found.payments,
+    ...suggestSourcesOf(found),
   };
+}
+
+/**
+ * Đã chi theo đề xuất từ nhiều nguồn chi (19/11/2026): số tiền theo từng tài
+ * khoản để màn hình thống kê riêng. Một nguồn thì không trả.
+ */
+export function suggestSourcesOf(payments: ItemSuggestPayments | undefined) {
+  if (!payments) return {};
+  const sources: { cashAccount: string | null; amount: number }[] = [];
+  for (const payment of payments.payments) {
+    const found = sources.find((source) => source.cashAccount === payment.cashAccount);
+    if (found) found.amount = round2(found.amount + payment.amount);
+    else sources.push({ cashAccount: payment.cashAccount, amount: payment.amount });
+  }
+  return sources.length > 1 ? { suggestSources: sources } : {};
 }
 
 /** Hiện ở ô bị khoá và trong thông báo lỗi. */

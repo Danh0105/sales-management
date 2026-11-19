@@ -721,7 +721,10 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
   });
 
   function makeService() {
-    const manager = { update: jest.fn() };
+    const manager = {
+      update: jest.fn(),
+      findOne: jest.fn().mockResolvedValue({ suggestId: 5, amount: 5000000 }),
+    };
     const service = Object.create(SuggestService.prototype) as SuggestService;
     const calls: { transition?: any; notify?: any } = {};
     (service as any).expenseTransition = jest.fn(async (opts: any) => {
@@ -761,7 +764,7 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
     expect(manager.update).toHaveBeenCalledWith(
       expect.anything(),
       { suggestId: 5 },
-      { fundSource: 'COMPANY_CASH', cashAccount: '1113' },
+      { fundSource: 'COMPANY_CASH', cashAccount: '1113', cashSplits: null },
     );
     expect(calls.notify.message).toContain('từ 1113 - Tiền mặt - Anh Trung,');
     expect(calls.notify.meta).toMatchObject({
@@ -785,6 +788,7 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
     expect(manager.update.mock.calls[0][2]).toEqual({
       fundSource: 'BANK_ACCOUNT',
       cashAccount: '11212',
+      cashSplits: null,
     });
   });
 
@@ -806,8 +810,53 @@ describe('Thủ quỹ xác nhận xuất tiền — Nguồn chi', () => {
     expect(manager.update.mock.calls[0][2]).toEqual({
       fundSource: 'BANK_ACCOUNT',
       cashAccount: null,
+      cashSplits: null,
     });
     expect(calls.notify.message).toContain('từ tài khoản ngân hàng,');
+  });
+
+  it('nhiều nguồn chi: lưu cashSplits, tài khoản chính = nguồn đầu, log + thông báo đủ nguồn', async () => {
+    const { service, manager, calls } = makeService();
+    await service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, undefined, [
+      { cashAccount: '1121', amount: 3000000 },
+      { cashAccount: '1111', amount: 2000000 },
+    ]);
+    const splits = [
+      { cashAccount: '1121', amount: 3000000 },
+      { cashAccount: '1111', amount: 2000000 },
+    ];
+    expect(manager.update.mock.calls[0][2]).toEqual({
+      fundSource: 'BANK_ACCOUNT',
+      cashAccount: '1121',
+      cashSplits: splits,
+    });
+    expect(calls.transition.logData()).toEqual({
+      fundSource: 'BANK_ACCOUNT',
+      cashAccount: '1121',
+      cashSplits: splits,
+    });
+    expect(calls.notify.message).toContain(' + 1111');
+  });
+
+  it('nhiều nguồn chi: tổng khác lệnh chi thì báo lỗi', async () => {
+    const { service } = makeService();
+    await expect(
+      service.confirmCashReleased(5, { id: 3 } as any, undefined, [], undefined, undefined, [
+        { cashAccount: '1121', amount: 3000000 },
+        { cashAccount: '1111', amount: 1000000 },
+      ]),
+    ).rejects.toThrow(/phải bằng đúng lệnh chi/);
+  });
+
+  it('DTO nhận cashSplits dạng chuỗi JSON (multipart)', async () => {
+    await expect(
+      pipe.transform(
+        { cashSplits: JSON.stringify([{ cashAccount: '1121', amount: 1 }, { cashAccount: '1111', amount: 2 }]) },
+        metadata,
+      ),
+    ).resolves.toMatchObject({
+      cashSplits: [{ cashAccount: '1121', amount: 1 }, { cashAccount: '1111', amount: 2 }],
+    });
   });
 
   it('không chọn nguồn chi thì báo lỗi, không chuyển trạng thái', async () => {

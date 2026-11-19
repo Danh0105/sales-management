@@ -352,6 +352,11 @@ export function buildRevenueItemData(item: any, index = 0, sharedItem = item) {
         .trim()
         .slice(0, 500) || null,
     invoiceLocked: item?.invoiceLocked === true,
+    // "Tổng thanh toán công ty" nhập tay (19/11/2026); trống = tự tính.
+    companyPaymentTotal: normalizeCashAmount(
+      item?.companyPaymentTotal,
+      'companyPaymentTotal',
+    ),
     paidAmount,
     paymentMethod: normalizePaymentMethod(item?.paymentMethod),
     paymentDate: item?.paymentDate || null,

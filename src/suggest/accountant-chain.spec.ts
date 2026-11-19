@@ -290,7 +290,7 @@ describe('Kinh doanh tạo Chi Ngoài / Chi Trường / Chi GV trường', () =>
         undefined,
         sales,
       ),
-    ).rejects.toThrow('"Có trong HĐ" đã tính là đã chi');
+    ).rejects.toThrow('chỉ dòng Hình thức chi "Không có trong HĐ" mới đề xuất được');
     expect(manager.save).not.toHaveBeenCalled();
   });
 

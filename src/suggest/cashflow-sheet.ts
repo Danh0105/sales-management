@@ -2,6 +2,7 @@ import type { EntityManager } from 'typeorm';
 
 import {
   SCHOOL_PAYMENT_IN_CONTRACT,
+  SCHOOL_PAYMENT_NOT_IN_CONTRACT,
   TEACHER_ROW_PAID,
   type CashflowSource,
 } from './cashflow-sources';
@@ -104,6 +105,8 @@ export async function loadSheetRows(
     );
     return rows.map((row) => {
       const inContract = row.payment_type === SCHOOL_PAYMENT_IN_CONTRACT;
+      // 19/11/2026: chỉ dòng "Không có trong HĐ" đề xuất được.
+      const proposable = row.payment_type === SCHOOL_PAYMENT_NOT_IN_CONTRACT;
       const amount = num(row.school_expense_amount);
       const paid = num(row.paid_amount);
       return {
@@ -127,7 +130,7 @@ export async function loadSheetRows(
         cashAccount: (row.cash_account as string) ?? null,
         paidAmount: paid,
         remaining: num(row.remaining),
-        proposableAmount: inContract ? 0 : Math.max(0, Math.round((amount - paid) * 100) / 100),
+        proposableAmount: proposable ? Math.max(0, Math.round((amount - paid) * 100) / 100) : 0,
         payer: (row.payer as string) ?? null,
         note: (row.note as string) ?? null,
         suggestCodes: (row.suggest_codes as string) ?? null,

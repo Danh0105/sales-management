@@ -181,6 +181,11 @@ export interface CashflowGroup {
    * qua hoá đơn nên tính là đã chi, không đề xuất được (0 với bảng khác).
    */
   inContractAmount: number;
+  /**
+   * Chi Trường: phần chưa chi của các dòng chưa chọn Hình thức chi — chưa đề
+   * xuất được tới khi chọn "Không có trong HĐ" (0 với bảng khác).
+   */
+  unsetPaymentTypeAmount: number;
 }
 
 export interface OpenCashflowRequest {
@@ -269,6 +274,11 @@ function periodWhere(filter: CashflowGroupFilter, params: unknown[]): string {
 
 /** Hình thức chi "Có trong HĐ" của dòng Chi Trường (`school_expense_items.payment_type`). */
 export const SCHOOL_PAYMENT_IN_CONTRACT = 'in_contract';
+/**
+ * Hình thức chi "Không có trong HĐ": 19/11/2026 (user) chỉ dòng Chi Trường này
+ * kinh doanh mới đề xuất chi được; dòng chưa chọn Hình thức chi thì chưa.
+ */
+export const SCHOOL_PAYMENT_NOT_IN_CONTRACT = 'not_in_contract';
 
 type GroupRow = {
   school_id: number;
@@ -287,6 +297,7 @@ type GroupRow = {
   paid: string;
   remaining: string;
   in_contract?: string | null;
+  unset_type?: string | null;
 };
 
 function toGroup(source: CashflowSource, row: GroupRow): CashflowGroup {
@@ -315,6 +326,7 @@ function toGroup(source: CashflowSource, row: GroupRow): CashflowGroup {
     remainingAmount: round2(num(row.remaining)),
     finalized: !!row.finalized,
     inContractAmount: round2(num(row.in_contract)),
+    unsetPaymentTypeAmount: round2(num(row.unset_type)),
   };
 }
 
@@ -328,7 +340,9 @@ const SHEET_JOINS = `JOIN school_expenses se ON se.id = t.school_expense_id
 
 /**
  * Chi Trường theo môn: Phải chi = Σ Tiền chi trường, Còn = Σ phần chưa chi của
- * từng dòng. Dòng Hình thức chi "Có trong HĐ" tính đã chi đủ (Còn = 0).
+ * từng dòng Hình thức chi "Không có trong HĐ" (chỉ dòng này đề xuất được).
+ * Dòng "Có trong HĐ" tính đã chi đủ; dòng chưa chọn Hình thức chi chưa đề xuất
+ * được (phần đó ở `unsetPaymentTypeAmount`).
  */
 export async function loadSchoolExpenseGroups(
   manager: EntityManager,
@@ -346,10 +360,13 @@ export async function loadSchoolExpenseGroups(
        SUM(t."schoolExpenseAmount")::text AS total,
        SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}'
                 THEN t."schoolExpenseAmount" ELSE t."paidAmount" END)::text AS paid,
-       SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}' THEN 0
-                ELSE GREATEST(t."schoolExpenseAmount" - t."paidAmount", 0) END)::text AS remaining,
+       SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_NOT_IN_CONTRACT}'
+                THEN GREATEST(t."schoolExpenseAmount" - t."paidAmount", 0) ELSE 0 END)::text AS remaining,
        SUM(CASE WHEN t.payment_type = '${SCHOOL_PAYMENT_IN_CONTRACT}'
-                THEN t."schoolExpenseAmount" ELSE 0 END)::text AS in_contract
+                THEN t."schoolExpenseAmount" ELSE 0 END)::text AS in_contract,
+       SUM(CASE WHEN t.payment_type IS DISTINCT FROM '${SCHOOL_PAYMENT_IN_CONTRACT}'
+                 AND t.payment_type IS DISTINCT FROM '${SCHOOL_PAYMENT_NOT_IN_CONTRACT}'
+                THEN GREATEST(t."schoolExpenseAmount" - t."paidAmount", 0) ELSE 0 END)::text AS unset_type
      FROM school_expense_items t
      ${SHEET_JOINS}
      JOIN subjects sub ON sub.id = t.subject_id
@@ -502,6 +519,7 @@ export function managementGroupsFromSections(
       remainingAmount: round2(rowRemaining),
       finalized: section.finalized,
       inContractAmount: 0,
+      unsetPaymentTypeAmount: 0,
     });
   }
   // Bảng không có tiền phải chi thì không phải khoản.
@@ -618,6 +636,31 @@ export interface CashflowPaidRow {
   label: string;
 }
 
+/**
+ * Nguồn chi khi ghi Đã chi: một tài khoản (cũ) hoặc hàm lấy tiền lần lượt từ
+ * nhiều nguồn Thủ quỹ đã xuất (19/11/2026) — mỗi phần một tài khoản + số tiền.
+ */
+export type CashTaker = (amount: number) => { cashAccount: string | null; amount: number }[];
+export type CashInput = string | null | CashTaker;
+
+export const cashTakerOf = (cash: CashInput): CashTaker =>
+  typeof cash === 'function'
+    ? cash
+    : (amount) => (amount > 0 ? [{ cashAccount: cash, amount: round2(amount) }] : []);
+
+/** Gộp số tiền theo tài khoản (giữ thứ tự xuất hiện) — ghi vào lịch sử. */
+export function sumByAccount(
+  parts: { cashAccount: string | null; amount: number }[],
+): { cashAccount: string | null; amount: number }[] {
+  const result: { cashAccount: string | null; amount: number }[] = [];
+  for (const part of parts) {
+    const found = result.find((r) => r.cashAccount === part.cashAccount);
+    if (found) found.amount = round2(found.amount + part.amount);
+    else result.push({ ...part });
+  }
+  return result;
+}
+
 /** Ghi vào lịch sử đề xuất: phần đã ghi sang bảng Chi Trường / Giáo viên trường. */
 export type CashflowPaymentLog =
   | { source: CashflowSource; table: string; skipped: string }
@@ -627,6 +670,8 @@ export type CashflowPaymentLog =
       skipped?: undefined;
       paidDate: string;
       cashAccount: string | null;
+      /** Nhiều nguồn chi: số tiền ghi theo từng tài khoản (có khi > 1 nguồn). */
+      cashAccounts?: { cashAccount: string | null; amount: number }[];
       items: {
         monthlyItemId: number;
         label: string;
@@ -639,6 +684,8 @@ export type CashflowPaymentLog =
           subjectId: number;
           rowIndex: number;
           amount: number;
+          /** Nhiều nguồn chi: phần của từng tài khoản trong dòng. */
+          cashAccounts?: { cashAccount: string | null; amount: number }[];
         }[];
       }[];
     };
@@ -683,6 +730,33 @@ const sheetIdsOf = (
     )
     .map((sheet) => sheet.id);
 
+/** Dòng ghi từ hơn một nguồn chi: kèm số tiền từng nguồn. */
+export const multiAccounts = (
+  parts: { cashAccount: string | null; amount: number }[] | undefined,
+) => {
+  const grouped = sumByAccount(parts ?? []);
+  return grouped.length > 1 ? { cashAccounts: grouped } : {};
+};
+
+function paymentLog(
+  source: CashflowSource,
+  paidDate: string,
+  cash: CashInput,
+  used: { cashAccount: string | null; amount: number }[],
+  items: Extract<CashflowPaymentLog, { paidDate: string }>['items'],
+): CashflowPaymentLog {
+  const accounts = sumByAccount(used);
+  return {
+    source,
+    table: CASHFLOW_TABLE_LABELS[source],
+    paidDate,
+    cashAccount:
+      typeof cash === 'function' ? (accounts[0]?.cashAccount ?? null) : cash,
+    ...(accounts.length > 1 ? { cashAccounts: accounts } : {}),
+    items,
+  };
+}
+
 const skippedSplit = (source: CashflowSource): CashflowPaymentLog => ({
   source,
   table: CASHFLOW_TABLE_LABELS[source],
@@ -700,8 +774,11 @@ export async function recordSchoolExpenseSuggestPayments(
   suggestId: number,
   rows: CashflowPaidRow[],
   paidDate: string,
-  cashAccount: string | null,
+  cash: CashInput,
 ): Promise<CashflowPaymentLog | null> {
+  const take = cashTakerOf(cash);
+  const used: { cashAccount: string | null; amount: number }[] = [];
+  const partsByItem = new Map<number, { cashAccount: string | null; amount: number }[]>();
   if (!rows.length) return null;
   if (
     rows.some(
@@ -726,12 +803,12 @@ export async function recordSchoolExpenseSuggestPayments(
             paid: string;
           }[]
         >(
-          // Dòng "Có trong HĐ" đã tính chi đủ — không ghi đề xuất vào.
+          // Chỉ dòng "Không có trong HĐ" mới đề xuất được — ghi Đã chi vào đó.
           `SELECT id, school_expense_id, "rowIndex" AS row_index,
              "schoolExpenseAmount"::text AS amount, "paidAmount"::text AS paid
            FROM school_expense_items
            WHERE school_expense_id = ANY($1) AND subject_id = $2
-             AND payment_type IS DISTINCT FROM '${SCHOOL_PAYMENT_IN_CONTRACT}'
+             AND payment_type = '${SCHOOL_PAYMENT_NOT_IN_CONTRACT}'
            ORDER BY school_expense_id, "rowIndex", id`,
           [sheetIds, row.subjectId],
         )
@@ -751,20 +828,26 @@ export async function recordSchoolExpenseSuggestPayments(
          WHERE id = $1`,
         [allocation.itemId, allocation.amount],
       );
-      await manager.query(
-        `INSERT INTO school_expense_suggest_payments
-           (school_expense_item_id, suggest_id, suggest_monthly_item_id,
-            amount, paid_date, cash_account)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          allocation.itemId,
-          suggestId,
-          row.monthlyItemId,
-          allocation.amount,
-          paidDate,
-          cashAccount,
-        ],
-      );
+      // Nhiều nguồn chi: mỗi nguồn của dòng một bản ghi riêng (thống kê riêng).
+      const parts = take(allocation.amount);
+      partsByItem.set(allocation.itemId, parts);
+      used.push(...parts);
+      for (const part of parts) {
+        await manager.query(
+          `INSERT INTO school_expense_suggest_payments
+             (school_expense_item_id, suggest_id, suggest_monthly_item_id,
+              amount, paid_date, cash_account)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            allocation.itemId,
+            suggestId,
+            row.monthlyItemId,
+            part.amount,
+            paidDate,
+            part.cashAccount,
+          ],
+        );
+      }
     }
     items.push({
       monthlyItemId: row.monthlyItemId,
@@ -779,17 +862,12 @@ export async function recordSchoolExpenseSuggestPayments(
           subjectId: row.subjectId!,
           rowIndex: Number(line.row_index),
           amount: allocation.amount,
+          ...multiAccounts(partsByItem.get(allocation.itemId)),
         };
       }),
     });
   }
-  return {
-    source: 'SCHOOL_EXPENSE',
-    table: CASHFLOW_TABLE_LABELS.SCHOOL_EXPENSE,
-    paidDate,
-    cashAccount,
-    items,
-  };
+  return paymentLog('SCHOOL_EXPENSE', paidDate, cash, used, items);
 }
 
 /**
@@ -803,8 +881,10 @@ export async function recordSchoolTeacherSuggestPayments(
   suggestId: number,
   rows: CashflowPaidRow[],
   paidDate: string,
-  cashAccount: string | null,
+  cash: CashInput,
 ): Promise<CashflowPaymentLog | null> {
+  const take = cashTakerOf(cash);
+  const used: { cashAccount: string | null; amount: number }[] = [];
   if (!rows.length) return null;
   if (
     rows.some(
@@ -846,19 +926,25 @@ export async function recordSchoolTeacherSuggestPayments(
     for (const line of lines) {
       const net = round2(num(line.net));
       if (net > left + 0.005) continue;
+      // Nhiều nguồn chi: ô Nguồn chi của dòng = nguồn đầu tiên, mỗi nguồn một
+      // bản ghi liên kết riêng (thống kê riêng).
+      const parts = take(net);
+      used.push(...parts);
       await manager.query(
         `UPDATE school_teacher_expense_items
          SET expense_date = $2, cash_account = $3
          WHERE id = $1`,
-        [line.id, paidDate, cashAccount],
+        [line.id, paidDate, parts[0]?.cashAccount ?? null],
       );
-      await manager.query(
-        `INSERT INTO school_teacher_suggest_payments
-           (school_teacher_expense_item_id, suggest_id, suggest_monthly_item_id,
-            amount, paid_date, cash_account)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [line.id, suggestId, row.monthlyItemId, net, paidDate, cashAccount],
-      );
+      for (const part of parts) {
+        await manager.query(
+          `INSERT INTO school_teacher_suggest_payments
+             (school_teacher_expense_item_id, suggest_id, suggest_monthly_item_id,
+              amount, paid_date, cash_account)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [line.id, suggestId, row.monthlyItemId, part.amount, paidDate, part.cashAccount],
+        );
+      }
       left = round2(left - net);
       paid.push({
         itemId: Number(line.id),
@@ -866,6 +952,7 @@ export async function recordSchoolTeacherSuggestPayments(
         subjectId: Number(line.subject_id),
         rowIndex: Number(line.row_index),
         amount: net,
+        ...multiAccounts(parts),
       });
     }
     items.push({
@@ -876,11 +963,5 @@ export async function recordSchoolTeacherSuggestPayments(
       rows: paid,
     });
   }
-  return {
-    source: 'SCHOOL_TEACHER',
-    table: CASHFLOW_TABLE_LABELS.SCHOOL_TEACHER,
-    paidDate,
-    cashAccount,
-    items,
-  };
+  return paymentLog('SCHOOL_TEACHER', paidDate, cash, used, items);
 }

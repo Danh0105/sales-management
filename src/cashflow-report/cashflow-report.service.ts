@@ -80,6 +80,10 @@ SELECT EXISTS (SELECT 1 FROM revenue_items WHERE "invoiceCashAccount" = $1)
   OR EXISTS (SELECT 1 FROM school_teacher_expense_items WHERE cash_account = $1)
   OR EXISTS (SELECT 1 FROM suggest_payment_order WHERE "cashAccount" = $1)
   OR EXISTS (SELECT 1 FROM suggest_history WHERE data->>'cashAccount' = $1)
+  OR EXISTS (SELECT 1 FROM suggest_history
+             WHERE data->'cashSplits' @> jsonb_build_array(jsonb_build_object('cashAccount', $1::text)))
+  OR EXISTS (SELECT 1 FROM suggest_payment_order
+             WHERE "cashSplits" @> jsonb_build_array(jsonb_build_object('cashAccount', $1::text)))
   OR EXISTS (SELECT 1 FROM financial_payments WHERE cash_account_code = $1)
   OR EXISTS (SELECT 1 FROM financial_refunds WHERE cash_account_code = $1)
   OR EXISTS (SELECT 1 FROM financial_requests WHERE control_cash_account_code = $1)

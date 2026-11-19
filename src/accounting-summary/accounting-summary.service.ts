@@ -191,14 +191,15 @@ export class AccountingSummaryService {
           LIMIT 1
         ) s ON true
         CROSS JOIN LATERAL (
-          SELECT
+          -- "Tổng thanh toán công ty" nhập tay (19/11/2026) thay số tự tính.
+          SELECT COALESCE(r."companyPaymentTotal",
             (CASE WHEN COALESCE(r."studentCount", 0) > 0 THEN r."studentCount"
                   ELSE COALESCE(r."totalPeriods", 0) END)
             * COALESCE(r."monthsCount", 1)
             * (CASE WHEN s.payment_type = 'not_in_contract' THEN COALESCE(r."unitPrice", 0)
                     ELSE COALESCE(r."unitPrice", 0)
                       - (COALESCE(s.teacher_unit_price, 0) + COALESCE(s.tax_unit_price, 0) + COALESCE(s.csvc, 0))
-               END) AS amount
+               END)) AS amount
         ) a
         ${subjectFilter.replace('"subject_id"', 'r."subject_id"')}
         GROUP BY r."school_expense_id"
@@ -427,14 +428,15 @@ export class AccountingSummaryService {
           LIMIT 1
         ) s ON true
         CROSS JOIN LATERAL (
-          SELECT
+          -- "Tổng thanh toán công ty" nhập tay (19/11/2026) thay số tự tính.
+          SELECT COALESCE(r."companyPaymentTotal",
             (CASE WHEN COALESCE(r."studentCount", 0) > 0 THEN r."studentCount"
                   ELSE COALESCE(r."totalPeriods", 0) END)
             * COALESCE(r."monthsCount", 1)
             * (CASE WHEN s.payment_type = 'not_in_contract' THEN COALESCE(r."unitPrice", 0)
                     ELSE COALESCE(r."unitPrice", 0)
                       - (COALESCE(s.teacher_unit_price, 0) + COALESCE(s.tax_unit_price, 0) + COALESCE(s.csvc, 0))
-               END) AS amount
+               END)) AS amount
         ) a
         GROUP BY r."school_expense_id", r."subject_id"
       )
