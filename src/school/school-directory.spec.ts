@@ -6,6 +6,7 @@ import request from 'supertest';
 import { SchoolDirectoryController } from './school-directory.controller';
 import {
     SchoolDirectoryGuard,
+    schoolDirectoryAllowList,
     schoolDirectoryClientIp,
 } from './school-directory.guard';
 import { SchoolDirectoryService } from './school-directory.service';
@@ -92,6 +93,26 @@ describe('SchoolDirectoryGuard', () => {
             },
         };
         expect(schoolDirectoryClientIp(req as never)).toBe('203.0.113.9');
+    });
+});
+
+describe('SCHOOL_DIRECTORY_ALLOWED_CIDRS', () => {
+    it('mặc định chỉ dải Docker của be.kidostudent', () => {
+        const list = schoolDirectoryAllowList(undefined);
+        expect(list.check('172.21.3.4', 'ipv4')).toBe(true);
+        expect(list.check('160.250.132.143', 'ipv4')).toBe(false);
+    });
+
+    it('khai thêm IP công khai của máy be.kidostudent (IP lẻ = /32)', () => {
+        const list = schoolDirectoryAllowList('172.21.0.0/16, 160.250.132.143');
+        expect(list.check('160.250.132.143', 'ipv4')).toBe(true);
+        expect(list.check('160.250.132.144', 'ipv4')).toBe(false);
+        expect(list.check('172.21.200.9', 'ipv4')).toBe(true);
+    });
+
+    it('giá trị sai thì báo lỗi ngay lúc khởi động', () => {
+        expect(() => schoolDirectoryAllowList('abc')).toThrow('không phải IPv4');
+        expect(() => schoolDirectoryAllowList('10.0.0.0/40')).toThrow('sai độ dài mạng');
     });
 });
 
