@@ -205,7 +205,7 @@ LEFT JOIN suggest_payment_order po ON po."suggestId" = s.id
 WHERE h.action IN (
   'CREATE_PAYMENT_ORDER', 'EDIT_PAYMENT_ORDER',
   'CREATE_MONTHLY_PAYMENT_ORDER', 'EDIT_MONTHLY_PAYMENT_ORDER',
-  'APPROVE_MONTHLY',
+  'APPROVE_MONTHLY', 'APPROVE_MONTHLY_CHAIN',
   'CONFIRM_CASH_RELEASED', 'CONFIRM_FUND_RETURNED', 'CONFIRM_REMAINDER_RETURNED'
 )
 ORDER BY h."suggestId", h."snapshotAt", h.id`;
@@ -568,7 +568,8 @@ export function mapSuggestEvents(events: SuggestEventRow[]): CollectedLedger {
         event.action === 'CREATE_MONTHLY_PAYMENT_ORDER' ||
         // Chi tháng: lệnh chi được lập (hoặc chốt lại) lúc Giám đốc duyệt, lịch
         // sử bước duyệt chụp số tiền lệnh chi.
-        (event.action === 'APPROVE_MONTHLY' &&
+        ((event.action === 'APPROVE_MONTHLY' ||
+          event.action === 'APPROVE_MONTHLY_CHAIN') &&
           event.data?.paymentOrder?.amount !== undefined &&
           event.data?.paymentOrder?.amount !== null)
       ) {

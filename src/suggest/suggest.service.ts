@@ -1445,8 +1445,9 @@ export class SuggestService {
 
   /**
    * Giám đốc duyệt đề xuất quy trình Kế toán: số tiền đã chốt lúc Kế toán gửi;
-   * bỏ tích khoản thì khoản đó không vào lệnh chi. Kế toán công nợ lập lệnh chi
-   * ở bước sau, đúng số này.
+   * bỏ tích khoản thì khoản đó không vào lệnh chi. Từ 20/11/2026 hệ thống tự
+   * lập lệnh chi đúng số này (ghi tạm Tiền mặt, Thủ quỹ chọn nguồn khi xuất) —
+   * bỏ bước Kế toán công nợ lập lệnh chi.
    */
   private async approveMonthlyChain(
     id: number,
@@ -1460,6 +1461,7 @@ export class SuggestService {
       : {};
     let decided: { id: number; label: string; amount: number; approved: boolean }[] = [];
     let total = 0;
+    let paymentOrder: SuggestPaymentOrder | null = null;
     const saved = await this.expenseTransition({
       id,
       action: ExpenseAction.APPROVE_MONTHLY_CHAIN,
@@ -1471,6 +1473,14 @@ export class SuggestService {
         s.rejectReason = null;
         s.requestKind = ExpenseRequestKind.CASH;
         if (dto.note !== undefined) s.approveNote = dto.note || null;
+        // Lệnh chi mới: xoá dấu vết vòng chi trước (như khi Kế toán lập lệnh chi).
+        s.cashReleasedBy = null;
+        s.cashReleasedAt = null;
+        s.cashReceivedAt = null;
+        s.spentAt = null;
+        s.notSpentReason = null;
+        s.fundReturnedBy = null;
+        s.fundReturnedAt = null;
       },
       extra: async (manager, s) => {
         const rows = await this.loadMonthlyRows(manager, s.id!);
@@ -1514,12 +1524,36 @@ export class SuggestService {
           amount: amounts[index],
           approved: selection.approvedIds.has(row.id),
         }));
+        // Lệnh chi tự lập = tổng Giám đốc duyệt; ghi tạm Tiền mặt, Thủ quỹ chọn
+        // tài khoản xuất (một hoặc nhiều nguồn) thì đổi theo.
+        const code = await this.generateCode(
+          manager,
+          'suggest_payment_order',
+          'code',
+          'LC',
+        );
+        await manager.delete(SuggestPaymentOrder, { suggestId: s.id! });
+        paymentOrder = await manager.save(SuggestPaymentOrder, {
+          code,
+          suggestId: s.id!,
+          amount: total,
+          paymentMethod: PaymentMethod.CASH,
+          note: null,
+          createdBy: user.id,
+        });
       },
       logData: () => ({
         requestKind: ExpenseRequestKind.CASH,
         amount: total,
         cashflowSource: isSalesPick(existing) ? null : cashflowSourceOf(existing),
         items: decided,
+        // Sổ quỹ đọc snapshot này làm số tiền lệnh chi của lần xuất kế tiếp.
+        paymentOrder: {
+          code: (paymentOrder as SuggestPaymentOrder | null)?.code ?? null,
+          amount: total,
+          paymentMethod: PaymentMethod.CASH,
+          auto: true,
+        },
         ...snapshot,
       }),
     });
@@ -1530,7 +1564,8 @@ export class SuggestService {
         title: `✅ ${this.monthlyKindLabel(saved)} đã duyệt`,
         message:
           `Đề xuất ${saved.code} đã được Giám đốc duyệt ${formatMoneyVnd(total)}, ` +
-          'vui lòng lập lệnh chi' +
+          `lệnh chi ${(paymentOrder as SuggestPaymentOrder | null)?.code ?? ''} đã tự lập — ` +
+          'Thủ quỹ vui lòng xuất tiền và chọn nguồn tiền' +
           (decided.some((item) => !item.approved)
             ? `. Không duyệt: ${decided
                 .filter((item) => !item.approved)
@@ -1538,10 +1573,13 @@ export class SuggestService {
                 .join('; ')}`
             : ''),
         senderId: user.id,
-        meta: { status: saved.status },
+        meta: {
+          status: saved.status,
+          paymentOrderId: (paymentOrder as SuggestPaymentOrder | null)?.id,
+        },
       },
       {
-        roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+        roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
         userIds: saved.createdBy ? [saved.createdBy] : [],
       },
     );

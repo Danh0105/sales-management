@@ -34,7 +34,7 @@ const treasurer = { actorRoles: [ExpenseRole.TREASURER], isOwner: false, actorId
 const owner = { actorRoles: [ExpenseRole.SALES], isOwner: true, actorId: 7 };
 
 describe('Quy trình Kế toán — state machine', () => {
-  it('KD → Kế toán → KTT → GĐ → KT công nợ → Thủ quỹ → KD', () => {
+  it('KD → Kế toán → KTT → GĐ (tự lập lệnh chi) → Thủ quỹ → KD', () => {
     let status = SuggestStatus.PENDING_ACCOUNTANT;
     const step = (action: ExpenseAction, ctx: object, previousActorId: number | null) =>
       assertExpenseTransition(action, status, { ...ctx, previousActorId } as never);
@@ -44,10 +44,8 @@ describe('Quy trình Kế toán — state machine', () => {
     status = step(ExpenseAction.CHIEF_APPROVE, chief, 20);
     expect(status).toBe(SuggestStatus.PENDING_APPROVAL);
     status = step(ExpenseAction.APPROVE_MONTHLY_CHAIN, director, 21);
-    expect(status).toBe(SuggestStatus.APPROVED);
-    status = step(ExpenseAction.CREATE_PAYMENT_ORDER, debt, 1);
     expect(status).toBe(SuggestStatus.PAYMENT_ORDERED);
-    status = step(ExpenseAction.CONFIRM_CASH_RELEASED, treasurer, 22);
+    status = step(ExpenseAction.CONFIRM_CASH_RELEASED, treasurer, 1);
     expect(status).toBe(SuggestStatus.CASH_RELEASED);
     status = step(ExpenseAction.CONFIRM_CASH_RECEIVED, owner, 23);
     expect(status).toBe(SuggestStatus.CASH_RECEIVED);
@@ -797,17 +795,18 @@ describe('Giám đốc duyệt đề xuất quy trình Kế toán', () => {
     const transition = jest.fn(async (opts) => {
       opts.mutate?.(s);
       await opts.extra?.(manager, s);
-      return { ...s, status: SuggestStatus.APPROVED };
+      return { ...s, status: SuggestStatus.PAYMENT_ORDERED };
     });
     Object.assign(service as object, {
       repo: { findOne: jest.fn().mockResolvedValue(s) },
+      generateCode: jest.fn().mockResolvedValue('LC-1'),
       loadMonthlyRows: jest.fn().mockResolvedValue(rows),
       expenseTransition: transition,
     });
     return { service, manager, s, transition };
   };
 
-  it('duyệt hết: phần từng khoản = số Kế toán chốt, không lập lệnh chi, báo Kế toán công nợ', async () => {
+  it('duyệt hết: phần từng khoản = số Kế toán chốt, tự lập lệnh chi Tiền mặt, báo Thủ quỹ', async () => {
     const { service, manager, s, transition } = setup();
     await service.approveExpense(125, { id: 1, roles: [ExpenseRole.DIRECTOR] } as never, {} as never);
     expect(transition.mock.calls[0][0].action).toBe(ExpenseAction.APPROVE_MONTHLY_CHAIN);
@@ -817,9 +816,19 @@ describe('Giám đốc duyệt đề xuất quy trình Kế toán', () => {
       { approvedAmount: 300_000, spent: null, excluded: false },
     );
     expect(s.amount).toBe(500_000);
-    expect(manager.save).not.toHaveBeenCalledWith(SuggestPaymentOrder, expect.anything());
+    expect(manager.delete).toHaveBeenCalledWith(SuggestPaymentOrder, { suggestId: 125 });
+    expect(manager.save).toHaveBeenCalledWith(
+      SuggestPaymentOrder,
+      expect.objectContaining({ code: 'LC-1', suggestId: 125, amount: 500_000, paymentMethod: 'CASH', createdBy: 1 }),
+    );
+    expect(transition.mock.calls[0][0].logData()).toEqual(
+      expect.objectContaining({
+        amount: 500_000,
+        paymentOrder: expect.objectContaining({ amount: 500_000, paymentMethod: 'CASH', auto: true }),
+      }),
+    );
     expect(service.notifyExpense).toHaveBeenCalledWith(expect.anything(), {
-      roles: [ExpenseRole.DEBT_ACCOUNTANT, ExpenseRole.CHIEF_ACCOUNTANT],
+      roles: [ExpenseRole.TREASURER, ExpenseRole.CHIEF_ACCOUNTANT],
       userIds: [7],
     });
   });
@@ -840,6 +849,10 @@ describe('Giám đốc duyệt đề xuất quy trình Kế toán', () => {
       { approvedAmount: null, spent: null, excluded: true },
     );
     expect(s.amount).toBe(300_000);
+    expect(manager.save).toHaveBeenLastCalledWith(
+      SuggestPaymentOrder,
+      expect.objectContaining({ amount: 300_000 }),
+    );
   });
 });
 

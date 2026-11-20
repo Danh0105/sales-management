@@ -180,10 +180,14 @@ export const EXPENSE_TRANSITIONS: Partial<
     kinds: [ExpenseRequestKind.CASH],
   },
 
-  /** Giám đốc duyệt; lệnh chi do Kế toán công nợ lập ở bước sau (CREATE_PAYMENT_ORDER). */
+  /**
+   * Giám đốc duyệt; từ 20/11/2026 hệ thống tự lập lệnh chi đúng số đã duyệt
+   * (bỏ bước Kế toán công nợ lập lệnh chi) → chờ Thủ quỹ xuất tiền. Sau hoàn
+   * quỹ Kế toán công nợ vẫn lập lại lệnh chi (CREATE_PAYMENT_ORDER).
+   */
   [ExpenseAction.APPROVE_MONTHLY_CHAIN]: {
     from: [SuggestStatus.PENDING_APPROVAL],
-    to: SuggestStatus.APPROVED,
+    to: SuggestStatus.PAYMENT_ORDERED,
     roles: [ExpenseRole.DIRECTOR],
     kinds: [ExpenseRequestKind.CASH],
   },

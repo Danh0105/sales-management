@@ -242,6 +242,30 @@ describe('mapSuggestEvents', () => {
     ).toEqual([toCents('1000000'), toCents('3000000')]);
   });
 
+  it('chi tháng quy trình Kế toán: lệnh chi tự lập lúc Giám đốc duyệt (từ 20/11), duyệt cũ không chụp thì bỏ qua', () => {
+    const { lines, issues } = mapSuggestEvents([
+      event('APPROVE_MONTHLY_CHAIN', '2026-11-20', {
+        data: { amount: 500000, paymentOrder: { code: 'LC-9', amount: 500000, auto: true } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-11-20', {
+        data: { cashAccount: '1111' },
+      }),
+      event('CONFIRM_FUND_RETURNED', '2026-11-21'),
+      // Đề xuất duyệt trước 20/11: lịch sử duyệt không có paymentOrder.
+      event('APPROVE_MONTHLY_CHAIN', '2026-11-22', { data: { amount: 999 } as never }),
+      event('CREATE_PAYMENT_ORDER', '2026-11-22', {
+        data: { paymentOrder: { code: 'LC-10', amount: 200000 } },
+      }),
+      event('CONFIRM_CASH_RELEASED', '2026-11-23', {
+        data: { cashAccount: '1111' },
+      }),
+    ]);
+    expect(issues).toEqual([]);
+    expect(
+      lines.filter((line) => line.payment > 0).map((line) => line.payment),
+    ).toEqual([toCents('500000'), toCents('200000')]);
+  });
+
   it('chi tháng: bước duyệt cũ không chụp lệnh chi thì giữ số tiền trước đó', () => {
     const { lines } = mapSuggestEvents([
       event('CREATE_MONTHLY_PAYMENT_ORDER', '2026-08-11', {
