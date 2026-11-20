@@ -64,6 +64,7 @@ import {
   payableDue,
   receivableDue,
 } from './financial-ledger.service';
+import { FinancialCashBalanceService } from './financial-cash-balance.service';
 import { FinancialNotifyService, writeAudit } from './financial-notify.service';
 import {
   ACTIVE_APPROVAL_STATUSES,
@@ -182,7 +183,25 @@ export class FinancialRequestService {
     private readonly policyRepo: Repository<FinancialPolicy>,
     @InjectRepository(Employee)
     private readonly employeeRepo: Repository<Employee>,
+    private readonly cashBalance?: FinancialCashBalanceService,
   ) {}
+
+  /**
+   * Số dư các tài khoản tiền theo Tổng hợp thu chi — form Điều chuyển tiền nội
+   * bộ chọn nguồn + kiểm số tiền. Người lập phiếu điều chuyển hoặc người ghi
+   * nhận chi/thu mới xem được.
+   */
+  async cashBalances(user: AuthUser) {
+    const ctx = await this.access.context(user);
+    if (
+      !this.access.canCreateTransfer(ctx) &&
+      !this.access.hasAnyRole(ctx, [FinanceRole.ACCOUNTANT, FinanceRole.CASHIER])
+    ) {
+      throw new ForbiddenException('Bạn không xem được số dư tài khoản tiền');
+    }
+    if (!this.cashBalance) throw new BadRequestException('Chưa cấu hình số dư');
+    return this.cashBalance.balances();
+  }
 
   // ===========================================================================
   // Danh mục cho form
@@ -2020,9 +2039,22 @@ export class FinancialRequestService {
     }
 
     switch (request.type) {
-      case FinancialRequestType.INTERNAL_TRANSFER:
-        errors.push(...(await this.transferAccountErrors(manager, request)));
+      case FinancialRequestType.INTERNAL_TRANSFER: {
+        const accountErrors = await this.transferAccountErrors(manager, request);
+        errors.push(...accountErrors);
+        // Số tiền chuyển không vượt số dư nguồn theo Tổng hợp thu chi (hôm nay).
+        if (!accountErrors.length && request.transferFromAccountCode && this.cashBalance) {
+          try {
+            await this.cashBalance.assertCovers(
+              request.transferFromAccountCode,
+              request.totalAmount,
+            );
+          } catch (error) {
+            errors.push((error as Error).message);
+          }
+        }
         break;
+      }
       case FinancialRequestType.ADVANCE:
         if (
           request.settlementDueDate &&

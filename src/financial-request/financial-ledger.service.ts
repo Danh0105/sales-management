@@ -43,6 +43,7 @@ import {
   FinancialAccessService,
 } from './financial-access.service';
 import { FinancialNotifyService, writeAudit } from './financial-notify.service';
+import { FinancialCashBalanceService } from './financial-cash-balance.service';
 import {
   ACTIVE_APPROVAL_STATUSES,
   ApprovalStatus,
@@ -97,6 +98,7 @@ export class FinancialLedgerService {
     private readonly allocationRepo: Repository<FinancialAdvanceAllocation>,
     @InjectRepository(FinancialSalaryAdvanceDeduction)
     private readonly deductionRepo: Repository<FinancialSalaryAdvanceDeduction>,
+    private readonly cashBalance?: FinancialCashBalanceService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -579,14 +581,15 @@ export class FinancialLedgerService {
         requireText(dto.cashAccountCode, 'Chọn tài khoản thanh toán'),
         dto.method,
       );
-      // Điều chuyển nội bộ: tiền đi ra đúng nguồn chuyển ghi trên phiếu.
-      if (
-        request.type === FinancialRequestType.INTERNAL_TRANSFER &&
-        cashAccountCode !== request.transferFromAccountCode
-      ) {
-        throw new BadRequestException(
-          `Điều chuyển phải chi từ nguồn chuyển ${request.transferFromAccountCode ?? ''} của phiếu`,
-        );
+      // Điều chuyển nội bộ: tiền đi ra đúng nguồn chuyển ghi trên phiếu, không
+      // vượt số dư nguồn theo Tổng hợp thu chi tới ngày chuyển.
+      if (request.type === FinancialRequestType.INTERNAL_TRANSFER) {
+        if (cashAccountCode !== request.transferFromAccountCode) {
+          throw new BadRequestException(
+            `Điều chuyển phải chi từ nguồn chuyển ${request.transferFromAccountCode ?? ''} của phiếu`,
+          );
+        }
+        await this.cashBalance?.assertCovers(cashAccountCode!, dto.amount, dto.date, manager);
       }
       const payment = await manager.getRepository(FinancialPayment).save(
         manager.getRepository(FinancialPayment).create({

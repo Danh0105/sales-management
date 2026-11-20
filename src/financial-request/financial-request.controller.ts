@@ -251,6 +251,12 @@ export class FinancialRequestController {
     return this.ledger.payrollPreview(req.user, employeeId, year, month);
   }
 
+  /** Số dư tài khoản tiền theo Tổng hợp thu chi (form Điều chuyển tiền nội bộ). */
+  @Get('cash-balances')
+  cashBalances(@Req() req: RequestWithUser) {
+    return this.requests.cashBalances(req.user);
+  }
+
   @Get('balances')
   balances(@Req() req: RequestWithUser, @Query() query: BalanceQueryDto) {
     return this.ledger.balances(req.user, query);

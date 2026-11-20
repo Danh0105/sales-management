@@ -29,6 +29,8 @@ import { FinancialWorkflowStep } from './entities/financial-workflow-step.entity
 import { FinancialAccessService } from './financial-access.service';
 import { FinancialConfigService } from './financial-config.service';
 import { FinancialLedgerService } from './financial-ledger.service';
+import { FinancialCashBalanceService } from './financial-cash-balance.service';
+import { CashflowReportService } from '../cashflow-report/cashflow-report.service';
 import { FinancialNotifyService } from './financial-notify.service';
 import { FinancialPdfService } from './financial-pdf.service';
 import { FinancialReportService } from './financial-report.service';
@@ -78,6 +80,10 @@ import { FinancialRequestService } from './financial-request.service';
     FinancialReportService,
     FinancialPdfService,
     FinancialConfigService,
+    // Số dư tài khoản theo Tổng hợp thu chi (phiếu Điều chuyển tiền nội bộ).
+    // Không import CashflowReportModule (module đó import ngược module này).
+    CashflowReportService,
+    FinancialCashBalanceService,
   ],
   // Tổng hợp thu chi xoá phiếu từ sổ: cần trả lại phần đối trừ của tạm ứng.
   exports: [FinancialLedgerService],
