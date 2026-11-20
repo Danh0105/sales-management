@@ -579,6 +579,15 @@ export class FinancialLedgerService {
         requireText(dto.cashAccountCode, 'Chọn tài khoản thanh toán'),
         dto.method,
       );
+      // Điều chuyển nội bộ: tiền đi ra đúng nguồn chuyển ghi trên phiếu.
+      if (
+        request.type === FinancialRequestType.INTERNAL_TRANSFER &&
+        cashAccountCode !== request.transferFromAccountCode
+      ) {
+        throw new BadRequestException(
+          `Điều chuyển phải chi từ nguồn chuyển ${request.transferFromAccountCode ?? ''} của phiếu`,
+        );
+      }
       const payment = await manager.getRepository(FinancialPayment).save(
         manager.getRepository(FinancialPayment).create({
           requestId: id,
@@ -629,9 +638,11 @@ export class FinancialLedgerService {
         [result.request.requesterId],
         result.request,
         'PAID',
-        result.supplier
-          ? `${result.request.code}: đã chuyển ${formatVnd(dto.amount)} đ cho NCC ${result.supplier.name}.`
-          : `${result.request.code}: đã chi ${formatVnd(dto.amount)} đ cho bạn.`,
+        result.request.type === FinancialRequestType.INTERNAL_TRANSFER
+          ? `${result.request.code}: đã điều chuyển ${formatVnd(dto.amount)} đ từ ${result.request.transferFromAccountCode} sang ${result.request.transferToAccountCode}.`
+          : result.supplier
+            ? `${result.request.code}: đã chuyển ${formatVnd(dto.amount)} đ cho NCC ${result.supplier.name}.`
+            : `${result.request.code}: đã chi ${formatVnd(dto.amount)} đ cho bạn.`,
         ctx.userId,
       );
     }

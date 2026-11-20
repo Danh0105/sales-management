@@ -20,6 +20,12 @@ export enum FinancialRequestType {
   SETTLEMENT = 'SETTLEMENT',
   /** Giấy đề nghị thanh toán chi phí / công tác phí. */
   EXPENSE_PAYMENT = 'EXPENSE_PAYMENT',
+  /**
+   * Điều chuyển tiền nội bộ (20/11/2026): từ nguồn (tài khoản 111/112) này sang
+   * nguồn khác. Không phải chi phí — sổ quỹ ghi chi nguồn chuyển + thu nguồn
+   * nhận, đánh dấu điều chuyển nội bộ.
+   */
+  INTERNAL_TRANSFER = 'INTERNAL_TRANSFER',
 }
 
 export const REQUEST_TYPE_VALUES = Object.values(FinancialRequestType);
@@ -29,6 +35,7 @@ export const REQUEST_TYPE_LABELS: Record<FinancialRequestType, string> = {
   [FinancialRequestType.SALARY_ADVANCE]: 'Tạm ứng lương',
   [FinancialRequestType.SETTLEMENT]: 'Hoàn ứng',
   [FinancialRequestType.EXPENSE_PAYMENT]: 'Thanh toán chi phí',
+  [FinancialRequestType.INTERNAL_TRANSFER]: 'Điều chuyển tiền nội bộ',
 };
 
 /** Tiêu đề in trên phiếu. */
@@ -38,6 +45,7 @@ export const REQUEST_TYPE_TITLES: Record<FinancialRequestType, string> = {
   [FinancialRequestType.SETTLEMENT]: 'GIẤY ĐỀ NGHỊ HOÀN ỨNG',
   [FinancialRequestType.EXPENSE_PAYMENT]:
     'GIẤY ĐỀ NGHỊ THANH TOÁN CHI PHÍ / CÔNG TÁC PHÍ',
+  [FinancialRequestType.INTERNAL_TRANSFER]: 'GIẤY ĐỀ NGHỊ ĐIỀU CHUYỂN TIỀN NỘI BỘ',
 };
 
 /** Tiền tố mã chứng từ: TU-2026-00001. */
@@ -46,7 +54,20 @@ export const REQUEST_CODE_PREFIX: Record<FinancialRequestType, string> = {
   [FinancialRequestType.SALARY_ADVANCE]: 'UL',
   [FinancialRequestType.SETTLEMENT]: 'HU',
   [FinancialRequestType.EXPENSE_PAYMENT]: 'TT',
+  [FinancialRequestType.INTERNAL_TRANSFER]: 'DC',
 };
+
+/**
+ * Ai được lập phiếu Điều chuyển tiền nội bộ (20/11/2026, user chọn): Kế toán,
+ * Thủ quỹ, Kế toán trưởng, Giám đốc — theo role hệ thống hoặc vai trò tài chính.
+ */
+export const INTERNAL_TRANSFER_CREATOR_SYSTEM_ROLES = [
+  'accountant',
+  'ketoan_congno',
+  'thuquy',
+  'ketoan_truong',
+  'director',
+];
 
 export enum ApprovalStatus {
   DRAFT = 'DRAFT',

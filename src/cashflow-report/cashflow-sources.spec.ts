@@ -506,3 +506,38 @@ describe('mapSuggestEvents — nhiều nguồn chi (19/11/2026)', () => {
     ]);
   });
 });
+
+describe('mapFinancialMovements — điều chuyển tiền nội bộ (20/11/2026)', () => {
+  const row = {
+    direction: 'PAYMENT' as const,
+    movement_id: 7,
+    request_id: 3,
+    request_code: 'DC-2026-00001',
+    request_type: 'INTERNAL_TRANSFER',
+    title: 'Nộp tiền mặt vào TK',
+    posting_date: '2026-11-20',
+    cash_account: '1111',
+    amount: '5000000.00',
+    transaction_ref: 'UNC01',
+    requester_id: 9,
+    requester_code: null,
+    requester_name: 'Thủ quỹ',
+    supplier_name: null,
+    transfer_to: '1121',
+  };
+
+  it('chi nguồn chuyển + thu nguồn nhận, đánh dấu điều chuyển nội bộ', () => {
+    const { lines, issues } = mapFinancialMovements([row]);
+    expect(issues).toEqual([]);
+    expect(lines.map((l) => [l.key, l.accountCode, l.payment, l.receipt, l.isInternalTransfer])).toEqual([
+      ['FINANCIAL_REQUEST:PAYMENT:7:OUT', '1111', toCents('5000000'), 0n, true],
+      ['FINANCIAL_REQUEST:PAYMENT:7:IN', '1121', 0n, toCents('5000000'), true],
+    ]);
+  });
+
+  it('thiếu nguồn nhận → báo lỗi, không ghi sổ', () => {
+    const { lines, issues } = mapFinancialMovements([{ ...row, transfer_to: null }]);
+    expect(lines).toEqual([]);
+    expect(issues[0].kind).toBe('MISSING_ACCOUNT');
+  });
+});

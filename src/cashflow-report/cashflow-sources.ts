@@ -103,6 +103,8 @@ export interface FinancialMovementRow {
   requester_name: string;
   /** Lần chi chuyển thẳng cho nhà cung cấp; NULL = chi cho người đề nghị. */
   supplier_name?: string | null;
+  /** Điều chuyển tiền nội bộ: nguồn nhận. */
+  transfer_to?: string | null;
 }
 
 const ROW_CONTEXT_SELECT = `
@@ -226,7 +228,8 @@ SELECT 'PAYMENT' AS direction,
   r.requester_id,
   r.requester_code,
   r.requester_name,
-  sp.name AS supplier_name
+  sp.name AS supplier_name,
+  r.transfer_to_account_code AS transfer_to
 FROM financial_payments p
 JOIN financial_requests r ON r.id = p.request_id
 LEFT JOIN financial_request_suppliers sp ON sp.id = p.supplier_id
@@ -245,7 +248,8 @@ SELECT 'REFUND' AS direction,
   r.requester_id,
   r.requester_code,
   r.requester_name,
-  NULL AS supplier_name
+  NULL AS supplier_name,
+  NULL AS transfer_to
 FROM financial_refunds f
 JOIN financial_requests r ON r.id = f.request_id
 WHERE f.status = 'RECORDED'
@@ -780,6 +784,34 @@ export function mapFinancialMovements(
           `${isReceipt ? 'Phiếu hoàn trả' : 'Phiếu chi'} chưa có ngày hạch toán`,
           base,
         ),
+      );
+      continue;
+    }
+
+    // Điều chuyển tiền nội bộ (20/11/2026): chi nguồn chuyển + thu nguồn nhận,
+    // đánh dấu điều chuyển nội bộ (không tính vào tổng thu/chi).
+    if (row.request_type === 'INTERNAL_TRANSFER' && !isReceipt) {
+      if (!row.transfer_to) {
+        issues.push(issue('MISSING_ACCOUNT', 'Phiếu điều chuyển chưa có nguồn nhận', base));
+        continue;
+      }
+      const transferDescription = clean(
+        `Điều chuyển nội bộ ${row.request_code}: ${row.cash_account} → ${row.transfer_to} — ${row.title}`,
+      );
+      const common = {
+        postingDate: row.posting_date,
+        documentDate: row.posting_date,
+        documentNo: row.request_code,
+        invoiceNo: row.transaction_ref,
+        description: transferDescription,
+        partnerCode: null,
+        partnerName: null,
+        isInternalTransfer: true,
+        source,
+      };
+      lines.push(
+        { ...common, key: `${key}:OUT`, accountCode: row.cash_account, receipt: 0n, payment: amount },
+        { ...common, key: `${key}:IN`, accountCode: row.transfer_to, receipt: amount, payment: 0n },
       );
       continue;
     }

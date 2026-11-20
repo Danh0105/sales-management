@@ -17,6 +17,7 @@ import {
   FinanceRole,
   FinancialRequestType,
   IMPLICIT_FINANCE_ROLES,
+  INTERNAL_TRANSFER_CREATOR_SYSTEM_ROLES,
   PAYROLL_DEDUCTION_SYSTEM_ROLES,
   SelfApprovalMode,
   StepStatus,
@@ -154,6 +155,21 @@ export class FinancialAccessService {
     return ctx.scopes.some((scope) => roles.includes(scope.role));
   }
 
+  /** Lập phiếu Điều chuyển tiền nội bộ: Kế toán, Thủ quỹ, KTT, Giám đốc. */
+  canCreateTransfer(ctx: FinanceContext): boolean {
+    return (
+      ctx.isAdmin ||
+      ctx.systemRoles.some((role) =>
+        INTERNAL_TRANSFER_CREATOR_SYSTEM_ROLES.includes(role),
+      ) ||
+      this.hasAnyRole(ctx, [
+        FinanceRole.ACCOUNTANT,
+        FinanceRole.CASHIER,
+        FinanceRole.DIRECTOR,
+      ])
+    );
+  }
+
   assertAdmin(ctx: FinanceContext) {
     if (!ctx.isAdmin) {
       throw new ForbiddenException(
@@ -225,7 +241,13 @@ export class FinancialAccessService {
 
   /** Người ghi nhận chi/thu tiền: kế toán, thủ quỹ hoặc quản trị — không phải chính người nhận. */
   canRecordMoney(ctx: FinanceContext, request: ScopedRequest): boolean {
-    if (request.requesterId === ctx.userId) return false;
+    // Điều chuyển nội bộ không có người nhận tiền — người lập vẫn thực hiện được.
+    if (
+      request.requesterId === ctx.userId &&
+      request.type !== FinancialRequestType.INTERNAL_TRANSFER
+    ) {
+      return false;
+    }
     return (
       ctx.isAdmin ||
       this.hasRole(

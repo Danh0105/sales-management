@@ -277,6 +277,21 @@ class FinancialRequestBaseDto {
   @MaxLength(2000)
   paymentNote?: string | null;
 
+  // ---- Điều chuyển tiền nội bộ ----
+  /** Nguồn chuyển: số hiệu tài khoản 111/112 (vd "1111"). */
+  @IsOptional()
+  @Transform(emptyToNull)
+  @IsString()
+  @MaxLength(20)
+  transferFromAccountCode?: string | null;
+
+  /** Nguồn nhận: số hiệu tài khoản 111/112 (vd "1121"). */
+  @IsOptional()
+  @Transform(emptyToNull)
+  @IsString()
+  @MaxLength(20)
+  transferToAccountCode?: string | null;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(500)

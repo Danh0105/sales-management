@@ -211,6 +211,10 @@ export class FinancialPdfService {
         ]);
       }
     }
+    if (detail.type === FinancialRequestType.INTERNAL_TRANSFER) {
+      info.push(['Nguồn chuyển', detail.transferFromAccountCode ?? '']);
+      info.push(['Nguồn nhận', detail.transferToAccountCode ?? '']);
+    }
     if (detail.type === FinancialRequestType.EXPENSE_PAYMENT) {
       if (detail.location) info.push(['Địa điểm công tác', detail.location]);
       if (detail.tripStartDate || detail.tripEndDate) {
@@ -222,7 +226,8 @@ export class FinancialPdfService {
     }
     // Nhiều người nhận (NCC) → thông tin chuyển khoản in thành bảng riêng.
     const multiRecipients = detail.suppliers.length > 0;
-    info.push([
+    const isTransfer = detail.type === FinancialRequestType.INTERNAL_TRANSFER;
+    if (!isTransfer) info.push([
       'Người thụ hưởng',
       multiRecipients
         ? `${detail.recipients.length} người nhận — xem bảng Thông tin chuyển khoản`
@@ -234,7 +239,7 @@ export class FinancialPdfService {
         `${detail.paymentAccountCode}${detail.paymentAccountName ? ` — ${detail.paymentAccountName}` : ''}`,
       ]);
     }
-    if (!multiRecipients && (detail.bankName || detail.bankAccountNumber)) {
+    if (!isTransfer && !multiRecipients && (detail.bankName || detail.bankAccountNumber)) {
       info.push(['Ngân hàng', detail.bankName ?? '']);
       info.push([
         'Số tài khoản',

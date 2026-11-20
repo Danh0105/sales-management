@@ -27,7 +27,7 @@ import { FinancialWorkflowStep } from './financial-workflow-step.entity';
 @Index('UQ_financial_approval_workflows_active_scope', { synchronize: false })
 @Check(
   'CHK_financial_approval_workflows_type',
-  `"request_type" IS NULL OR "request_type" IN ('ADVANCE','SALARY_ADVANCE','SETTLEMENT','EXPENSE_PAYMENT')`,
+  `"request_type" IS NULL OR "request_type" IN ('ADVANCE','SALARY_ADVANCE','SETTLEMENT','EXPENSE_PAYMENT','INTERNAL_TRANSFER')`,
 )
 @Check(
   'CHK_financial_approval_workflows_self',

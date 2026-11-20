@@ -51,7 +51,7 @@ const money = (name: string) =>
 @Index('IDX_financial_requests_type', ['type'])
 @Check(
   'CHK_financial_requests_type',
-  `"type" IN ('ADVANCE','SALARY_ADVANCE','SETTLEMENT','EXPENSE_PAYMENT')`,
+  `"type" IN ('ADVANCE','SALARY_ADVANCE','SETTLEMENT','EXPENSE_PAYMENT','INTERNAL_TRANSFER')`,
 )
 @Check(
   'CHK_financial_requests_approval_status',
@@ -275,6 +275,24 @@ export class FinancialRequest {
 
   @Column({ name: 'payment_note', type: 'text', nullable: true })
   paymentNote!: string | null;
+
+  /** Điều chuyển tiền nội bộ: nguồn chuyển (tài khoản 111/112). */
+  @Column({
+    name: 'transfer_from_account_code',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  transferFromAccountCode!: string | null;
+
+  /** Điều chuyển tiền nội bộ: nguồn nhận (tài khoản 111/112). */
+  @Column({
+    name: 'transfer_to_account_code',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  transferToAccountCode!: string | null;
 
   // ---- Số tiền (backend tính) ----
   @Column({ type: 'varchar', length: 3, default: 'VND' })

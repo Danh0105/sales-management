@@ -122,6 +122,10 @@ const TYPE_FIELDS: Record<FinancialRequestType, string[]> = {
     'tripStartDate',
     'tripEndDate',
   ],
+  [FinancialRequestType.INTERNAL_TRANSFER]: [
+    'transferFromAccountCode',
+    'transferToAccountCode',
+  ],
 };
 const TYPE_SPECIFIC = [...new Set(Object.values(TYPE_FIELDS).flat())];
 const COMMON_FIELDS = [
@@ -270,6 +274,7 @@ export class FinancialRequestService {
           ]),
         canManagePayments:
           ctx.isAdmin || this.access.hasAnyRole(ctx, moneyRoles),
+        canCreateTransfer: this.access.canCreateTransfer(ctx),
         canViewReports:
           ctx.isAdmin ||
           this.access.hasAnyRole(ctx, [
@@ -813,6 +818,8 @@ export class FinancialRequestService {
       paymentAccountCode: request.paymentAccountCode,
       paymentAccountName: paymentAccount?.name ?? null,
       paymentNote: request.paymentNote,
+      transferFromAccountCode: request.transferFromAccountCode,
+      transferToAccountCode: request.transferToAccountCode,
       suppliers: suppliers.map((sp) => ({
         id: sp.id,
         lineNo: sp.lineNo,
@@ -1174,6 +1181,50 @@ export class FinancialRequestService {
   }
 
   /** Gán các trường header được phép theo loại chứng từ. */
+  /** Lỗi nguồn chuyển / nguồn nhận của phiếu Điều chuyển tiền nội bộ. */
+  private async transferAccountErrors(
+    manager: EntityManager,
+    request: FinancialRequest,
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    const from = request.transferFromAccountCode;
+    const to = request.transferToAccountCode;
+    if (!from) errors.push('Chọn nguồn chuyển');
+    if (!to) errors.push('Chọn nguồn nhận');
+    if (from && to && from === to) {
+      errors.push('Nguồn chuyển và nguồn nhận phải khác nhau');
+    }
+    const codes = [from, to].filter((code): code is string => !!code);
+    if (codes.length) {
+      const found = await manager
+        .getRepository(CashAccount)
+        .find({ where: { code: In(codes) } });
+      for (const code of codes) {
+        const account = found.find((a) => a.code === code);
+        if (!account || !account.isActive) {
+          errors.push(`Tài khoản tiền "${code}" không hợp lệ hoặc đã ngừng dùng`);
+        }
+      }
+    }
+    return [...new Set(errors)];
+  }
+
+  /**
+   * Kiểm nguồn của phiếu điều chuyển khi lưu: tài khoản phải có thật, hai nguồn
+   * khác nhau. `required` = bắt buộc đủ cả hai (lúc gửi duyệt); bản nháp được
+   * để trống.
+   */
+  private async assertTransferAccounts(
+    manager: EntityManager,
+    request: FinancialRequest,
+    required: boolean,
+  ) {
+    const errors = (await this.transferAccountErrors(manager, request)).filter(
+      (error) => required || !error.startsWith('Chọn nguồn'),
+    );
+    if (errors.length) throw new BadRequestException(errors.join('; '));
+  }
+
   private applyHeader(
     request: FinancialRequest,
     dto: Partial<CreateFinancialRequestDto>,
@@ -1201,6 +1252,29 @@ export class FinancialRequestService {
     dtoItems: FinancialRequestItemDto[] | undefined,
     requestedAmount: number | undefined,
   ): Promise<ComputedItem[] | undefined> {
+    if (request.type === FinancialRequestType.INTERNAL_TRANSFER) {
+      if (requestedAmount === undefined) return undefined;
+      const from = request.transferFromAccountCode ?? '?';
+      const to = request.transferToAccountCode ?? '?';
+      return [
+        {
+          description: `Điều chuyển tiền nội bộ từ ${from} sang ${to}`,
+          categoryId: null,
+          categoryName: null,
+          unit: null,
+          quantity: '1',
+          unitPrice: String(requestedAmount),
+          amount: lineAmount('1', String(requestedAmount)),
+          incurredDate: null,
+          invoiceNumber: null,
+          invoiceType: null,
+          supplierName: null,
+          supplierIndex: null,
+          note: null,
+          overLimit: false,
+        },
+      ];
+    }
     if (request.type === FinancialRequestType.SALARY_ADVANCE) {
       if (requestedAmount === undefined) return undefined;
       const period =
@@ -1508,6 +1582,14 @@ export class FinancialRequestService {
 
   async create(user: AuthUser, dto: CreateFinancialRequestDto) {
     const ctx = await this.access.context(user);
+    if (
+      dto.type === FinancialRequestType.INTERNAL_TRANSFER &&
+      !this.access.canCreateTransfer(ctx)
+    ) {
+      throw new ForbiddenException(
+        'Chỉ Kế toán, Thủ quỹ, Kế toán trưởng, Giám đốc được lập phiếu Điều chuyển tiền nội bộ',
+      );
+    }
     const id = await this.dataSource.transaction(async (manager) => {
       await this.assertCompany(manager, dto.companyId);
       const employee = await this.requesterSnapshot(manager, ctx.userId);
@@ -1540,8 +1622,15 @@ export class FinancialRequestService {
         version: 1,
       });
       this.applyHeader(request, dto);
+      if (request.type === FinancialRequestType.INTERNAL_TRANSFER) {
+        await this.assertTransferAccounts(manager, request, false);
+      }
       if (!request.payeeName) request.payeeName = request.requesterName;
-      if (!dto.bankAccountNumber && employee.bankAccountNumber) {
+      if (
+        request.type !== FinancialRequestType.INTERNAL_TRANSFER &&
+        !dto.bankAccountNumber &&
+        employee.bankAccountNumber
+      ) {
         request.bankAccountNumber = employee.bankAccountNumber;
         request.bankName = request.bankName ?? employee.bankName ?? null;
         request.bankAccountHolder =
@@ -1651,6 +1740,16 @@ export class FinancialRequestService {
       ) {
         requestedAmount = request.totalAmount || undefined; // cập nhật lại diễn giải kỳ lương
       }
+      if (request.type === FinancialRequestType.INTERNAL_TRANSFER) {
+        await this.assertTransferAccounts(manager, request, false);
+        if (
+          requestedAmount === undefined &&
+          (dto.transferFromAccountCode !== undefined ||
+            dto.transferToAccountCode !== undefined)
+        ) {
+          requestedAmount = request.totalAmount || undefined; // cập nhật diễn giải nguồn
+        }
+      }
       const suppliers =
         dto.suppliers !== undefined
           ? await this.saveSuppliers(manager, request, dto.suppliers)
@@ -1758,9 +1857,12 @@ export class FinancialRequestService {
       salaryYear: source.salaryYear ?? undefined,
       salaryMonth: source.salaryMonth ?? undefined,
       requestedAmount:
-        source.type === FinancialRequestType.SALARY_ADVANCE
+        source.type === FinancialRequestType.SALARY_ADVANCE ||
+        source.type === FinancialRequestType.INTERNAL_TRANSFER
           ? source.totalAmount || undefined
           : undefined,
+      transferFromAccountCode: source.transferFromAccountCode ?? undefined,
+      transferToAccountCode: source.transferToAccountCode ?? undefined,
       deductionPeriods: source.deductionPeriods ?? undefined,
       items: items.map((i) => ({
         description: i.description,
@@ -1918,6 +2020,9 @@ export class FinancialRequestService {
     }
 
     switch (request.type) {
+      case FinancialRequestType.INTERNAL_TRANSFER:
+        errors.push(...(await this.transferAccountErrors(manager, request)));
+        break;
       case FinancialRequestType.ADVANCE:
         if (
           request.settlementDueDate &&

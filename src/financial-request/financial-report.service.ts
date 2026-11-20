@@ -96,17 +96,22 @@ export class FinancialReportService {
   async summary(user: AuthUser, query: FinancialReportQueryDto) {
     const ctx = await this.access.context(user);
     const today = vnToday();
+    // Điều chuyển tiền nội bộ không phải chi phí/tạm ứng — không vào dashboard.
+    const scoped = () =>
+      this.scoped(ctx, query).andWhere('r.type <> :internalTransfer', {
+        internalTransfer: FinancialRequestType.INTERNAL_TRANSFER,
+      });
 
     // Phiếu phát sinh trong kỳ (theo ngày đề nghị).
     const inPeriod = await this.inPeriod(
-      this.scoped(ctx, query),
+      scoped(),
       'r.request_date',
       query,
     )
       .leftJoinAndSelect('r.company', 'company')
       .getMany();
     // Số dư hiện tại: mọi phiếu đã duyệt trong phạm vi (không giới hạn kỳ).
-    const approvedAll = await this.scoped(ctx, query)
+    const approvedAll = await scoped()
       .andWhere('r.approval_status = :approved', {
         approved: ApprovalStatus.APPROVED,
       })
@@ -120,7 +125,7 @@ export class FinancialReportService {
     );
 
     const visibleIds = (
-      await this.scoped(ctx, query)
+      await scoped()
         .select('r.id', 'id')
         .getRawMany<{ id: number }>()
     ).map((row) => Number(row.id));
@@ -161,7 +166,7 @@ export class FinancialReportService {
           r.approvedAt.toISOString().slice(0, 10) <= query.dateTo),
     );
 
-    const pendingCount = await this.scoped(ctx, query)
+    const pendingCount = await scoped()
       .andWhere('r.approval_status = :pending', {
         pending: ApprovalStatus.PENDING,
       })
